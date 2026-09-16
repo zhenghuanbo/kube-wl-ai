@@ -137,12 +137,20 @@ ROLE_DEFINITIONS: dict[RoleCode, tuple[str, str]] = {
 # the rows: a plain user ends up seeing only themselves and the groups they
 # belong to, which is what makes "my lab's members" work without exposing the
 # rest of the institution.
+# NOTE: `_codes` splits this literal on whitespace and does **not** strip
+# comments — never put a `#` line inside it.
+#
+# `workspace:read` is granted to every role because a user must be able to see
+# the one workspace they belong to; the data-scope layer narrows the result to
+# exactly that. `quota:read` joins it for normal users so they can see their own
+# consumption.
 _OBSERVER = frozenset(
     _codes(
         """
         instance:read application:read task:read image:read storage:read
         usage:read_self monitor:read_self
         user:read group:read
+        workspace:read
         """
     )
 )
@@ -159,6 +167,7 @@ _USER = _OBSERVER | frozenset(
         image:create image:share image:delete
         storage:create storage:resize storage:delete
         resource_group:read resource_spec:read runtime_limit:read
+        quota:read
         """
     )
 )

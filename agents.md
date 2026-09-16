@@ -415,11 +415,46 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
   组管理员建用户 / 建组 / 自行提权均被拒；所有者撤销自己的 `global_admin` 被拒。
 - 刷新令牌链路：`wl_refresh` 为 httpOnly、path `/api/v1/auth`；刷新后 `/auth/me` 正常；令牌仅存哈希。
 
-### ⏳ Phase 2–8（待开始）
+### ✅ Phase 2 — 工作空间、资源与配额（后端已完成，前端待做）
+
+| 交付 | 说明 |
+| --- | --- |
+| 数据模型 | `workspaces` / `workspace_members` / `workspace_resource_grants` / `resource_groups` / `resource_specs` / `resource_group_specs` / `runtime_limits` / `resource_group_limits` / `compute_nodes` / `gpu_devices` / `quotas`，迁移 `4392f95350e1` |
+| 租户边界 | 工作空间 ≡ K8s 命名空间 `wl-{group}-{name}`；命名冲突时截断至 63 字符并附 8 位哈希 |
+| K8s 下发 | `ensure_namespace` / `apply_resource_quota` / `apply_limit_range` / `apply_network_policy`，幂等，可由 `/reconcile` 重放 |
+| 配额 | 由已授权资源组的 `ResourceGroupLimit` 汇总；GPU 按型号取各池**最大**规格（规格是互斥选项，求和会虚增额度） |
+| 一人一空间 | `workspace_members.user_id` **单列唯一**，数据库层兜底；迁移需显式 `moveFromExisting` |
+| 资源可见性 | 目录（资源组/规格/时长/节点）对全体登录用户可读，**授权**才是边界 |
+| API | `/workspaces`（含 `/mine`、`/reconcile`、成员、资源授权）、`/resource-groups`、`/resource-specs`、`/runtime-limits`、`/nodes`、`/quotas` |
+| 测试 | 新增 61 项（36 项 API 验收 + 25 项命名/数量解析单测），全量 **183 项通过** |
+
+**Phase 2 验收结果**：
+- 质量门禁：`ruff check` + `ruff format --check` + `mypy --strict`（70 文件）+ `pytest`（183 项）全绿。
+- 下发实测（`FakeK8sGateway`）：建空间后命名空间标签含 `wl-managed=true` / `wl-group` / `wl-workspace`；
+  ResourceQuota 为 `requests.cpu=8`、`requests.memory=16384Mi`、`count/deployments.apps=2`；
+  LimitRange 默认 4 核；NetworkPolicy 取所授权池中**最严格**的网络档位。
+- 隔离实测：跨租户读取工作空间返回 404；组管理员列表仅含本组空间；普通用户仅见自己的空间；
+  组管理员不能建资源组、不能删工作空间、不能改配额（均 403）。
+- 失败可见性：集群下发失败时工作空间以 `error` 状态**持久化**（刻意在请求内提交），
+  可被列表看到并经 `/reconcile` 重试，而不是随事务回滚消失。
+- 无授权即封禁：未授权任何资源组的工作空间，其 ResourceQuota 为 `pods: 0`——
+  缺失配额会被 K8s 解读为「无限」，因此必须显式封零。
+
+**本轮修复的既有缺陷**：
+1. `pydantic` 的 `to_camel` 把 `k8s_namespace` 转成 `k8SNamespace`。已改为自定义生成器，
+   线格式统一为 `k8sNamespace`（仅影响本期新增的 `k8s_*` 字段，Phase 1 契约不变）。
+2. `ensure_object_access` 未纳入工作空间成员维度：普通用户能列出自己的空间却按 id 取不到（404）。
+   已为 `DataScope` 增加 `workspace_ids`（由 `User.workspace_memberships` 预加载），
+   对象级与列表级规则自此一致。
+3. `K8sError` 继承 `RuntimeError`，集群故障对外表现为不透明的 500。已改为继承 `KubernetesError`，
+   返回 502 `kubernetes_error` 并携带操作名。
+4. 默认列表未过滤 `is_active`：已删除的空间仍出现在列表中。现在默认只列 `is_active=true`。
+
+### ⏳ Phase 2 前端 / Phase 3–8（待开始）
 
 | 阶段 | 内容 | 周期 |
 | --- | --- | --- |
-| Phase 2 | 工作空间、资源与配额 | 3 周 |
+| Phase 2 | 工作空间与资源管理页（后端已完成） | — |
 | Phase 3 | 容器实例端到端（SSH / 终端 / IDE） | 3 周 |
 | Phase 4 | 应用程序与自定义任务 | 2 周 |
 | Phase 5 | 镜像与存储 | 2 周 |
@@ -465,6 +500,17 @@ Vuex `namespace: true` 拼写错误、`Admin/User.vue` 为 0 字节、
   **新增模型时：任何渲染时会读到的关系都要显式指定加载策略，任何 `flush()` 之后会读的字段都要确认已加载。**
 - **失败的请求不会回滚审计**：刷新令牌重放要吊销整个令牌族，若与导致 401 的事务共用 session，
   回滚会把吊销一起撤销，等于没吊销。`auth/service._revoke_family()` 因此在**独立事务**中提交。
+- **pydantic 的 `to_camel` 会拆数字边界**：`k8s_namespace` 会变成 `k8SNamespace`，而不是前端会写的
+  `k8sNamespace`。`app/schemas/base.py` 因此自带一个生成器（首段整体保留）。
+  **新增含数字的字段名时，先确认它在 `openapi/schema.json` 里的实际拼写。**
+- **缺省的 K8s 配额等于「无限」**：`ResourceQuota` 里没有列出的资源不受约束。
+  未授权任何资源组的工作空间必须显式下发 `pods: "0"`，否则它可以在共享集群上无限调度。
+- **集群下发失败必须显式落库**：处理函数抛异常时请求事务会整体回滚，
+  于是「失败的工作空间」会被撤销，而集群里半成品命名空间还在。
+  `services/workspaces._persist_failure()` 因此在抛出前 `commit()`——这是该服务唯一在请求中途提交的地方，
+  且是有意为之。
+- **异常类型决定对外状态码**：`K8sError` 曾继承 `RuntimeError`，导致集群故障对外是 500 traceback；
+  现继承 `KubernetesError`（502 `kubernetes_error`）。**新增外部依赖的异常时，让它成为 `AppError` 的子类。**
 - **审计动作名是稳定接口**：`action` 表示*尝试的操作*，`status` 表示结果。
   服务层成功路径写 `user:create` 这类域名动作，中间件兜底路径经 `canonical_resource()` 归一化，
   所以同一种操作无论成败都只有一个 action 字符串。不要把结果编进动作名（`*_failed` 已废弃）。
@@ -503,7 +549,12 @@ Vuex `namespace: true` 拼写错误、`Admin/User.vue` 为 0 字节、
 | 审计写入 | `backend/app/core/audit.py`、`backend/app/middleware/audit.py` |
 | 运维命令（首个账户） | `backend/app/cli.py` |
 | 业务服务层 | `backend/app/services/` |
-| K8s 编排（Phase 2+） | `backend/app/k8s/` |
+| **工作空间生命周期与集群下发** | `backend/app/services/workspaces.py` |
+| 资源组 / 规格 / 节点 / 配额 | `backend/app/services/resources.py` |
+| **K8s 抽象与假实现** | `backend/app/k8s/gateway.py`（`FakeK8sGateway` 供测试） |
+| K8s 真实客户端 | `backend/app/k8s/client.py`（唯一 import `kubernetes` 的模块） |
+| 命名空间 / 标签命名规则 | `backend/app/k8s/naming.py` |
+| 工作空间与资源 API | `backend/app/api/v1/workspaces.py`、`backend/app/api/v1/resources.py` |
 | Celery | `backend/app/workers/celery_app.py` |
 | 前端主题 | `frontend/src/plugins/vuetify.ts` |
 | 设计令牌 | `frontend/src/styles/tokens.scss` |

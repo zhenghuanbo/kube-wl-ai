@@ -28,8 +28,16 @@ from app.core.logging import get_logger
 from app.models.enums import RoleCode, RoleScope
 from app.models.group import Group, UserGroupLink
 from app.models.rbac import UserRole
+from app.models.resource import (
+    ComputeNode,
+    GpuDevice,
+    ResourceGroup,
+    ResourceSpec,
+    RuntimeLimit,
+)
 from app.models.token import ApiToken, RefreshToken
 from app.models.user import User
+from app.models.workspace import Workspace, WorkspaceMember, WorkspaceResourceGrant
 
 logger = get_logger(__name__)
 
@@ -129,6 +137,10 @@ class DataScope:
     user_id: int
     all_access: bool = False
     group_ids: frozenset[int] = frozenset()
+    #: Workspaces the user is a *member* of. Separate from ``group_ids``: being
+    #: in a lab does not let you see your colleagues' workspaces, but being in a
+    #: workspace does let you see everything inside it.
+    workspace_ids: frozenset[int] = frozenset()
 
     @property
     def kind(self) -> str:
@@ -142,6 +154,7 @@ class DataScope:
             "kind": self.kind,
             "all_access": self.all_access,
             "group_ids": sorted(self.group_ids),
+            "workspace_ids": sorted(self.workspace_ids),
         }
 
 
@@ -167,7 +180,12 @@ def resolve_scope(user: User) -> DataScope:
         ):
             admin_groups.add(link.group_id)
 
-    return DataScope(user_id=user.id, group_ids=frozenset(admin_groups))
+    member_workspaces = frozenset(link.workspace_id for link in user.workspace_memberships)
+    return DataScope(
+        user_id=user.id,
+        group_ids=frozenset(admin_groups),
+        workspace_ids=member_workspaces,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +207,14 @@ class ScopeRule:
     via_user: str | None = None
     #: Column holding a group id the caller is a *member* of (not just admin of).
     member_of: str | None = None
+    #: Column holding a workspace id the caller is a *member* of. Applies at
+    #: every scope, which is what lets a plain user see their own workspace's
+    #: objects without being an administrator of anything.
+    member_workspace: str | None = None
+    #: Catalogue data with no per-tenant rows (resource groups, specs, nodes).
+    #: Readable by any authenticated user; the *grant* decides what they may
+    #: actually schedule on, and that is an object-level check.
+    public: bool = False
 
 
 #: Explicit rules. Models added in later phases must be registered here; the
@@ -202,6 +228,21 @@ SCOPE_RULES: dict[type[Any], ScopeRule] = {
     UserRole: ScopeRule(owner="user_id", group="group_id"),
     RefreshToken: ScopeRule(owner="user_id"),
     ApiToken: ScopeRule(owner="user_id"),
+    # --- Phase 2 ---------------------------------------------------------
+    # A user sees the workspace they belong to; a group admin sees every
+    # workspace of the groups they administer.
+    Workspace: ScopeRule(group="group_id", member_workspace="id"),
+    WorkspaceMember: ScopeRule(
+        owner="user_id", workspace="workspace_id", member_workspace="workspace_id"
+    ),
+    WorkspaceResourceGrant: ScopeRule(workspace="workspace_id", member_workspace="workspace_id"),
+    # Catalogue and infrastructure rows: readable by anyone authenticated, and
+    # the endpoints that expose them are gated by `require()`.
+    ResourceGroup: ScopeRule(public=True),
+    ResourceSpec: ScopeRule(public=True),
+    RuntimeLimit: ScopeRule(public=True),
+    ComputeNode: ScopeRule(public=True),
+    GpuDevice: ScopeRule(public=True),
 }
 
 #: Column names consulted when a model has no explicit rule.
@@ -211,9 +252,9 @@ _INFERRED_WORKSPACE_COLUMNS = ("workspace_id",)
 
 _warned_models: set[str] = set()
 
-#: The workspace model is registered by Phase 2. Keeping it behind a hook avoids
-#: a hard import from the policy layer into models that may not exist yet.
-_workspace_model: Any | None = None
+#: Model used to resolve "which workspaces belong to these groups". Registered
+#: here at import time; the hook remains so tests and later phases can swap it.
+_workspace_model: Any | None = Workspace
 
 
 def register_workspace_model(model: type[Any]) -> None:
@@ -267,6 +308,9 @@ def scope_filter(stmt: Select[Any], model: type[Any], user: User) -> Select[Any]
             logger.warning("scope_filter_no_rule", model=model.__name__)
         return stmt.where(false())
 
+    if rule.public:
+        return stmt
+
     clauses: list[Any] = []
 
     if rule.owner:
@@ -299,6 +343,15 @@ def scope_filter(stmt: Select[Any], model: type[Any], user: User) -> Select[Any]
         clauses.append(
             getattr(model, rule.member_of).in_(
                 select(UserGroupLink.group_id).where(UserGroupLink.user_id == scope.user_id)
+            )
+        )
+
+    if rule.member_workspace:
+        # Unconditional, like `member_of`: belonging to a workspace is always
+        # enough to see what lives in it.
+        clauses.append(
+            getattr(model, rule.member_workspace).in_(
+                select(WorkspaceMember.workspace_id).where(WorkspaceMember.user_id == scope.user_id)
             )
         )
 
@@ -344,6 +397,13 @@ def ensure_object_access(
             allowed = True
         if not allowed and rule.via_user and getattr(obj, rule.via_user, None) == scope.user_id:
             allowed = True
+        # Membership of the workspace the row lives in, at any administrative
+        # scope — the same rule `scope_filter` applies to lists, so a row that
+        # appears in a listing is always fetchable by id.
+        if not allowed and rule.member_workspace:
+            row_workspace = getattr(obj, rule.member_workspace, None)
+            if row_workspace is not None and row_workspace in scope.workspace_ids:
+                allowed = True
 
     if not allowed and group_id is not None and group_id in scope.group_ids:
         allowed = True

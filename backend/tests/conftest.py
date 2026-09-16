@@ -11,7 +11,7 @@ touch the developer's database.
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Generator
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -26,6 +26,7 @@ from app.auth.permissions import sync_rbac
 from app.core.config import Settings, get_settings
 from app.db.base import Base
 from app.db.session import dispose_engine, get_session, init_engine
+from app.k8s import FakeK8sGateway
 from app.main import create_app
 from tests import factories
 
@@ -180,3 +181,18 @@ def reload_from_db(session_factory: async_sessionmaker[AsyncSession]):
             return await db_session.get(model, pk)
 
     return _load
+
+
+@pytest.fixture
+def gateway() -> Generator[FakeK8sGateway]:
+    """Install an in-memory Kubernetes gateway for the duration of a test.
+
+    No test in this suite may touch a real cluster: correctness here is about
+    *what would be applied*, which the fake records exactly.
+    """
+    from app.k8s import set_gateway
+
+    fake = FakeK8sGateway()
+    set_gateway(fake)
+    yield fake
+    set_gateway(None)

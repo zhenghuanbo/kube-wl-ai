@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from app.models.rbac import UserRole
     from app.models.ssh_key import SshKey
     from app.models.token import ApiToken, RefreshToken
+    from app.models.workspace import WorkspaceMember
 
 
 class User(Base, TimestampMixin):
@@ -72,6 +73,14 @@ class User(Base, TimestampMixin):
         lazy="selectin",
     )
     audit_logs: Mapped[list[AuditLog]] = relationship(back_populates="actor")
+    #: A user belongs to at most one workspace, but this is a collection because
+    #: the unique constraint — not the cardinality of the attribute — is what
+    #: enforces that, and a collection keeps the relationship conventional.
+    workspace_memberships: Mapped[list[WorkspaceMember]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
 
     # --- Derived state -------------------------------------------------------
     @property

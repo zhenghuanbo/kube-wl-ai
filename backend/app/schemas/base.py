@@ -3,7 +3,17 @@
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
-from pydantic.alias_generators import to_camel
+
+
+def to_camel(name: str) -> str:
+    """camelCase that treats the first segment as indivisible.
+
+    Pydantic's stock ``to_camel`` splits on digit boundaries too, so
+    ``k8s_namespace`` comes out as ``k8SNamespace``. Every frontend author
+    writes ``k8sNamespace``, so the wire format says that instead.
+    """
+    head, *rest = name.split("_")
+    return head + "".join(part[:1].upper() + part[1:] for part in rest)
 
 
 class ApiModel(BaseModel):

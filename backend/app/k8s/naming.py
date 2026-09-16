@@ -67,6 +67,10 @@ INSTANCE_LABEL = "wl-instance"
 INSTANCE_ID_LABEL = "wl-instance-id"
 OWNER_LABEL = "wl-owner"
 
+#: Labels on task objects.
+TASK_LABEL = "wl-task"
+TASK_ID_LABEL = "wl-task-id"
+
 #: Namespaces this platform creates are prefixed, and so are its workloads.
 WORKLOAD_PREFIX = "wl"
 
@@ -94,6 +98,16 @@ def workload_name(instance_id: int, instance_name: str) -> str:
     a name still produce distinguishable objects in a merged listing.
     """
     return truncate_name(f"{WORKLOAD_PREFIX}-{instance_name}-{instance_id}")
+
+
+def task_job_name(task_id: int, task_name: str) -> str:
+    """The Kubernetes Job name for a task.
+
+    A distinct ``wl-job-`` prefix rather than the instance prefix: a Job and a
+    Deployment in the same namespace must not be able to collide, and an
+    operator scanning a namespace should be able to tell them apart at a glance.
+    """
+    return truncate_name(f"{WORKLOAD_PREFIX}-job-{task_name}-{task_id}")
 
 
 def is_managed_workload(name: str) -> bool:

@@ -607,12 +607,14 @@ async def quota_limits_for_groups(
         QuotaResource.MEMORY.value: 0,
         QuotaResource.STORAGE.value: 0,
         QuotaResource.INSTANCE.value: 0,
+        QuotaResource.TASK.value: 0,
     }
     for limit in limits:
         totals[QuotaResource.CPU.value] += limit.max_cpu_milli_per_user
         totals[QuotaResource.MEMORY.value] += limit.max_memory_mb_per_user
         totals[QuotaResource.STORAGE.value] += limit.max_storage_gb_per_user
         totals[QuotaResource.INSTANCE.value] += limit.max_concurrent_instances
+        totals[QuotaResource.TASK.value] += limit.max_concurrent_tasks
 
     # GPUs are tracked per model, so they cannot be summed into one number.
     specs = await gpu_counts_for_groups(session, group_ids)

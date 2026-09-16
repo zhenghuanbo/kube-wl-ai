@@ -96,6 +96,7 @@ PERMISSIONS: tuple[PermissionSpec, ...] = (
     # Applications ------------------------------------------------------------
     PermissionSpec("application:read", "application", "查看应用程序"),
     PermissionSpec("application:create", "application", "创建应用程序"),
+    PermissionSpec("application:update", "application", "修改应用程序"),
     PermissionSpec("application:delete", "application", "删除应用程序"),
     PermissionSpec("application:stop", "application", "停止应用程序"),
     # Tasks -------------------------------------------------------------------
@@ -162,7 +163,7 @@ _USER = _OBSERVER | frozenset(
         """
         instance:create instance:update instance:delete instance:start
         instance:stop instance:exec
-        application:create application:delete application:stop
+        application:create application:update application:delete application:stop
         task:create task:cancel task:logs
         image:create image:share image:delete
         storage:create storage:resize storage:delete

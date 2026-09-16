@@ -77,6 +77,7 @@ class ResourceGroupUpdate(ApiModel):
 
 class ResourceGroupLimitsRead(ApiModel):
     max_concurrent_instances: int
+    max_concurrent_tasks: int
     max_gpu_per_instance: int
     max_gpu_per_user: int
     max_cpu_milli_per_user: int
@@ -86,6 +87,7 @@ class ResourceGroupLimitsRead(ApiModel):
 
 class ResourceGroupLimitsUpdate(ApiModel):
     max_concurrent_instances: int | None = Field(default=None, ge=1, le=100)
+    max_concurrent_tasks: int | None = Field(default=None, ge=0, le=200)
     max_gpu_per_instance: int | None = Field(default=None, ge=0, le=16)
     max_gpu_per_user: int | None = Field(default=None, ge=0, le=64)
     max_cpu_milli_per_user: int | None = Field(default=None, ge=100)

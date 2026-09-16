@@ -227,6 +227,61 @@ class PvcSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class JobSpec:
+    """A run-to-completion workload.
+
+    ``backoff_limit`` defaults to 0 rather than Kubernetes' 6: a research task
+    that fails because of a typo should fail immediately and tell the user,
+    instead of burning the same GPU six more times while they wait.
+    """
+
+    name: str
+    namespace: str
+    image: str
+    labels: dict[str, str] = field(default_factory=dict)
+    #: argv. For a *task* the third element may legitimately be a user's shell
+    #: script — see ``app/models/task.py`` — but the platform never builds these
+    #: strings itself.
+    command: tuple[str, ...] | None = None
+    args: tuple[str, ...] | None = None
+    cpu_milli: int = 1000
+    memory_mb: int = 2048
+    gpu_type: str = "none"
+    gpu_count: int = 0
+    env: dict[str, str] = field(default_factory=dict)
+    working_dir: str | None = None
+    #: Optional read-only data or home volume.
+    pvc_name: str | None = None
+    mount_path: str = HOME_MOUNT_PATH
+    node_selector: dict[str, str] = field(default_factory=dict)
+    tolerations: tuple[dict[str, Any], ...] = ()
+    backoff_limit: int = 0
+    #: Kubernetes enforces this, so a task cannot outlive its cap while the
+    #: backend is down.
+    active_deadline_seconds: int | None = None
+    ttl_seconds_after_finished: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class JobInfo:
+    """The observed state of one Job, reduced to what the platform acts on."""
+
+    name: str
+    #: ``Pending`` | ``Running`` | ``Complete`` | ``Failed``
+    state: str
+    succeeded: int = 0
+    failed: int = 0
+    active: int = 0
+    message: str | None = None
+    pod_name: str | None = None
+    node_name: str | None = None
+    exit_code: int | None = None
+    #: True when Kubernetes killed it for exceeding ``activeDeadlineSeconds``,
+    #: which the UI must report differently from a non-zero exit.
+    deadline_exceeded: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class PodInfo:
     """The observed state of one pod."""
 
@@ -246,6 +301,8 @@ class WorkloadRefs:
     """The object names that make up one instance, for deletion."""
 
     deployment: str | None = None
+    #: A run-to-completion workload instead of a Deployment; never both.
+    job: str | None = None
     #: One instance may own several Services (SSH and the IDE are separate).
     services: tuple[str, ...] = ()
     ingress: str | None = None
@@ -347,6 +404,20 @@ class K8sGateway(Protocol):
     def list_pods(self, namespace: str, label_selector: str) -> list[PodInfo]:
         """List pods matching a selector, newest first."""
 
+    def apply_job(self, spec: JobSpec) -> None:
+        """Create the Job, or leave an existing one alone.
+
+        Not a replace: a Job's pod template is immutable after creation, and
+        re-applying one that is already running would be rejected by the API
+        server. Callers that need to change a task delete it and submit again.
+        """
+
+    def read_job(self, namespace: str, name: str) -> JobInfo | None:
+        """Read one Job; ``None`` when it no longer exists."""
+
+    def delete_job(self, namespace: str, name: str, *, foreground: bool = True) -> None:
+        """Delete a Job and, with ``foreground``, wait for its pods to go."""
+
     def read_pod_logs(
         self,
         namespace: str,
@@ -412,6 +483,9 @@ class FakeK8sGateway:
         #: Chunks handed to successive terminal sessions, in order.
         self.exec_script: list[list[bytes]] = []
         self.exec_sessions: list[FakeExecSession] = []
+        #: Jobs, and the state a test wants ``read_job`` to report for each.
+        self.jobs: dict[str, JobSpec] = {}
+        self.job_states: dict[str, JobInfo] = {}
         #: Next port handed out by :meth:`apply_service` for NodePort.
         self._next_node_port = 30000
         #: Every method call in order, for assertions about behaviour.
@@ -519,6 +593,32 @@ class FakeK8sGateway:
                 continue
             found.append(pod)
         return found
+
+    def apply_job(self, spec: JobSpec) -> None:
+        self._record("apply_job", spec.namespace, spec.name)
+        self.jobs[f"{spec.namespace}/{spec.name}"] = spec
+
+    def read_job(self, namespace: str, name: str) -> JobInfo | None:
+        self._record("read_job", namespace, name)
+        key = f"{namespace}/{name}"
+        if key not in self.jobs:
+            return None
+        if self.job_states.get(key) is None:
+            # A Job with no scripted state is still starting up, which is what
+            # a real cluster reports immediately after creation.
+            return JobInfo(name=name, state="Pending")
+        return self.job_states[key]
+
+    def delete_job(self, namespace: str, name: str, *, foreground: bool = True) -> None:
+        self._record("delete_job", namespace, name)
+        key = f"{namespace}/{name}"
+        self.jobs.pop(key, None)
+        self.job_states.pop(key, None)
+        # Deleting a Job takes its pods with it; leaving them would make a
+        # cancelled task still visible in the pod listing.
+        deployment = name
+        for pod_key in [k for k in self.pods if k.startswith(f"{namespace}/{deployment}-")]:
+            self.pods.pop(pod_key, None)
 
     def read_pod_logs(
         self,

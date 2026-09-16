@@ -18,6 +18,8 @@ from app.k8s.gateway import (
     FakeExecSession,
     FakeK8sGateway,
     IngressSpec,
+    JobInfo,
+    JobSpec,
     K8sError,
     K8sGateway,
     LimitSpec,
@@ -32,17 +34,30 @@ from app.k8s.gateway import (
     WorkloadRefs,
     WorkloadSpec,
 )
-from app.k8s.workloads import InstanceObjects, build_instance_objects, ide_command, ingress_path
+from app.k8s.workloads import (
+    TASK_MOUNT_PATH,
+    TASK_SHELL,
+    InstanceObjects,
+    TaskObjects,
+    build_instance_objects,
+    build_task_objects,
+    ide_command,
+    ingress_path,
+)
 
 logger = get_logger(__name__)
 
 __all__ = [
+    "TASK_MOUNT_PATH",
+    "TASK_SHELL",
     "ContainerPort",
     "ExecSession",
     "FakeExecSession",
     "FakeK8sGateway",
     "IngressSpec",
     "InstanceObjects",
+    "JobInfo",
+    "JobSpec",
     "K8sError",
     "K8sGateway",
     "LimitSpec",
@@ -54,9 +69,11 @@ __all__ = [
     "SecretSpec",
     "ServicePort",
     "ServiceSpec",
+    "TaskObjects",
     "WorkloadRefs",
     "WorkloadSpec",
     "build_instance_objects",
+    "build_task_objects",
     "get_gateway",
     "ide_command",
     "ingress_path",

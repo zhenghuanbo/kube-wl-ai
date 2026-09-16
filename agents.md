@@ -528,12 +528,66 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 8. `decode_access_token` 的三条错误信息是英文（`Invalid token` 等），而全项目其余面向用户的文案都是中文。
    由 WebSocket 拒绝路径暴露。已统一为中文。
 
-### ⏳ Phase 4–8（待开始）
+### 🔄 Phase 4 — 应用程序与自定义任务（后端已完成，前端待做）
+
+**Phase 4 后端交付**：
+
+| 维度 | 内容 |
+| --- | --- |
+| 数据模型 | `applications`（可发布的可复用实例形态 + 介绍信息）、`tasks`（K8s Job）、`workload_events`（工作负载时间线）；`resource_group_limits` 新增 `max_concurrent_tasks` |
+| 迁移 | `f818f0e87ceb`，往返通过，27 张表 |
+| K8s | 网关新增 `apply_job` / `read_job` / `delete_job`（`batch/v1`）；`build_task_objects()` |
+| 服务 | `applications.py`（可见性、启动、编辑权）、`tasks.py`（提交/取消/删除/对齐/日志）、`workload_events.py`、`quota_guard.py`（实例与任务共用配额） |
+| 接口 | `/applications`（列表/详情/创建/修改/下架/启动/时间线）、`/tasks`（列表/详情/提交/修改/取消/对齐/日志/删除/时间线）；OpenAPI **58 → 68 条路径** |
+| 定时任务 | `app/workers/tasks/reconcile.py` 接入 Celery beat（30 秒一次）；`python -m app.cli reconcile` 支持手动对齐 |
+| 测试 | 新增 51 项，全量 **277 项通过** |
+
+**Phase 4 验收结果**：
+- 质量门禁：`ruff check` + `ruff format --check` + `mypy --strict`（91 文件）+ `pytest`（277 项）全绿。
+- 真实进程联调：`scripts/smoke_phase4.py` 对 uvicorn 实例执行 **58 项检查全部通过**。
+- 回归：`scripts/smoke_phase3.py` 仍为 49/49。
+- 集群零污染：跑完后 `kubectl get ns -l wl-managed=true` 为空。
+
+**关键设计决定**：
+1. **`app_templates` 不单独建表**。计划 §5.6 列出了它，但「只有管理员能写的模板」就是
+   `is_curated=true` + `visibility=global` 的 application。两张几乎相同的表会各自漂移，
+   而且每次列表查询都要 union。已并入 `applications`。
+2. **可见性不是行级数据范围**。应用生来就是要被共享的（校级 / 组级 / 工作空间级），
+   所以 applications 不走 `policy.scope_filter`，而是把规则集中写在
+   `applications.visible_clause()` 一处。**越权访问返回 404 而非 403**：403 等于确认
+   「另一个实验室确实有这个应用」。
+3. **任务里的 shell 是刻意开的唯一口子**。平台自身的 argv 永远不做字符串插值；
+   自定义任务存在的意义就是跑 shell，所以用户脚本作为
+   `("/bin/sh", "-lc", <script>)` 的第三个元素传入 —— 三个固定字符串，平台不拼接任何
+   用户输入，shell 在用户自己的命名空间和配额里执行。
+4. **任务与实例共享同一份额度**。两者消耗同一个 namespace，受同一个 `ResourceQuota`
+   约束；分开计算会各自正确而总和超限，症状是 Pod 卡在 Pending 且没有任何报错。
+5. **终态任务立即释放配额**（与「停止的实例仍占用」相反）：已结束的 Job 不会再消耗任何东西。
+6. **超时由 Kubernetes 执行**（`activeDeadlineSeconds`），不是平台定时器 ——
+   后端宕机也不会有任务超期运行。
+7. **`TIMEOUT` 与 `FAILED` 分开**：撞上自己的运行时上限，和代码返回非零，是两回事，
+   处理方式也不同。
+
+**本轮修复的既有缺陷**：
+
+1. **Phase 3 的三处多词查询参数漏了 camelCase 别名**（`include_inactive` / `page_size` 等）。
+   FastAPI 按名字匹配查询参数，**不认识的参数直接忽略、不报错**，所以
+   `?includeInactive=true` 并不会 400，而是把过滤条件悄悄丢掉 —— 列表多返回数据，
+   没有任何症状。Phase 1/2 的路由一直是 `Query(alias="pageSize")` 这种写法，是 Phase 3/4 写偏了。
+   已全部补上，并新增结构性回归测试
+   `test_every_multi_word_query_parameter_is_camel_case`：直接读 OpenAPI schema，
+   任何含下划线的 query 参数都会让测试失败。
+2. **任务从未记录开始时间**。`started_at` 原本只在对齐时观察到 Running 才写入，
+   于是「两次巡检之间就跑完的任务」会得到 `durationSeconds: null`。
+   现在在 Job 提交成功时打点 —— 用户想知道的「这个任务花了我多久」包含排队时间。
+3. **`/auth/login` 之外的用户创建接口用 `groupIds`（复数）**，脚本里写成 `groupId` 时
+   被静默忽略，用户根本没有进组。这是第 1 条同一个病根：**未知字段应当报错而不是被吞掉**。
+
+### ⏳ Phase 5–8（待开始）
 
 | 阶段 | 内容 | 周期 |
 | --- | --- | --- |
-| Phase 4 | 应用程序与自定义任务 | 2 周 |
-| Phase 5 | 镜像与存储 | 2 周 |
+| Phase 5 | 镜像与存储 | 1.5 周 |
 | Phase 6 | 用量中心 | 1.5 周 |
 | Phase 7 | Grafana 监控集成 | 1.5 周 |
 | Phase 8 | API 开放、审计与上线 | 2 周 |
@@ -587,6 +641,10 @@ Vuex `namespace: true` 拼写错误、`Admin/User.vue` 为 0 字节、
   且是有意为之。
 - **异常类型决定对外状态码**：`K8sError` 曾继承 `RuntimeError`，导致集群故障对外是 500 traceback；
   现继承 `KubernetesError`（502 `kubernetes_error`）。**新增外部依赖的异常时，让它成为 `AppError` 的子类。**
+- **查询参数不会因为拼错而报错，只会被忽略**：FastAPI 按名字匹配，多余的 query 参数
+  既不报错也不进函数。多词参数一律 `Query(alias="camelCase")`，并有结构性测试兜底
+  （`test_every_multi_word_query_parameter_is_camel_case`）。请求体同理：
+  `ApiModel` 目前不禁止未知字段，把 `groupIds` 写成 `groupId` 会静默丢失。
 - **`lazy="joined"` 的关系不参与惰性加载**：它只在**查询加载**时连表取回，因此
   `Model(...)` 刚构造出来的对象上该属性是未加载的，任何读它的地方都会 `MissingGreenlet`。
   新增此类关系时，要么在服务层显式赋值（如 `workspace.group = group`），

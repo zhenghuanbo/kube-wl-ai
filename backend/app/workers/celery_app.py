@@ -31,11 +31,17 @@ celery_app.conf.update(
     broker_connection_retry_on_startup=True,
 )
 
-# Jobs are added here as their phases land, e.g.:
-#   celery_app.conf.beat_schedule = {
-#       "reconcile-workloads": {
-#           "task": "app.workers.tasks.reconcile.reconcile_workloads",
-#           "schedule": 30.0,
-#       },
-#   }
-celery_app.conf.beat_schedule = {}
+# Importing the task modules registers them with this app. Without this the
+# worker starts with an empty registry and every scheduled message is rejected
+# as unknown — the failure looks like "beat is running but nothing happens".
+from app.workers.tasks import reconcile  # noqa: E402,F401  (registration import)
+
+#: Every 30 seconds. Sweeping is a handful of reads per live workload, so the
+#: cost is dominated by the number of running things, not by the interval —
+#: and a user who stops an instance expects the row to agree within seconds.
+celery_app.conf.beat_schedule = {
+    "reconcile-workloads": {
+        "task": "app.workers.tasks.reconcile.reconcile_workloads",
+        "schedule": 30.0,
+    },
+}

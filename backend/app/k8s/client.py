@@ -24,6 +24,8 @@ from app.core.logging import get_logger
 from app.k8s.gateway import (
     ExecSession,
     IngressSpec,
+    JobInfo,
+    JobSpec,
     K8sError,
     LimitSpec,
     NamespaceSpec,
@@ -241,6 +243,7 @@ class RealK8sGateway:
         self._core = k8s.CoreV1Api()
         self._networking = k8s.NetworkingV1Api()
         self._apps = k8s.AppsV1Api()
+        self._batch = k8s.BatchV1Api()
 
     # --- helpers ----------------------------------------------------------
     @staticmethod
@@ -687,6 +690,167 @@ class RealK8sGateway:
             reverse=True,
         )
         return [_pod_info(pod) for pod in items]
+
+    def apply_job(self, spec: JobSpec) -> None:
+        """Create a Job. An existing one is left untouched.
+
+        A Job's pod template is immutable, so a "replace" could only fail; the
+        API server rejects it with a 422 that would be reported to the user as
+        a cluster fault. Re-submitting is expressed as delete-then-create.
+        """
+        body = k8s.V1Job(
+            metadata=k8s.V1ObjectMeta(
+                name=spec.name, namespace=spec.namespace, labels=spec.labels or None
+            ),
+            spec=k8s.V1JobSpec(
+                backoff_limit=spec.backoff_limit,
+                active_deadline_seconds=spec.active_deadline_seconds,
+                ttl_seconds_after_finished=spec.ttl_seconds_after_finished,
+                template=k8s.V1PodTemplateSpec(
+                    metadata=k8s.V1ObjectMeta(labels=spec.labels or None),
+                    spec=k8s.V1PodSpec(
+                        # Never, not OnFailure: a task that fails must be
+                        # reported, not silently retried on a second GPU.
+                        restart_policy="Never",
+                        containers=[self._job_container(spec)],
+                        volumes=self._job_volumes(spec),
+                        node_selector=spec.node_selector or None,
+                        tolerations=[
+                            k8s.V1Toleration(**toleration) for toleration in spec.tolerations
+                        ]
+                        or None,
+                    ),
+                ),
+            ),
+        )
+        try:
+            self._batch.create_namespaced_job(spec.namespace, body)
+        except ApiException as exc:
+            if exc.status == 409:
+                # Already submitted. Losing this race is harmless: the Job that
+                # exists is the one the caller asked for.
+                return
+            raise self._raise(f"create job {spec.name}", exc) from exc
+
+    @staticmethod
+    def _job_container(spec: JobSpec) -> Any:
+        resources = k8s.V1ResourceRequirements(
+            requests={"cpu": f"{spec.cpu_milli}m", "memory": f"{spec.memory_mb}Mi"},
+            limits={"cpu": f"{spec.cpu_milli}m", "memory": f"{spec.memory_mb}Mi"},
+        )
+        if spec.gpu_count > 0 and spec.gpu_type not in ("", "none"):
+            resources.limits["nvidia.com/gpu"] = str(spec.gpu_count)
+
+        mounts = (
+            [k8s.V1VolumeMount(name="data", mount_path=spec.mount_path)] if spec.pvc_name else None
+        )
+        return k8s.V1Container(
+            name="main",
+            image=spec.image,
+            command=list(spec.command) if spec.command else None,
+            args=list(spec.args) if spec.args else None,
+            env=[k8s.V1EnvVar(name=k, value=v) for k, v in spec.env.items()] or None,
+            working_dir=spec.working_dir,
+            resources=resources,
+            volume_mounts=mounts,
+        )
+
+    @staticmethod
+    def _job_volumes(spec: JobSpec) -> list[Any] | None:
+        if not spec.pvc_name:
+            return None
+        return [
+            k8s.V1Volume(
+                name="data",
+                persistent_volume_claim=k8s.V1PersistentVolumeClaimVolumeSource(
+                    claim_name=spec.pvc_name
+                ),
+            )
+        ]
+
+    def read_job(self, namespace: str, name: str) -> JobInfo | None:
+        try:
+            job = self._batch.read_namespaced_job(name, namespace)
+        except ApiException as exc:
+            if self._is_not_found(exc):
+                return None
+            raise self._raise(f"read job {name}", exc) from exc
+
+        status = job.status
+        succeeded = status.succeeded or 0
+        failed = status.failed or 0
+        active = status.active or 0
+
+        message: str | None = None
+        deadline_exceeded = False
+        for condition in status.conditions or []:
+            if condition.type == "Failed" and condition.status == "True":
+                message = condition.message or condition.reason
+                deadline_exceeded = condition.reason == "DeadlineExceeded"
+        for condition in status.conditions or []:
+            if condition.type == "Complete" and condition.status == "True":
+                message = message or condition.reason
+
+        if succeeded:
+            state = "Complete"
+        elif failed:
+            state = "Failed"
+        elif active:
+            state = "Running"
+        else:
+            state = "Pending"
+
+        pod_name, node_name, exit_code = self._job_pod(namespace, name)
+        return JobInfo(
+            name=name,
+            state=state,
+            succeeded=succeeded,
+            failed=failed,
+            active=active,
+            message=message,
+            pod_name=pod_name,
+            node_name=node_name,
+            exit_code=exit_code,
+            deadline_exceeded=deadline_exceeded,
+        )
+
+    def _job_pod(self, namespace: str, name: str) -> tuple[str | None, str | None, int | None]:
+        """Find the Job's pod and read its exit code.
+
+        The exit code lives on the container's *terminated* state, which is the
+        only place that distinguishes "your script returned 2" from "the node
+        evicted the pod".
+        """
+        try:
+            pods = self._core.list_namespaced_pod(namespace, label_selector=f"job-name={name}")
+        except ApiException:
+            return None, None, None
+        if not pods.items:
+            return None, None, None
+
+        pod = pods.items[0]
+        exit_code: int | None = None
+        for container in pod.status.container_statuses or []:
+            terminated = container.state.terminated if container.state else None
+            if terminated is not None and terminated.exit_code is not None:
+                exit_code = terminated.exit_code
+        node_name = pod.spec.node_name if pod.spec else None
+        return pod.metadata.name, node_name, exit_code
+
+    def delete_job(self, namespace: str, name: str, *, foreground: bool = True) -> None:
+        try:
+            self._batch.delete_namespaced_job(
+                name,
+                namespace,
+                # Foreground: the pods are gone before the call returns, so a
+                # cancelled task's GPU is actually freed when the user is told
+                # it was cancelled.
+                propagation_policy="Foreground" if foreground else "Background",
+            )
+        except ApiException as exc:
+            if self._is_not_found(exc):
+                return
+            raise self._raise(f"delete job {name}", exc) from exc
 
     def read_pod_logs(
         self,

@@ -22,9 +22,12 @@ from app.auth.passwords import hash_password
 from app.auth.permissions import sync_rbac
 from app.core.config import get_settings
 from app.db.session import dispose_engine, get_session_factory, init_engine
+from app.k8s import get_gateway
 from app.models.enums import UserSource
 from app.models.rbac import Role, UserRole
 from app.models.user import User
+from app.services import instances as instance_service
+from app.services import tasks as task_service
 
 MIN_PASSWORD_LENGTH = 12
 
@@ -95,6 +98,30 @@ async def _sync_rbac() -> int:
     return 0
 
 
+async def _reconcile() -> int:
+    """Run one sweep by hand.
+
+    The same routine beat schedules every 30 seconds, exposed for the case it
+    cannot cover: an operator who has just fixed something and does not want to
+    wait for the next tick.
+    """
+    settings = get_settings()
+    gateway = get_gateway(settings)
+    factory = get_session_factory()
+
+    async with factory() as session:
+        instances = await instance_service.reconcile_all(session, gateway)
+    async with factory() as session:
+        expired = await instance_service.expire_overdue(session, gateway)
+    async with factory() as session:
+        tasks = await task_service.reconcile_all(session, gateway)
+
+    print(
+        f"对齐完成：实例 {instances} 个状态变化，超时回收 {expired} 个，任务 {tasks} 个状态变化。"
+    )
+    return 0
+
+
 def _resolve_password(args: argparse.Namespace) -> str:
     """Prefer the configured secret, then a prompt — never a shell argument."""
     # argparse attributes are untyped; narrow once here rather than casting at
@@ -138,6 +165,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
 
     sub.add_parser("sync-rbac", help="把权限与角色目录同步到数据库（幂等）")
+    sub.add_parser(
+        "reconcile",
+        help="立即与集群对齐一次实例与任务状态（运维排障用）",
+    )
     return parser.parse_args(argv)
 
 
@@ -152,6 +183,8 @@ async def _run(args: argparse.Namespace) -> int:
             )
         if args.command == "sync-rbac":
             return await _sync_rbac()
+        if args.command == "reconcile":
+            return await _reconcile()
         raise SystemExit(f"未知命令：{args.command}")
     finally:
         await dispose_engine()

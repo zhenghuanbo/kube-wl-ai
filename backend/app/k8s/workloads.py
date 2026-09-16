@@ -14,6 +14,11 @@ Two security decisions are encoded here rather than left to callers:
   expose an unauthenticated IDE on every node's IP.
 * **argv, never a shell string.** Commands are tuples. A user-supplied value can
   therefore never become a command, which is the plan's explicit requirement.
+  The one apparent exception is :data:`TASK_SHELL`: a custom task exists to run
+  a shell, so the user's script is handed to ``/bin/sh -lc`` as a single argv
+  element. There is still no interpolation — the platform builds three fixed
+  strings and the shell does the rest, inside the user's own namespace and
+  under the user's own quota.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from app.k8s.gateway import (
     HOME_MOUNT_PATH,
     ContainerPort,
     IngressSpec,
+    JobSpec,
     PvcSpec,
     SecretSpec,
     ServicePort,
@@ -31,7 +37,17 @@ from app.k8s.gateway import (
     WorkloadRefs,
     WorkloadSpec,
 )
-from app.k8s.naming import INSTANCE_ID_LABEL, INSTANCE_LABEL, workload_name
+from app.k8s.naming import (
+    INSTANCE_ID_LABEL,
+    INSTANCE_LABEL,
+    MANAGED_LABEL,
+    MANAGED_LABEL_VALUE,
+    TASK_ID_LABEL,
+    TASK_LABEL,
+    WORKSPACE_LABEL,
+    task_job_name,
+    workload_name,
+)
 from app.models.enums import IdeType
 
 #: sshd inside the instance image.
@@ -279,4 +295,107 @@ def build_instance_objects(
         ingress=ingress,
         pvc=pvc,
         ssh_secret=ssh_secret,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tasks
+# ---------------------------------------------------------------------------
+#: Where a task's optional persistent volume is mounted.
+TASK_MOUNT_PATH = "/data"
+
+#: The interpreter a task's script is handed to.
+#:
+#: Three argv elements, of which the third is the user's text. The platform
+#: composes no part of the script and performs no interpolation, so nothing the
+#: user writes can become a *platform* command — but they still get a real
+#: shell, which is the entire point of a custom task.
+TASK_SHELL: tuple[str, ...] = ("/bin/sh", "-lc")
+
+
+@dataclass(frozen=True, slots=True)
+class TaskObjects:
+    """The objects that realise one custom task."""
+
+    refs: WorkloadRefs
+    job: JobSpec
+    pvc: PvcSpec | None = None
+
+
+def build_task_objects(
+    *,
+    task_id: int,
+    task_name: str,
+    namespace: str,
+    workspace_name: str,
+    image: str,
+    script: str,
+    cpu_milli: int,
+    memory_mb: int,
+    gpu_type: str,
+    gpu_count: int,
+    storage_gb: int,
+    working_dir: str | None,
+    env: dict[str, str],
+    node_selector: dict[str, str],
+    tolerations: tuple[dict[str, object], ...],
+    max_runtime_seconds: int | None,
+    ttl_seconds_after_finished: int,
+    storage_class: str | None,
+) -> TaskObjects:
+    """Build the Job (and optional scratch volume) for one task."""
+    name = task_job_name(task_id, task_name)
+    labels = {
+        MANAGED_LABEL: MANAGED_LABEL_VALUE,
+        WORKSPACE_LABEL: workspace_name,
+        TASK_LABEL: task_name,
+        TASK_ID_LABEL: str(task_id),
+    }
+
+    pvc_name = f"{name}-data" if storage_gb > 0 else None
+
+    job = JobSpec(
+        name=name,
+        namespace=namespace,
+        image=image,
+        labels=labels,
+        command=TASK_SHELL,
+        args=(script,),
+        cpu_milli=cpu_milli,
+        memory_mb=memory_mb,
+        gpu_type=gpu_type,
+        gpu_count=gpu_count,
+        env={
+            **env,
+            "WL_TASK_ID": str(task_id),
+            "WL_WORKSPACE": workspace_name,
+        },
+        working_dir=working_dir,
+        pvc_name=pvc_name,
+        mount_path=TASK_MOUNT_PATH,
+        node_selector=node_selector,
+        tolerations=tolerations,
+        backoff_limit=0,
+        # Kubernetes enforces the cap, so a task cannot outlive it even if the
+        # backend is down when the deadline passes.
+        active_deadline_seconds=max_runtime_seconds,
+        ttl_seconds_after_finished=ttl_seconds_after_finished,
+    )
+
+    pvc = (
+        PvcSpec(
+            name=pvc_name,
+            namespace=namespace,
+            size_gb=storage_gb,
+            storage_class=storage_class,
+            labels=labels,
+        )
+        if pvc_name
+        else None
+    )
+
+    return TaskObjects(
+        refs=WorkloadRefs(job=name, pvc=pvc_name),
+        job=job,
+        pvc=pvc,
     )

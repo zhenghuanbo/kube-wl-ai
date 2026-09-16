@@ -170,3 +170,87 @@ class IdeType(StrEnum):
     JUPYTER = "jupyter"
     VSCODE = "vscode"
     WEBSSH = "webssh"
+
+
+class ApplicationVisibility(StrEnum):
+    """Who may see and launch an application.
+
+    Widening is deliberate and explicit: a private definition is the author's
+    scratch space, ``workspace`` shares it with colleagues in the same
+    namespace, ``group`` with the whole lab, and ``global`` with the university.
+    """
+
+    PRIVATE = "private"
+    WORKSPACE = "workspace"
+    GROUP = "group"
+    GLOBAL = "global"
+
+
+class ApplicationCategory(StrEnum):
+    """A coarse grouping for the application catalogue.
+
+    Deliberately short. A long taxonomy decays into "other" the moment nobody
+    curates it, and the search box is what people actually use.
+    """
+
+    DEVELOPMENT = "development"
+    DATA_SCIENCE = "data_science"
+    VISUALIZATION = "visualization"
+    DATABASE = "database"
+    WEB = "web"
+    OTHER = "other"
+
+
+class TaskStatus(StrEnum):
+    """Lifecycle of a one-shot task (a Kubernetes Job).
+
+    ``TIMEOUT`` is kept apart from ``FAILED``: hitting your own runtime limit is
+    a different problem from your code returning non-zero, and the fix is
+    different too.
+    """
+
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+    CANCELLING = "cancelling"
+    CANCELLED = "cancelled"
+    ERROR = "error"
+
+
+#: Statuses after which a task will never change again.
+TERMINAL_TASK_STATUSES: frozenset[TaskStatus] = frozenset(
+    {
+        TaskStatus.SUCCEEDED,
+        TaskStatus.FAILED,
+        TaskStatus.TIMEOUT,
+        TaskStatus.CANCELLED,
+        TaskStatus.ERROR,
+    }
+)
+
+
+class WorkloadKind(StrEnum):
+    """What a :class:`~app.models.workload_event.WorkloadEvent` is about.
+
+    A single string column rather than four nullable foreign keys: an event
+    belongs to exactly one kind, and four columns would make every query filter
+    on three NULLs.
+    """
+
+    WORKSPACE = "workspace"
+    INSTANCE = "instance"
+    APPLICATION = "application"
+    TASK = "task"
+
+
+class WorkloadEventType(StrEnum):
+    """What happened. Kept small so the timeline stays filterable."""
+
+    CREATED = "created"
+    STARTED = "started"
+    STOPPED = "stopped"
+    DELETED = "deleted"
+    FAILED = "failed"
+    STATUS_CHANGED = "status_changed"

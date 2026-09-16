@@ -21,8 +21,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
-from collections.abc import Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, or_, select
@@ -40,41 +39,38 @@ from app.models.enums import (
     IdeType,
     InstanceStatus,
     QuotaResource,
-    QuotaScope,
     WorkspaceStatus,
 )
 from app.models.instance import Instance
 from app.models.resource import (
-    Quota,
     ResourceGroup,
-    ResourceGroupSpec,
     ResourceSpec,
     gpu_resource_key,
 )
 from app.models.ssh_key import SshKey
 from app.models.user import User
-from app.models.workspace import Workspace, WorkspaceMember, WorkspaceResourceGrant
+from app.models.workspace import Workspace
 from app.schemas.instance import InstanceCreate, InstanceSummary, InstanceUpdate
-from app.services import resources as resource_service
+from app.services.quota_guard import (
+    LIVE_INSTANCE_STATUSES,
+    Usage,
+    check_quota,
+    workspace_quotas,
+    workspace_usage,
+)
+from app.services.workload_common import (
+    Page,
+    resolve_owner,
+    resolve_pool_and_spec,
+    workspace_for_actor,
+)
 
 logger = get_logger(__name__)
 
-#: Statuses that still occupy quota — which is every instance that has not been
-#: deleted, **including stopped ones**.
-#:
-#: Freeing compute quota on stop looks tidy but produces a worse failure: the
-#: namespace's own ResourceQuota still counts only running pods, so after a stop
-#: and a new create the restart would be accepted by the platform and then leave
-#: the pod Pending with no obvious cause. Reserving the capacity keeps restart
-#: guaranteed and keeps the platform's arithmetic identical to the cluster's.
-LIVE_STATUSES: tuple[InstanceStatus, ...] = (
-    InstanceStatus.PENDING,
-    InstanceStatus.CREATING,
-    InstanceStatus.RUNNING,
-    InstanceStatus.STOPPING,
-    InstanceStatus.STOPPED,
-    InstanceStatus.ERROR,
-)
+#: Statuses that still occupy quota. Owned by :mod:`app.services.quota_guard`,
+#: which also counts tasks; re-exported here because instance callers think in
+#: instance statuses.
+LIVE_STATUSES = LIVE_INSTANCE_STATUSES
 
 #: Statuses whose pod is running, for usage accounting.
 RUNNING_STATUSES: tuple[InstanceStatus, ...] = (InstanceStatus.RUNNING,)
@@ -87,24 +83,6 @@ _PHASE_TO_STATUS: dict[str, InstanceStatus] = {
     "succeeded": InstanceStatus.STOPPED,
     "unknown": InstanceStatus.ERROR,
 }
-
-
-@dataclass(slots=True)
-class Page[T]:
-    items: Sequence[T]
-    total: int
-
-
-@dataclass(slots=True)
-class Usage:
-    """What a workspace is currently consuming."""
-
-    instances: int = 0
-    cpu_milli: int = 0
-    memory_mb: int = 0
-    storage_gb: int = 0
-    #: Card count per ``gpu:{model}`` key.
-    gpu: dict[str, int] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -225,159 +203,9 @@ async def get_instance(session: AsyncSession, actor: User, instance_id: int) -> 
     return instance
 
 
-async def workspace_for_actor(
-    session: AsyncSession, actor: User, workspace_id: int | None
-) -> Workspace:
-    """Resolve the target workspace and prove the caller may act in it.
-
-    Omitting ``workspace_id`` means "my own workspace", which is what a normal
-    user always wants; an administrator acting on behalf of somebody else passes
-    it explicitly.
-    """
-    if workspace_id is None:
-        workspace = await session.scalar(
-            select(Workspace)
-            .join(WorkspaceMember, WorkspaceMember.workspace_id == Workspace.id)
-            .where(WorkspaceMember.user_id == actor.id, Workspace.is_active.is_(True))
-        )
-        if workspace is None:
-            raise BadRequestError("你尚未被分配工作空间，请先联系管理员", code="no_workspace")
-        return workspace
-
-    workspace = await session.get(Workspace, workspace_id)
-    if workspace is None:
-        raise NotFoundError("工作空间不存在", code="workspace_not_found")
-    policy.ensure_object_access(actor, workspace, group_id=workspace.group_id)
-    return workspace
-
-
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
-async def _resolve_pool_and_spec(
-    session: AsyncSession, workspace: Workspace, pool_id: int, spec_id: int
-) -> tuple[ResourceGroup, ResourceSpec]:
-    pool = await session.get(ResourceGroup, pool_id)
-    if pool is None:
-        raise NotFoundError("资源组不存在", code="resource_group_not_found")
-    if not pool.is_active:
-        raise BadRequestError("该资源组已停用", code="resource_group_inactive")
-
-    granted = await session.scalar(
-        select(WorkspaceResourceGrant).where(
-            WorkspaceResourceGrant.workspace_id == workspace.id,
-            WorkspaceResourceGrant.resource_group_id == pool_id,
-            WorkspaceResourceGrant.is_active.is_(True),
-        )
-    )
-    if granted is None:
-        # Not a permission failure: the workspace simply has no claim on this
-        # hardware, and saying so plainly is more useful than a generic denial.
-        raise BadRequestError("该资源组未授权给此工作空间", code="resource_group_not_granted")
-
-    spec = await session.get(ResourceSpec, spec_id)
-    if spec is None:
-        raise BadRequestError("资源规格不存在", code="unknown_resource_spec")
-    if not spec.is_active:
-        raise BadRequestError("该资源规格已停用", code="resource_spec_inactive")
-
-    offered = await session.scalar(
-        select(func.count())
-        .select_from(ResourceGroupSpec)
-        .where(
-            ResourceGroupSpec.resource_group_id == pool_id,
-            ResourceGroupSpec.resource_spec_id == spec_id,
-        )
-    )
-    if not offered:
-        raise BadRequestError("该规格不属于所选资源组", code="resource_spec_not_in_group")
-    return pool, spec
-
-
-async def _usage(session: AsyncSession, workspace_id: int) -> Usage:
-    """Sum what the workspace currently reserves.
-
-    Counted over live instances rather than running pods: a reservation exists
-    from the moment the row does, and survives a stop. Releasing it only while
-    the pod happens to be up would let a workspace hold more than its quota
-    during a restart, and would make the platform's numbers disagree with the
-    namespace's ResourceQuota, which counts only running pods.
-    """
-    rows = (
-        await session.execute(
-            select(Instance).where(
-                Instance.workspace_id == workspace_id,
-                Instance.is_active.is_(True),
-                Instance.status.in_(LIVE_STATUSES),
-            )
-        )
-    ).scalars()
-
-    usage = Usage()
-    for instance in rows:
-        usage.instances += 1
-        usage.cpu_milli += instance.cpu_milli
-        usage.memory_mb += instance.memory_mb
-        usage.storage_gb += instance.storage_gb
-        if instance.has_gpu:
-            key = gpu_resource_key(instance.gpu_type)
-            usage.gpu[key] = usage.gpu.get(key, 0) + instance.gpu_count
-    return usage
-
-
-async def _workspace_quotas(session: AsyncSession, workspace_id: int) -> dict[str, Quota]:
-    quotas = await resource_service.list_quotas(
-        session, scope_type=QuotaScope.WORKSPACE, scope_id=workspace_id
-    )
-    return {quota.resource: quota for quota in quotas}
-
-
-def _check_quota(
-    quotas: dict[str, Quota],
-    usage: Usage,
-    *,
-    cpu_milli: int,
-    memory_mb: int,
-    storage_gb: int,
-    gpu_type: str,
-    gpu_count: int,
-) -> None:
-    """Refuse a request that would exceed a workspace ceiling.
-
-    Raises 409 rather than 403: this is a capacity decision, not a permission
-    one, and the UI needs to tell the user which resource ran out.
-    """
-    checks = [
-        (QuotaResource.INSTANCE.value, usage.instances + 1, "实例数"),
-        (QuotaResource.CPU.value, usage.cpu_milli + cpu_milli, "CPU"),
-        (QuotaResource.MEMORY.value, usage.memory_mb + memory_mb, "内存"),
-        (QuotaResource.STORAGE.value, usage.storage_gb + storage_gb, "存储"),
-    ]
-    if gpu_count > 0 and gpu_type not in ("", "none"):
-        key = gpu_resource_key(gpu_type)
-        checks.append((key, usage.gpu.get(key, 0) + gpu_count, f"{gpu_type.upper()} 加速卡"))
-
-    for resource, requested, label in checks:
-        quota = quotas.get(resource)
-        if quota is None:
-            # No ceiling recorded means the pool granted nothing for this
-            # resource; an absolute zero rather than "unlimited".
-            raise QuotaExceededError(
-                f"工作空间未获得{label}配额，无法创建", detail={"resource": resource}
-            )
-        if requested > quota.limit_value:
-            raise QuotaExceededError(
-                f"{label}配额不足：需要 {requested}，上限 {quota.limit_value}"
-                f"（已用 {quota.used_value}）",
-                detail={
-                    "resource": resource,
-                    "requested": requested,
-                    "limit": quota.limit_value,
-                    "used": quota.used_value,
-                },
-            )
-
-
 # ---------------------------------------------------------------------------
 # Create
 # ---------------------------------------------------------------------------
@@ -395,8 +223,8 @@ async def create_instance(
             code="workspace_not_ready",
         )
 
-    owner = await _resolve_owner(session, actor, workspace, payload.owner_user_id)
-    pool, spec = await _resolve_pool_and_spec(
+    owner = await resolve_owner(session, actor, workspace, payload.owner_user_id)
+    pool, spec = await resolve_pool_and_spec(
         session, workspace, payload.resource_group_id, payload.resource_spec_id
     )
 
@@ -414,9 +242,9 @@ async def create_instance(
 
     max_runtime = _resolve_runtime(payload.max_runtime_seconds, pool)
 
-    quotas = await _workspace_quotas(session, workspace.id)
-    usage = await _usage(session, workspace.id)
-    _check_quota(
+    quotas = await workspace_quotas(session, workspace.id)
+    usage = await workspace_usage(session, workspace.id)
+    check_quota(
         quotas,
         usage,
         cpu_milli=spec.cpu_milli,
@@ -489,37 +317,6 @@ def _check_pool_instance_caps(pool: ResourceGroup, usage: Usage, spec: ResourceS
             f"单实例加速卡数超出资源组上限（{limits.max_gpu_per_instance}）",
             detail={"resource": gpu_resource_key(spec.gpu_type)},
         )
-
-
-async def _resolve_owner(
-    session: AsyncSession, actor: User, workspace: Workspace, owner_user_id: int | None
-) -> User:
-    if owner_user_id is None or owner_user_id == actor.id:
-        # Creating for yourself requires only that you belong to the workspace.
-        membership = await session.scalar(
-            select(WorkspaceMember).where(
-                WorkspaceMember.workspace_id == workspace.id,
-                WorkspaceMember.user_id == actor.id,
-            )
-        )
-        if membership is None:
-            # An administrator may create an instance in a workspace they do not
-            # belong to, but then they must say who it is for.
-            raise BadRequestError("你不属于此工作空间，请指定实例归属人", code="owner_required")
-        return actor
-
-    owner = await session.get(User, owner_user_id)
-    if owner is None:
-        raise BadRequestError("指定的归属用户不存在", code="unknown_user")
-    membership = await session.scalar(
-        select(WorkspaceMember).where(
-            WorkspaceMember.workspace_id == workspace.id,
-            WorkspaceMember.user_id == owner.id,
-        )
-    )
-    if membership is None:
-        raise BadRequestError("该用户不属于此工作空间", code="owner_not_in_workspace")
-    return owner
 
 
 # ---------------------------------------------------------------------------
@@ -939,6 +736,8 @@ __all__ = [
     "list_ssh_keys",
     "reconcile_all",
     "reconcile_instance",
+    "resolve_owner",
+    "resolve_pool_and_spec",
     "ssh_command",
     "ssh_fingerprint",
     "start_instance",

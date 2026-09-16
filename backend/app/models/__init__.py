@@ -6,8 +6,12 @@ that have been registered on ``Base.metadata``.
 
 from __future__ import annotations
 
+from app.models.application import Application
 from app.models.audit import AuditLog
 from app.models.enums import (
+    TERMINAL_TASK_STATUSES,
+    ApplicationCategory,
+    ApplicationVisibility,
     GpuDeviceStatus,
     GroupKind,
     GroupRole,
@@ -20,7 +24,10 @@ from app.models.enums import (
     ResourceGroupKind,
     RoleCode,
     RoleScope,
+    TaskStatus,
     UserSource,
+    WorkloadEventType,
+    WorkloadKind,
     WorkspaceRole,
     WorkspaceStatus,
 )
@@ -40,13 +47,19 @@ from app.models.resource import (
     gpu_resource_key,
 )
 from app.models.ssh_key import SshKey
+from app.models.task import Task
 from app.models.token import ApiToken, RefreshToken
 from app.models.user import User
+from app.models.workload_event import WorkloadEvent
 from app.models.workspace import Workspace, WorkspaceMember, WorkspaceResourceGrant
 
 __all__ = [
     "GPU_MODELS",
+    "TERMINAL_TASK_STATUSES",
     "ApiToken",
+    "Application",
+    "ApplicationCategory",
+    "ApplicationVisibility",
     "AuditLog",
     "ComputeNode",
     "GpuDevice",
@@ -75,10 +88,15 @@ __all__ = [
     "RoleScope",
     "RuntimeLimit",
     "SshKey",
+    "Task",
+    "TaskStatus",
     "User",
     "UserGroupLink",
     "UserRole",
     "UserSource",
+    "WorkloadEvent",
+    "WorkloadEventType",
+    "WorkloadKind",
     "Workspace",
     "WorkspaceMember",
     "WorkspaceResourceGrant",

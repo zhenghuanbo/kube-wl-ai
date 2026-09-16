@@ -178,6 +178,10 @@ class ResourceGroupLimit(Base, TimestampMixin):
     )
 
     max_concurrent_instances: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    #: Concurrent one-shot tasks. Separate from instances because a job that
+    #: runs for ten minutes and an interactive session that lives for a day put
+    #: very different pressure on the same pool.
+    max_concurrent_tasks: Mapped[int] = mapped_column(Integer, nullable=False, default=4)
     max_gpu_per_instance: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     max_gpu_per_user: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     max_cpu_milli_per_user: Mapped[int] = mapped_column(Integer, nullable=False, default=8000)

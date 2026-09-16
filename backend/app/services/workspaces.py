@@ -386,6 +386,7 @@ async def _desired_quota(
             QuotaResource.CPU.value: 0,
             QuotaResource.MEMORY.value: 0,
             QuotaResource.INSTANCE.value: 0,
+            QuotaResource.TASK.value: 0,
             QuotaResource.STORAGE.value: 0,
         }
 
@@ -408,6 +409,7 @@ async def _desired_quota(
     memory_mb = limits.get(QuotaResource.MEMORY.value, 0)
     storage_gb = limits.get(QuotaResource.STORAGE.value, 0)
     instances = limits.get(QuotaResource.INSTANCE.value, 0)
+    tasks = limits.get(QuotaResource.TASK.value, 0)
 
     if cpu_milli:
         # Requests and limits are kept equal so a workspace cannot be scheduled
@@ -423,8 +425,17 @@ async def _desired_quota(
     if instances:
         hard["count/deployments.apps"] = str(instances)
         hard["count/services"] = str(instances)
-        hard["count/persistentvolumeclaims"] = str(instances * 2)
-        hard["count/jobs.batch"] = str(instances * 4)
+        # One home volume per instance, and one scratch volume per task that
+        # asks for storage; the allowance covers the worst case rather than
+        # letting a task fail on a claim the platform said it could make.
+        hard["count/persistentvolumeclaims"] = str(instances + tasks)
+    if tasks:
+        # Exactly the task allowance: a workspace may run its jobs and nothing
+        # more, so the platform's counter and the cluster's cannot disagree.
+        hard["count/jobs.batch"] = str(tasks)
+        # One pod per instance or task, and no spare capacity for anything the
+        # platform did not create.
+        hard["pods"] = str(instances + tasks)
 
     gpu_total = sum(
         value for key, value in limits.items() if key.startswith(f"{QuotaResource.GPU.value}:")

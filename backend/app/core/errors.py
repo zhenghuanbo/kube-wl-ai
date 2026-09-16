@@ -10,6 +10,7 @@ Every error returned by the API has the shape::
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi import FastAPI, Request, status
@@ -145,6 +146,37 @@ def _envelope(
     )
 
 
+def _serialisable_errors(exc: RequestValidationError) -> list[dict[str, Any]]:
+    """``exc.errors()`` made safe to put in a JSON body.
+
+    Pydantic attaches the original exception object to ``ctx`` when a custom
+    validator raises, and a ``ValueError`` is not JSON-serialisable. Passing the
+    errors straight through therefore turned *every* ``field_validator`` that
+    rejected a value into a 500 — the one case where a helpful 422 is most
+    wanted, because the caller needs to be told which field was wrong.
+
+    The exception itself is replaced with its message: the caller wants to read
+    "镜像地址不能包含空格", not a repr of the object that carried it.
+    """
+    cleaned: list[dict[str, Any]] = []
+    for error in exc.errors():
+        entry = {key: value for key, value in error.items() if key != "ctx"}
+        context = error.get("ctx")
+        if isinstance(context, dict):
+            entry["ctx"] = {
+                key: (str(value) if isinstance(value, BaseException) else value)
+                for key, value in context.items()
+            }
+        # `input` can be any object the client sent, including one Pydantic
+        # parsed into a non-primitive; keep it only when it survives encoding.
+        try:
+            json.dumps(entry)
+        except (TypeError, ValueError):
+            entry.pop("input", None)
+        cleaned.append(entry)
+    return cleaned
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     """Attach the unified error handlers to a FastAPI application."""
 
@@ -160,7 +192,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             HTTP_422_UNPROCESSABLE,
             "validation_failed",
             "Request validation failed",
-            {"errors": exc.errors()},
+            {"errors": _serialisable_errors(exc)},
         )
 
     @app.exception_handler(StarletteHTTPException)

@@ -229,6 +229,24 @@ async def test_the_claim_name_does_not_depend_on_an_instance(
     assert f"{body['k8sNamespace']}/{pvc_name}" in gateway.pvcs
 
 
+async def test_a_duplicate_name_in_one_workspace_is_a_clean_conflict(
+    client: AsyncClient, world: World
+) -> None:
+    """The unique constraint is the arbiter, so it must not surface as a 500.
+
+    A pre-flight check cannot be trusted: two concurrent requests for the same
+    name both pass it, and only one can win the insert.
+    """
+    await act_as(client, "s5-dana")
+    await make_storage(client, "samename")
+
+    response = await client.post(
+        "/api/v1/storages", json={"name": "samename", "kind": "personal_data", "capacityGb": 5}
+    )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "storage_name_taken"
+
+
 async def test_a_second_personal_home_is_refused(client: AsyncClient, world: World) -> None:
     """One home per person.
 

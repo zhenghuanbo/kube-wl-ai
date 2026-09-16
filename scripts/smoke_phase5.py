@@ -18,12 +18,22 @@ import json
 import os
 import sys
 import urllib.error
+import time
 import urllib.request
 
 BASE = os.environ.get("SMOKE_BASE", "http://127.0.0.1:8000/api/v1")
 ADMIN_USERNAME = os.environ.get("SMOKE_ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("SMOKE_ADMIN_PASSWORD", "smoke-test-password-123")
 SUFFIX = os.environ.get("SMOKE_SUFFIX", "p5")
+#: Storage names are unique per (workspace, name) with no upsert, so a re-run
+#: against an existing database would collide. A per-run token keeps the script
+#: re-runnable, which matters because a smoke script that only works once gets
+#: deleted rather than re-run.
+RUN = os.environ.get("SMOKE_RUN", "") or str(int(time.time()))
+
+
+def sname(base: str) -> str:
+    return f"{base}-{RUN}"
 PASSWORD = "smoke-storage-password-123"
 
 passed = 0
@@ -61,6 +71,20 @@ def call(
         except json.JSONDecodeError:
             decoded = payload
         return error.code, decoded
+
+
+def first_row(page: object) -> object:
+    """Pull the first item out of a listing.
+
+    Collection endpoints are not uniform: some return a page envelope and some
+    return a bare array, and a smoke script that assumes the wrong one fails in a
+    way that looks like a server error.
+    """
+    if isinstance(page, dict) and isinstance(page.get("items"), list):
+        return page["items"][0] if page["items"] else None
+    if isinstance(page, list):
+        return page[0] if page else None
+    return None
 
 
 def login(username: str, password: str) -> str | None:
@@ -120,7 +144,7 @@ def main() -> int:
     )
     if status == 409:
         _, page = call("GET", f"/groups?search=p5-lab-{SUFFIX}", token=admin)
-        lab = page["items"][0]  # type: ignore[index]
+        lab = first_row(page)
         status = 200
     check("建用户组", status in (200, 201), str(lab))
     if not isinstance(lab, dict):
@@ -135,7 +159,7 @@ def main() -> int:
     )
     if status == 409:
         _, page = call("GET", f"/resource-groups?search=p5-pool-{SUFFIX}", token=admin)
-        pool = page["items"][0]  # type: ignore[index]
+        pool = first_row(page)
         status = 200
     check("建资源组", status in (200, 201), str(pool))
     if not isinstance(pool, dict):
@@ -157,7 +181,7 @@ def main() -> int:
     )
     if status == 409:
         _, page = call("GET", f"/resource-specs?search=p5-spec-{SUFFIX}", token=admin)
-        spec = page["items"][0]  # type: ignore[index]
+        spec = first_row(page)
         status = 200
     check("建资源规格", status in (200, 201), str(spec))
     if not isinstance(spec, dict):
@@ -177,7 +201,7 @@ def main() -> int:
     )
     if status == 409:
         _, page = call("GET", f"/workspaces?search=p5-ws-{SUFFIX}", token=admin)
-        workspace = page["items"][0]  # type: ignore[index]
+        workspace = first_row(page)
         status = 200
     check("建工作空间并授权资源组", status in (200, 201), str(workspace))
     if not isinstance(workspace, dict):
@@ -215,7 +239,7 @@ def main() -> int:
         "POST",
         "/storages",
         token=token,
-        body={"name": f"scratch-{SUFFIX}", "kind": "personal_data", "capacityGb": 10},
+        body={"name": sname("scratch"), "kind": "personal_data", "capacityGb": 10},
     )
     check("创建个人存储", status == 201, str(storage))
     if not isinstance(storage, dict):
@@ -230,7 +254,7 @@ def main() -> int:
     check("可写", storage.get("isReadOnly") is False)
 
     status, detail = call("GET", f"/storages/{storage_id}", token=token)
-    check("可读取详情", status == 200 and detail["name"] == f"scratch-{SUFFIX}")
+    check("可读取详情", status == 200 and detail["name"] == sname("scratch"))
 
     # --- negative cases ---------------------------------------------------
     print("\n\033[1m约束\033[0m")
@@ -243,7 +267,7 @@ def main() -> int:
         "POST",
         "/storages",
         token=token,
-        body={"name": f"zero-{SUFFIX}", "kind": "personal_data", "capacityGb": 0},
+        body={"name": sname("zero"), "kind": "personal_data", "capacityGb": 0},
     )
     check("容量 0 被拒（422）", status == 422, f"{status} {body}")
 
@@ -251,15 +275,22 @@ def main() -> int:
         "POST",
         "/storages",
         token=token,
-        body={"name": f"home-{SUFFIX}", "kind": "personal_home", "capacityGb": 5},
+        body={"name": sname("home"), "kind": "personal_home", "capacityGb": 5},
     )
-    check("创建个人主目录", status == 201, str(body))
+    if status == 409 and error_code(body) == "storage_home_exists":
+        # "One home per person" is a rule about the owner, not the name, so a
+        # re-run legitimately collides. Reuse what is already there.
+        _, page = call("GET", "/storages?kind=personal_home&ownedOnly=true", token=token)
+        body = first_row(page)
+        status = 200
+    check("创建个人主目录", status in (200, 201), str(body))
     home_id = int(body["id"]) if isinstance(body, dict) else 0
+
     status, body = call(
         "POST",
         "/storages",
         token=token,
-        body={"name": f"home2-{SUFFIX}", "kind": "personal_home", "capacityGb": 5},
+        body={"name": sname("home2"), "kind": "personal_home", "capacityGb": 5},
     )
     check(
         "第二个个人主目录被拒（409）",
@@ -272,7 +303,7 @@ def main() -> int:
         "/storages",
         token=token,
         body={
-            "name": f"fakedataset-{SUFFIX}",
+            "name": sname("fakedataset"),
             "kind": "dataset",
             "capacityGb": 10,
             "source": "https://example.edu/x",
@@ -287,7 +318,7 @@ def main() -> int:
         "/storages",
         token=admin,
         body={
-            "name": f"dataset-{SUFFIX}",
+            "name": sname("dataset"),
             "kind": "dataset",
             "capacityGb": 100,
             "source": "https://example.edu/imagenet",
@@ -307,7 +338,7 @@ def main() -> int:
         "/storages",
         token=admin,
         body={
-            "name": f"nosource-{SUFFIX}",
+            "name": sname("nosource"),
             "kind": "dataset",
             "capacityGb": 10,
             # A workspace must be named or the request fails earlier, on
@@ -357,7 +388,7 @@ def main() -> int:
         "/instances",
         token=token,
         body={
-            "name": f"mounted-{SUFFIX}",
+            "name": sname("mounted"),
             "resourceGroupId": pool_id,
             "resourceSpecId": spec_id,
             "image": "registry.local/base:1",
@@ -401,7 +432,7 @@ def main() -> int:
         "/instances",
         token=token,
         body={
-            "name": f"gone-{SUFFIX}",
+            "name": sname("gone"),
             "resourceGroupId": pool_id,
             "resourceSpecId": spec_id,
             "image": "registry.local/base:1",
@@ -447,7 +478,7 @@ def main() -> int:
     )
 
     status, grown = call(
-        "POST", "/storages", token=token, body={"name": f"grow-{SUFFIX}", "capacityGb": 10}
+        "POST", "/storages", token=token, body={"name": sname("grow"), "capacityGb": 10}
     )
     grow_id = int(grown["id"])  # type: ignore[index]
     status, body = call("POST", f"/storages/{grow_id}/resize", token=token, body={"capacityGb": 50})
@@ -471,11 +502,172 @@ def main() -> int:
         bool(events) and events[0].get("actorUsername") == f"p5-worker-{SUFFIX}",  # type: ignore[index]
     )
 
-    status, usage = call("GET", "/storages/usage", token=token)
+    # Delta rather than absolute: an absolute count is only meaningful on a
+    # virgin database, and an assertion that only holds once gets deleted rather
+    # than re-run. What matters is that creating charges and releasing refunds.
+    _, before = call("GET", "/storages/usage", token=token)
+    _, created = call(
+        "POST", "/storages", token=token, body={"name": sname("metered"), "capacityGb": 30}
+    )
+    _, after_create = call("GET", "/storages/usage", token=token)
     check(
-        "用量汇总只统计在用存储",
-        status == 200 and usage.get("count") == 2,  # type: ignore[union-attr]
-        str(usage),
+        "创建存储后用量增加对应容量",
+        after_create.get("capacityGb") == before.get("capacityGb") + 30,  # type: ignore[union-attr]
+        f"{before} -> {after_create}",
+    )
+
+    call("DELETE", f"/storages/{created['id']}", token=token)  # type: ignore[index]
+    _, after_delete = call("GET", "/storages/usage", token=token)
+    check(
+        "删除存储后用量退回",
+        after_delete.get("capacityGb") == before.get("capacityGb"),  # type: ignore[union-attr]
+        f"{before} -> {after_delete}",
+    )
+
+    # --- the image catalogue -----------------------------------------------
+    print("\n\033[1m镜像目录\033[0m")
+    status, body = call("GET", "/images", token=token)
+    check("镜像列表可读", status == 200, str(body))
+
+    status, body = call("GET", "/images/registry", token=token)
+    check("镜像仓库健康状态可读", status == 200 and "reachable" in body, str(body))
+
+    status, body = call(
+        "POST",
+        "/images",
+        token=token,
+        body={"reference": "registry.local/library/base-notebook:latest"},
+    )
+    if status == 409:
+        # The reference key is global and a retired row still occupies it, so a
+        # re-run legitimately collides. Look past the default listing — a
+        # retired row is exactly what a previous run of this script leaves — and
+        # revive it.
+        _, page = call(
+            "GET", "/images?search=base-notebook&ownedOnly=true&includeInactive=true", token=token
+        )
+        body = first_row(page)
+        if isinstance(body, dict):
+            call("PATCH", f"/images/{body['id']}", token=token, body={"isActive": True})
+            body["isActive"] = True
+        status = 200
+    check("登记镜像（仓库中存在）", status in (200, 201), str(body))
+    image_id = int(body["id"]) if isinstance(body, dict) else 0
+    check(
+        "参考地址被拆解为 registry/project/repository/tag",
+        isinstance(body, dict)
+        and body.get("reference") == "registry.local/library/base-notebook:latest"
+        and body.get("tag") == "latest",
+        str(body),
+    )
+
+    status, body = call(
+        "POST", "/images", token=token, body={"reference": "registry.local/nope:9.9"}
+    )
+    check(
+        "打错的镜像在入库前被拒（这正是镜像目录存在的理由）",
+        status == 400 and error_code(body) == "image_not_found_upstream",
+        f"{status} {body}",
+    )
+
+    status, body = call(
+        "POST",
+        "/images",
+        token=token,
+        body={"reference": "registry.local/library/base-notebook:latest"},
+    )
+    check("同一 reference 不能重复登记", status == 409, f"{status} {body}")
+
+    status, body = call(
+        "POST",
+        "/images",
+        token=token,
+        body={"reference": "registry.local/library/base-notebook :latest"},
+    )
+    check("镜像地址含空格被拒（422，而不是 500）", status == 422, f"{status} {body}")
+
+    status, body = call(
+        "POST",
+        "/images",
+        token=token,
+        body={"reference": "registry.local/library/base-notebook:latest", "visibility": "global"},
+    )
+    check("普通用户不能全局共享镜像（403）", status == 403, f"{status} {body}")
+
+    status, body = call(
+        "POST",
+        "/images",
+        token=token,
+        body={"reference": "registry.local/library/base-notebook:latest", "kind": "official"},
+    )
+    check("普通用户不能发布官方镜像（403）", status == 403, f"{status} {body}")
+
+    status, body = call(
+        "POST",
+        "/images",
+        token=token,
+        body={"reference": "registry.local/library/base-notebook:latest", "visibility": "group"},
+    )
+    check("普通用户不能把镜像共享到用户组（403）", status == 403, f"{status} {body}")
+
+    # A global administrator holds `image:share` but belongs to no group, so
+    # there is nothing to infer — guessing would publish it somewhere unasked.
+    status, body = call(
+        "POST",
+        "/images",
+        token=admin,
+        body={"reference": "registry.local/library/base-notebook:latest", "visibility": "group"},
+    )
+    check(
+        "共享到用户组但未指定组被拒（管理员无从推断）",
+        status == 400 and error_code(body) == "image_group_required",
+        f"{status} {body}",
+    )
+
+    peer_token = login(f"p5-peer-{SUFFIX}", PASSWORD)
+    status, _ = call("GET", f"/images/{image_id}", token=peer_token)
+    check("同事看不到他人的私有镜像（404）", status == 404, str(status))
+
+    status, body = call("POST", "/images/sync", token=token, body={})
+    check("普通用户不能触发同步（403）", status == 403, f"{status} {body}")
+
+    status, body = call("POST", "/images/sync", token=admin, body={})
+    check("管理员可以同步镜像目录", status == 200, str(body))
+    check(
+        "同步把仓库中的镜像纳入目录",
+        isinstance(body, dict) and body.get("created", 0) + body.get("unchanged", 0) >= 1,
+        str(body),
+    )
+
+    status, body = call(
+        "PATCH",
+        f"/images/{image_id}",
+        token=token,
+        body={"displayName": "冒烟镜像", "cudaVersion": "12.1"},
+    )
+    check(
+        "可以修改自己的镜像条目",
+        status == 200
+        and isinstance(body, dict)
+        and body.get("displayName") == "冒烟镜像",
+        f"{status} {body}",
+    )
+
+    status, events = call("GET", f"/images/{image_id}/events", token=token)
+    kinds = [row["eventType"] for row in events] if isinstance(events, list) else []
+    check("镜像时间线记录了登记", "created" in kinds, str(kinds))
+
+    status, body = call("DELETE", f"/images/{image_id}", token=token)
+    check(
+        "可以移除自己的镜像条目",
+        status == 200 and isinstance(body, dict) and body.get("isActive") is False,
+        f"{status} {body}",
+    )
+
+    status, body = call("GET", "/images", token=token)
+    check(
+        "已移除的镜像默认不出现在列表",
+        all(row["id"] != image_id for row in body["items"]),  # type: ignore[index]
     )
 
     print("\n" + "─" * 46)

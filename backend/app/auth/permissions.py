@@ -166,7 +166,7 @@ _USER = _OBSERVER | frozenset(
         instance:stop instance:exec
         application:create application:update application:delete application:stop
         task:create task:cancel task:logs
-        image:create image:share image:delete
+        image:create image:delete
         storage:create storage:resize storage:delete
         resource_group:read resource_spec:read runtime_limit:read
         quota:read
@@ -180,6 +180,7 @@ _GROUP_ADMIN = _USER | frozenset(
         user:read group:read
         workspace:read workspace:create workspace:update
         workspace:assign_member workspace:grant_resource
+        image:share
         storage:manage
         resource_group:read resource_spec:read runtime_limit:read
         node:read quota:read

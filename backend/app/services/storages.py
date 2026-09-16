@@ -22,6 +22,7 @@ from __future__ import annotations
 import re
 
 from sqlalchemy import ColumnElement, Select, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import policy
@@ -120,9 +121,16 @@ def visible_condition(actor: User) -> ColumnElement[bool] | None:
     own = Storage.owner_user_id == actor.id
     # Anything shared or curated is visible to the actor's groups, and to anyone
     # who is a member of a workspace holding it.
+    #
+    # `scope.group_ids` holds the groups this account *administers*, which is not
+    # the same as the groups it belongs to. Sourcing "shared with my group" from
+    # it made every group share invisible to the ordinary members it exists for.
+    # Membership is the right source; the administrative grant is unioned in so a
+    # group administrator still sees everything they govern.
+    groups = frozenset(actor.group_ids) | scope.group_ids
     shared_kinds = [StorageKind.GROUP_SHARE.value, StorageKind.DATASET.value]
     shared = Storage.kind.in_(shared_kinds) & (
-        Storage.group_id.in_(scope.group_ids) | Storage.workspace_id.in_(scope.workspace_ids)
+        Storage.group_id.in_(groups) | Storage.workspace_id.in_(scope.workspace_ids)
     )
     return own | shared
 
@@ -280,7 +288,15 @@ async def create_storage(
         source=source,
     )
     session.add(storage)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        # The unique constraint on (workspace_id, name) is the real arbiter, not
+        # any pre-flight check: two concurrent requests for the same name both
+        # pass a check and only one can win the insert. Translating it here means
+        # the loser gets a 409 naming the problem instead of a 500.
+        await session.rollback()
+        raise ConflictError(f"该工作空间下已存在存储 {name}", code="storage_name_taken") from exc
 
     # Populate the `lazy="joined"` relationships from what we already fetched.
     #

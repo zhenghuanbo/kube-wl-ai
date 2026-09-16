@@ -614,16 +614,18 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 | 数据模型 | `app/models/storage.py`（`Storage`、`InstanceStorage`）、`app/models/image.py` |
 | 迁移 | `alembic/versions/d0d900699fb4_*.py`（新增 3 张表，head 共 **30** 张，`downgrade base` 可往返） |
 | K8s 抽象 | `VolumeMountSpec`、`PvcInfo`、`read_pvc`、`resize_pvc`、`parse_storage_gb`、`build_storage_objects` |
-| 服务 | `app/services/storages.py` |
-| Schema | `app/schemas/storage.py` |
-| API | `app/api/v1/storages.py`（7 个端点，注册于 `app/api/v1/router.py`） |
-| 权限 | `storage:read/create/resize/delete/manage`（`storage:manage` 为本期新增，组管理员权限数 43 → **44**） |
-| 验收测试 | `tests/test_acceptance_phase5.py`（**32** 项） |
-| 冒烟脚本 | `scripts/smoke_phase5.py`（**45** 项） |
+| 服务 | `app/services/storages.py`、`app/services/images.py` |
+| Schema | `app/schemas/storage.py`、`app/schemas/image.py` |
+| 镜像仓库客户端 | `app/registries/`（`registry.py` 协议 + `harbor.py` 真实实现 + `fake.py`，与 K8s gateway 同构） |
+| API | `app/api/v1/storages.py`（7 个端点）、`app/api/v1/images.py`（7 个端点） |
+| 权限 | `storage:read/create/resize/delete/manage`、`image:read/create/share/delete`；本期新增 `storage:manage`，并把 `image:share` 从普通用户上收到组管理员（组管理员 **44** 项，普通用户 **32** 项） |
+| 实例挂载 | `InstanceCreate.storageIds` → `build_instance_objects(extra_mounts=...)` |
+| 验收测试 | `tests/test_acceptance_phase5.py`（**33** 项）、`tests/test_acceptance_phase5_images.py`（**36** 项） |
+| 冒烟脚本 | `scripts/smoke_phase5.py`（**65** 项，可重复执行） |
 
 **验收证据**：`ruff check` + `ruff format --check` + `mypy app`（strict）全绿；
-后端全量 **304** 项测试通过；Phase 1–4 冒烟（30/33/49/61）无回归；
-`kubectl get ns,pvc -l wl-managed=true` 为空（未触碰真实集群）。
+后端全量 **343** 项测试通过；Phase 1–5 冒烟（30/33/49/61/65）无回归，Phase 5 冒烟连续两次
+执行均全通过；`kubectl get ns,pvc -l wl-managed=true` 为空（未触碰真实集群）。
 
 **关键设计决策**
 
@@ -646,6 +648,21 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
    一个组共享数据集对五十个成员都可见、却不属于任何人，按可见性统计会让每个人都
    被告知自己占用了那 100 GB。全局管理员拿到的是全站总量（个人总量对他们没有意义）。
 
+8. **镜像目录是 Harbor 的缓存，不是真相**。同步可以回收仓库不再报告的条目 ——
+   但 `is_pinned` 除外：一个被精选的镜像从列表里消失，通常意味着 project 配错了，
+   而不是决定不再提供它，静默下架会打断每一个引用了它的已保存应用。
+   同步还**不会**动个人条目，因为它们本来就不属于共享目录。
+9. **回收的判断依据是「这一趟是否成功」，而不是「这一趟是否看见了东西」**。
+   仓库确实一个 repository 都没有并不算失败，用 `if not seen: return 0` 挡着会让
+   真正的清理永远做不成；但一次出过错的同步看到的是残缺画面，按残缺画面删东西才是
+   真正危险的。所以判断条件改成了 `if result.errors: return 0`。
+10. **`image:share` 从普通用户上收到组管理员**。共享一个镜像等于替所有实验室背书
+   他们将要拉取的东西，这不该是每个用户都能做的事。发布 `official` 或 `global`
+   同样需要它。
+11. **未命名用户组的 `group` 共享**：单组管理员可以直接推断出其用户组（答案没有歧义，
+   再问一遍是纯摩擦）；但全局管理员不属于任何组，此时拒绝而不是猜 ——
+   猜错会把镜像发到一个没人要求的地方。
+
 **本期踩到的坑**
 
 - **`MissingGreenlet` 复发（与 Phase 3 的 `Workspace.group` 同类）**：`Storage.workspace`
@@ -657,6 +674,19 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
   正确做法是服务内部**只**把阻塞的 gateway 调用丢进 `run_gateway`。
   （`mypy` 的 `unused-coroutine` 抓到了它。）
 - `PvcSpec.medium` 不存在：PVC 没有 medium 字段（那是 emptyDir 的），已移除。
+- **自定义校验器会让请求变成 500**：Pydantic 在 `ctx` 里挂的是原始异常对象，
+  `ValueError` 无法 JSON 序列化，于是**任何** `field_validator` 拒绝取值时都会 500 ——
+  而这恰恰是最需要一条清晰 422 的场合。现已在 `_handle_validation_error` 里把异常
+  换成它的 message 并做编码兜底。
+- **`DataScope.group_ids` 是「我管理的用户组」，不是「我所属的用户组」**。
+  用它来实现「共享给我的组」会让组共享**只对组管理员可见、对普通成员不可见**，
+  也就是让这个功能对它真正服务的人失效。存储与镜像的 `visible_condition` 都已改为
+  以 `actor.group_ids`（成员关系）为准，并并入管理范围。**排查时优先怀疑这里。**
+- **唯一约束才是真正的仲裁者**：预先查重挡不住并发（两个请求都能通过检查，只有一个
+  能插入成功），只有把 `IntegrityError` 翻译成 409 才能避免 500。存储创建已如此处理。
+- 冒烟脚本原先不可重复执行（存储名唯一、个人主目录每用户唯一、镜像 reference 全局唯一）。
+  现已改用每次运行的随机后缀 + 冲突时复用既有条目；删除后仍被占用的 reference 需要
+  带 `includeInactive=true` 才能查到，再 PATCH 复活。
 
 ### ⏳ Phase 6–8（待开始）
 

@@ -98,6 +98,8 @@ class Settings(BaseSettings):
     harbor_url: str = ""
     harbor_robot_name: str = ""
     harbor_robot_secret: SecretStr = SecretStr("")
+    #: Disable only for a registry with a private CA during bring-up.
+    harbor_verify_tls: bool = True
 
     # --- Monitoring ----------------------------------------------------------
     prometheus_url: str = ""

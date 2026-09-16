@@ -244,6 +244,7 @@ class WorkloadKind(StrEnum):
     APPLICATION = "application"
     TASK = "task"
     STORAGE = "storage"
+    IMAGE = "image"
 
 
 class WorkloadEventType(StrEnum):

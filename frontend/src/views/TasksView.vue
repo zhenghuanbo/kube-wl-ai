@@ -30,6 +30,7 @@ import {
 } from '@/api/tasks'
 import { getMyWorkspace, listWorkspaceGrants, listWorkspaces } from '@/api/workspaces'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import ImagePicker from '@/components/image/ImagePicker.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import FilterBar from '@/components/common/FilterBar.vue'
 import PageHeader from '@/components/common/PageHeader.vue'
@@ -806,13 +807,7 @@ function eventTone(event: WorkloadEvent): string {
             </v-col>
 
             <v-col cols="12" sm="8">
-              <v-text-field
-                v-model="form.image"
-                label="容器镜像"
-                placeholder="registry.local/pytorch:2.4-cuda12"
-                variant="outlined"
-                density="comfortable"
-              />
+              <ImagePicker v-model="form.image" label="容器镜像 *" />
             </v-col>
             <v-col cols="12" sm="4">
               <v-text-field

@@ -84,6 +84,14 @@ export interface InstanceCreatePayload {
   image: string
   ideType?: IdeType
   storageGb?: number | null
+  /**
+   * Persistent volumes to mount beyond the instance's own scratch claim.
+   *
+   * Attached capacity is not charged against `storageGb`: each volume settled
+   * its quota when it was created, and counting the same gigabyte twice would
+   * make a workspace hit its ceiling for no reason.
+   */
+  storageIds?: number[]
   sshEnabled?: boolean
   maxRuntimeSeconds?: number | null
 }

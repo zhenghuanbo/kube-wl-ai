@@ -57,7 +57,7 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'images',
         name: 'images',
-        component: () => import('@/views/PlaceholderView.vue'),
+        component: () => import('@/views/ImagesView.vue'),
         meta: { title: '镜像', phase: 'Phase 5' },
       },
       {
@@ -75,7 +75,7 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'storage',
         name: 'storage',
-        component: () => import('@/views/PlaceholderView.vue'),
+        component: () => import('@/views/StorageView.vue'),
         meta: { title: '存储资源', phase: 'Phase 5' },
       },
       {

@@ -39,6 +39,17 @@ const STATUS_MAP: Record<string, StatusStyle> = {
   provisioning: { label: '下发中', tone: 'info', icon: 'mdi-progress-clock' },
   suspended: { label: '已停用', tone: 'neutral', icon: 'mdi-pause-circle-outline' },
 
+  // Storage lifecycle
+  // `pending` and `deleting` are already covered above; `bound` is the healthy
+  // resting state of a volume and has no equivalent in the workload enum.
+  bound: { label: '已就绪', tone: 'success', icon: 'mdi-harddisk' },
+  resizing: { label: '扩容中', tone: 'info', icon: 'mdi-arrow-expand-horizontal' },
+  released: { label: '已释放', tone: 'neutral', icon: 'mdi-archive-outline' },
+
+  // Task lifecycle. A `timeout` is its own outcome, not a failure of the
+  // command: the algorithm was still running when its budget ran out.
+  timeout: { label: '超时', tone: 'warning', icon: 'mdi-timer-off-outline' },
+
   // Node health
   ready: { label: '就绪', tone: 'success', icon: 'mdi-check-circle-outline' },
   not_ready: { label: '未就绪', tone: 'error', icon: 'mdi-alert-circle-outline' },

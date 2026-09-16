@@ -55,6 +55,13 @@ PAYLOAD_ALIASES = {
     "WorkspaceUpdatePayload": "WorkspaceUpdate",
     "WorkspaceMemberAssignPayload": "WorkspaceMemberAssign",
     "WorkspaceResourceGrantPayload": "WorkspaceResourceGrantCreate",
+    # Storage and images name their request models after the *action* rather
+    # than the verb: registering an image is not "creating" it — the registry
+    # already has it — and resizing is not an update.
+    "StorageCreatePayload": "StorageCreate",
+    "StorageUpdatePayload": "StorageUpdate",
+    "ImageRegisterPayload": "ImageRegister",
+    "ImageUpdatePayload": "ImageUpdate",
     # Read models: the backend appends `Read` where the frontend does not.
     "WorkloadEvent": "WorkloadEventRead",
     "SshKey": "SshKeyRead",
@@ -62,6 +69,7 @@ PAYLOAD_ALIASES = {
     "RuntimeLimit": "RuntimeLimitRead",
     "GpuDevice": "GpuDeviceRead",
     "ComputeNode": "ComputeNodeRead",
+    "RegistryStatus": "RegistryStatusRead",
     "Quota": "QuotaRead",
     "WorkspaceMember": "WorkspaceMemberRead",
     "WorkspaceResourceGrant": "WorkspaceResourceGrantRead",

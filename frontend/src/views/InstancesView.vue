@@ -39,6 +39,8 @@ import EmptyState from '@/components/common/EmptyState.vue'
 import FilterBar from '@/components/common/FilterBar.vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import StatusChip from '@/components/common/StatusChip.vue'
+import { listAttachableStorages } from '@/api/storages'
+import ImagePicker from '@/components/image/ImagePicker.vue'
 import { usePermissions } from '@/composables/usePermissions'
 import { useNotificationStore } from '@/stores/notifications'
 import type {
@@ -48,6 +50,7 @@ import type {
   InstanceSummary,
 } from '@/types/instance'
 import { IDE_OPTIONS } from '@/types/instance'
+import { storageKindMeta, type StorageSummary } from '@/types/storage'
 import {
   formatCpu,
   formatDuration,
@@ -168,6 +171,8 @@ interface CreateForm {
   image: string
   ideType: IdeType
   storageGb: number | null
+  /** Persistent volumes to mount beyond the instance's own scratch claim. */
+  storageIds: number[]
   sshEnabled: boolean
   maxRuntimeSeconds: number | null
 }
@@ -184,6 +189,7 @@ const form = reactive<CreateForm>({
   image: '',
   ideType: 'jupyter',
   storageGb: null,
+  storageIds: [],
   sshEnabled: true,
   maxRuntimeSeconds: null,
 })
@@ -212,6 +218,51 @@ const runtimeOptions = computed(() => {
 
 const storageCap = computed(() => selectedPool.value?.limits?.maxStorageGbPerUser ?? null)
 
+/**
+ * Volumes this instance could mount.
+ *
+ * Excludes personal homes: those are mounted automatically, and choosing one
+ * explicitly is refused by the API — offering it here would be offering an
+ * action that always fails.
+ */
+const attachableStorages = ref<StorageSummary[]>([])
+const loadingStorages = ref(false)
+
+async function loadAttachable(): Promise<void> {
+  const workspaceId = form.workspaceId
+  if (workspaceId === null) {
+    attachableStorages.value = []
+    return
+  }
+  loadingStorages.value = true
+  try {
+    attachableStorages.value = await listAttachableStorages(workspaceId)
+  } catch {
+    // The mount list is optional; failing to load it must not block creating an
+    // instance without any.
+    attachableStorages.value = []
+  } finally {
+    loadingStorages.value = false
+  }
+}
+
+// Reload whenever the target workspace changes, and drop any selection that no
+// longer belongs to it — a volume from another namespace simply cannot be seen.
+watch(
+  () => form.workspaceId,
+  () => {
+    form.storageIds = []
+    void loadAttachable()
+  },
+)
+
+function storageSubtitle(row: StorageSummary): string {
+  const parts = [row.defaultMountPath, `${row.capacityGb} GB`]
+  if (row.isReadOnly) parts.push('只读')
+  parts.push(storageKindMeta(row.kind).title)
+  return parts.join(' · ')
+}
+
 const canSubmit = computed(
   () =>
     /^[a-z0-9][a-z0-9-]*$/.test(form.name) &&
@@ -233,6 +284,7 @@ function resetForm(): void {
     image: '',
     ideType: 'jupyter',
     storageGb: null,
+    storageIds: [],
     sshEnabled: true,
     maxRuntimeSeconds: null,
   })
@@ -302,6 +354,7 @@ async function submitCreate(): Promise<void> {
       image: form.image.trim(),
       ideType: form.ideType,
       storageGb: form.storageGb,
+      storageIds: form.storageIds,
       sshEnabled: form.sshEnabled,
       maxRuntimeSeconds: form.maxRuntimeSeconds,
     })
@@ -846,16 +899,50 @@ const workspaceChoices = computed(() =>
             </v-col>
 
             <v-col cols="12">
-              <v-text-field
+              <ImagePicker
                 v-model="form.image"
                 label="镜像 *"
+                hint="目录中没有想要的镜像时，可以直接输入完整地址"
+              />
+            </v-col>
+
+            <v-col cols="12">
+              <v-select
+                v-model="form.storageIds"
+                :items="attachableStorages"
+                item-title="displayName"
+                item-value="id"
+                label="挂载存储（可选）"
                 density="comfortable"
                 variant="outlined"
                 hide-details="auto"
-                placeholder="registry.example.edu/jupyter-pytorch:2.4-cuda12"
-                hint="必须是资源组可访问的镜像仓库中的完整地址"
+                multiple
+                chips
+                closable-chips
+                :loading="loadingStorages"
+                :disabled="form.workspaceId === null"
+                :no-data-text="
+                  form.workspaceId === null ? '请先选择工作空间' : '这个工作空间里还没有可挂载的存储'
+                "
+                hint="个人主目录会自动挂载，不需要在这里选择。附加的存储不重复占用实例配额。"
                 persistent-hint
-              />
+              >
+                <template #item="{ props: itemProps, item }">
+                  <v-list-item v-bind="itemProps" :subtitle="storageSubtitle(item)">
+                    <template #prepend>
+                      <v-icon :icon="storageKindMeta(item.kind).icon" />
+                    </template>
+                    <template #append>
+                      <v-icon
+                        v-if="item.isReadOnly"
+                        icon="mdi-lock-outline"
+                        size="small"
+                        title="只读挂载"
+                      />
+                    </template>
+                  </v-list-item>
+                </template>
+              </v-select>
             </v-col>
 
             <v-col cols="12" sm="6">

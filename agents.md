@@ -178,11 +178,29 @@ nginx ──► api (FastAPI/uvicorn) ──┬─► PostgreSQL
 
 ### 5.4 存储
 
-`storages(kind=personal_home|personal_data|group_share|dataset|object, capacity_gb, used_gb, storage_class, medium, pvc_name, k8s_namespace, status)`
+`storages(kind=personal_home|personal_data|group_share|dataset|object, capacity_gb, used_gb,
+storage_class, access_mode, medium, pvc_name, k8s_namespace, source, size_bytes, is_read_only,
+status, status_message, checked_at, workspace_id, group_id, owner_user_id, created_by, is_active)`
+
+`instance_storages(instance_id, storage_id, mount_path, is_read_only)` —— 挂载关系是显式的
+多对多，因为一个卷可以同时被多个实例挂载，而挂载点随实例而变。
+
+> `medium` **只是记录**，永远不发给集群：`PersistentVolumeClaim` 没有这个字段（那是
+> `emptyDir` 的）。它留着是为了让界面能提示某个 StorageClass 是 tmpfs —— 那种卷重启即
+> 清空，而且占用的是内存、不计入配额。`K8s` 层的 `PvcSpec` 上确实没有它。
+>
+> `access_mode` 对 `dataset`/`group_share` 默认 `ReadWriteMany`，其余默认 `ReadWriteOnce`。
 
 ### 5.5 镜像
 
-`images(registry, project, repository, tag, digest, kind=personal|official|shared, visibility, framework, python_version, cuda_version, os_version, usage_scope, size_bytes, description, synced_at)`
+`images(registry, project, repository, tag, digest, kind=personal|official|shared, visibility,
+category, framework, framework_version, python_version, cuda_version, os_version, size_bytes,
+layer_count, display_name, description, is_pinned, is_active, usage_count, synced_at, sync_error,
+workspace_id, group_id, owner_user_id, created_by)`
+
+> 唯一约束是 `(registry, project, repository, tag)`。
+> Python 属性名为 `registry_host`（`registry` 与 `DeclarativeBase.registry` 冲突），
+> 数据库列名仍是 `registry`。
 
 ### 5.6 工作负载
 
@@ -604,7 +622,7 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
    它们此前「通过」是因为账号确实建成了、组关联压根没建、而 `roleCodes` 的默认值恰好
    也是 `["user"]` —— 断言的是从未发生的事。已全部修正。
 
-### 🔄 Phase 5 — 镜像与存储（后端已完成，前端待做）
+### ✅ Phase 5 — 镜像与存储（已完成）
 
 **交付（后端）**
 
@@ -623,9 +641,29 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 | 验收测试 | `tests/test_acceptance_phase5.py`（**33** 项）、`tests/test_acceptance_phase5_images.py`（**36** 项） |
 | 冒烟脚本 | `scripts/smoke_phase5.py`（**65** 项，可重复执行） |
 
+**交付（前端）**
+
+| 交付物 | 位置 |
+| --- | --- |
+| 类型 | `src/types/storage.ts`、`src/types/image.ts`（含 `STORAGE_KINDS` 元数据、`IMAGE_KIND_META`、`IMAGE_VISIBILITY_META`、`SELF_SERVICE_VISIBILITIES`） |
+| API 客户端 | `src/api/storages.ts`（9 个函数）、`src/api/images.ts`（9 个函数） |
+| 页面 | `src/views/StorageView.vue`、`src/views/ImagesView.vue`（已接入 `/storage`、`/images` 路由，不再是占位页） |
+| 复用组件 | `src/components/image/ImagePicker.vue` |
+| 表单接入 | `InstancesView`（镜像选择器 + 挂载存储多选）、`TasksView`、`ApplicationsView`（镜像选择器） |
+| 状态词表 | `StatusChip` 补齐 `bound`/`resizing`/`released`/`timeout` |
+| 契约校验 | `scripts/check-frontend-types.py` 覆盖接口由 **39** 增至 **51** |
+| 视图冒烟 | `scripts/smoke_frontend_views.mjs`（**11/11** 视图挂载并渲染出数据） |
+
 **验收证据**：`ruff check` + `ruff format --check` + `mypy app`（strict）全绿；
 后端全量 **343** 项测试通过；Phase 1–5 冒烟（30/33/49/61/65）无回归，Phase 5 冒烟连续两次
 执行均全通过；`kubectl get ns,pvc -l wl-managed=true` 为空（未触碰真实集群）。
+前端 `vue-tsc --noEmit` 与 `vite build` 均通过；`scripts/check-frontend-types.py`
+校验 **51** 个接口全部吻合（并已用植入错误反向确认它**真的**会失败，退出码 1）；
+`scripts/smoke_frontend_views.mjs` 把 **11** 个视图逐个挂载进 `happy-dom`、等数据到位、
+再断言渲染结果（同样用植入错误反向确认过）；
+两个新页面调用的全部端点已对着运行中的后端逐条走通，`StorageDetail`/`ImageDetail`
+的每个抽屉字段、分页信封 `{items, meta{page,pageSize,total,pages}}`、
+`StorageUsage`/`ImageUsage`/`RegistryStatus` 的字段集合都已断言。
 
 **关键设计决策**
 
@@ -663,6 +701,58 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
    再问一遍是纯摩擦）；但全局管理员不属于任何组，此时拒绝而不是猜 ——
    猜错会把镜像发到一个没人要求的地方。
 
+**前端验证：为什么需要一个挂载型冒烟**
+
+`vue-tsc` 证明模板类型正确，`vite build` 证明它能编译，但**两者都不会运行 `setup()`**。
+一个视图可以同时通过这两关，然后在第一次绘制时崩掉：读了接口不发的字段、用不存在的键
+去索引映射、把接口返回的形状搞错。这些正是会到达用户面前的缺陷，而编译器看不见它们。
+
+`scripts/smoke_frontend_views.mjs` 因此把视图**真正挂载**起来：用 `vite build` 出一份
+浏览器构建（不是 SSR —— 见下），在 `happy-dom` 里挂载，喂给桩化的 API 与预置的 store，
+等数据落地，然后断言「夹具里的文本确实出现在 DOM 里」。最后一步是关键：
+「没抛异常」是个很弱的结论，因为**数据没到的视图会渲染出一个完全合法的空状态**。
+
+两条走不通的路（都试过，记下来省得再试）：
+
+- **`renderToString`**：SSR 不执行 `onMounted`，而这里的每个视图都在 `onMounted` 里取数；
+  重新渲染又会新建组件实例，所以取到的状态永远活不到第二遍。
+- **`vite.ssrLoadModule` + DOM**：模块是按**服务端**编译返回的（`ssrRender`、
+  `useSSRContext`），Vuetify 的客户端组件会因为缺少 SSR 上下文而失败。
+  视图必须按浏览器构建。
+
+它当场就抓到了一个真问题：`StorageView` 的表格**没有传 `:headers`**，
+于是 `v-data-table` 按第一行的每个字段自动生成列 —— 页面上出现了 `pvcName`、
+`k8sNamespace`、`workspaceId` 这些内部字段，而我写的 `capacity`、`owner` 两个插槽
+**根本没有对应的列可渲染**，表格一直在显示原始值。类型检查和构建都发现不了这个。
+
+同时它也暴露了一类断言陷阱：桩里的 `150 GB` 让期望值 `50 GB` **子串命中**，
+植入的显示缺陷因此溜了过去。所以脚本额外维护一份「绝不能出现」的清单
+（`undefined`、`NaN`、`[object Object]`），它不依赖夹具、也不依赖有没有人记得写期望值，
+并且夹具取值刻意互不包含。
+
+它还顺带纠正了脚本自身的一个假设：「列表类接口都返回分页信封」是错的
+（`listWorkspaceGrants` 返回数组、`listWorkspaces` 返回 `Page`），
+所以桩的默认形状改为**从其 `Promise<...>` 声明推导**，新端点不会再默默拿到错误的形状。
+
+**前端设计决策**
+
+12. **镜像选择器允许越过目录直接输入**。它的职责是让常见情况变成「选一下」、
+   让少见情况变成「显式输入」，**不是**禁止少见情况。把输入锁死在目录里，挡住的
+   恰好是那些在造目录里还没有的东西的人 —— 而他们正是最需要建实例的人。
+   目录取不到时更是如此：选择器降级成文本框，表单不会因为一个 GET 失败而不可用。
+13. **容量只能涨，所以扩容对话框的初值是 `当前值 + 10`**，且小于等于当前值的输入
+   在校验层就被拒绝。预填当前值等于提供一个必然失败的默认值
+   —— Kubernetes 无法缩小 PVC，接口拒绝它是对的，界面不该先邀请再拒绝。
+14. **存储名创建后不可改**。它已经是集群里 PVC 名的一部分，改这里要么什么都不改，
+   要么让记录和 PVC 对不上 —— 而一个名字与实体不一致的卷，比一个名字难看的卷糟得多。
+15. **「已释放」的卷保留记录**。删除的是集群里的卷，不是表里的行：谁在什么时候
+   释放了多少容量，是下一次有人问「我的盘去哪了」时唯一的答案。
+    因此列表默认隐藏、`includeInactive=true` 可查，详情抽屉里的操作记录永不删除。
+16. **删除被拒绝时，把实例名一起显示**。接口返回 409 并点名仍挂载它的实例，
+   界面只显示「使用中」就把唯一有用的信息丢掉了 —— 用户需要知道的是**该去关哪个**。
+17. **两个页面的统计卡都是「我被收费的」，不是「我能看见的」**（后端已如此实现，
+    前端如实呈现）：组共享数据集对五十个成员都可见却不属于任何人。
+
 **本期踩到的坑**
 
 - **`MissingGreenlet` 复发（与 Phase 3 的 `Workspace.group` 同类）**：`Storage.workspace`
@@ -687,6 +777,18 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 - 冒烟脚本原先不可重复执行（存储名唯一、个人主目录每用户唯一、镜像 reference 全局唯一）。
   现已改用每次运行的随机后缀 + 冲突时复用既有条目；删除后仍被占用的 reference 需要
   带 `includeInactive=true` 才能查到，再 PATCH 复活。
+- **模板表达式里不能写带类型标注的箭头函数**。`@click:row="(_e: unknown, row: {item: T}) => f(row.item)"`
+  会被模板编译器当成语法错误（`TS1005`），vue-tsc 报的位置还落在属性行上，看不出是表达式的问题。
+  改成脚本里的处理函数即可；顺带用 `unknown` + 收窄来兼容 `v-data-table` 各版本传参形状的差异。
+- **`v-data-table` 不传 `:headers` 时按数据字段自动建列**，看起来「表格能出来」，
+  实际上内部字段全都露在外面、而你写的 `#item.<key>` 插槽只要 key 不是真实字段名就永远
+  不触发。任务/实例/存储三张表都显式声明了 `headers`，新增表格时务必照做。
+- **`check-frontend-types.py` 的 `PAYLOAD_ALIASES` 静默漏检**：它的规则是
+  `XxxPayload → XxxCreate/XxxUpdate`，而存储与镜像是按**动作**命名的
+  （`StorageCreate`、`ImageRegister`、`ImageUpdate`），于是这几个请求体
+  **一行都没被校验**，却在输出里只是安静地列进「未检查」。已补映射，
+  并把 `RegistryStatus → RegistryStatusRead` 一并补上。
+  **新增请求体类型后一定要看这一行计数有没有涨** —— 它不涨就说明映射没生效。
 
 ### ⏳ Phase 6–8（待开始）
 
@@ -695,9 +797,6 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 | Phase 6 | 用量中心 | 1.5 周 |
 | Phase 7 | Grafana 监控集成 | 1.5 周 |
 | Phase 8 | API 开放、审计与上线 | 2 周 |
-
-> Phase 5 前端（`StorageView.vue`、`ImagesView.vue`、镜像选择器）与镜像服务
-> （`app/services/images.py`、Harbor 客户端）尚未完成。
 
 > 每期必须可运行并**通过验收**后才进入下一期。
 
@@ -829,5 +928,13 @@ Vuex `namespace: true` 拼写错误、`Admin/User.vue` 为 0 字节、
 | API 契约 | `frontend/openapi/schema.json`（由 `./scripts/gen-openapi.sh` 生成） |
 | 工作空间与资源前端 | `frontend/src/views/MyWorkspaceView.vue`、`frontend/src/views/admin/WorkspacesView.vue`、`frontend/src/views/admin/ResourcesView.vue` |
 | 前端资源/工作空间类型与 API | `frontend/src/types/resource.ts`、`frontend/src/api/workspaces.ts`、`frontend/src/api/resources.ts` |
-| **部署冒烟验收** | `scripts/smoke-env.sh` + `scripts/smoke_phase1.py` + `scripts/smoke_phase2.py` |
+| **持久化存储（后端）** | `backend/app/services/storages.py`、`backend/app/api/v1/storages.py` |
+| **镜像目录（后端）** | `backend/app/services/images.py`、`backend/app/api/v1/images.py` |
+| **镜像仓库客户端** | `backend/app/registries/`（`registry.py` 协议 / `harbor.py` 真实 / `fake.py` 测试） |
+| 存储与镜像前端 | `frontend/src/views/StorageView.vue`、`frontend/src/views/ImagesView.vue` |
+| 镜像选择器（实例/任务/应用表单复用） | `frontend/src/components/image/ImagePicker.vue` |
+| 存储与镜像类型 / API | `frontend/src/types/storage.ts`、`frontend/src/types/image.ts`、`frontend/src/api/storages.ts`、`frontend/src/api/images.ts` |
+| **部署冒烟验收** | `scripts/smoke-env.sh` + `scripts/smoke_phase1.py` … `scripts/smoke_phase5.py` |
+| **前端契约校验** | `scripts/check-frontend-types.py`（新请求体类型记得同步 `PAYLOAD_ALIASES`） |
+| **前端视图冒烟** | `scripts/smoke_frontend_views.mjs`（`happy-dom` 里真实挂载 + 内容断言） |
 | 旧实现参考 | `legacy/README.md` |

@@ -88,6 +88,11 @@ PAYLOAD_ALIASES = {
     "MonitorDashboard": "MonitorDashboardRead",
     "MonitorEmbed": "MonitorEmbedRead",
     "MonitorNode": "MonitorNodeSummary",
+    # Phase 8. `ApiToken` is the *listing* read model — the issued one is a
+    # separate, deliberate type — and the audit row is named for the table.
+    "ApiToken": "ApiTokenRead",
+    "ApiTokenCreatePayload": "ApiTokenCreate",
+    "AuditEntry": "AuditLogRead",
 }
 # A field line: `name?: type` or `name: type`. Indented, so object literal types
 # nested inside a field never match at the start of their own line.

@@ -1,0 +1,62 @@
+{{ include "kube-wl-ai.validate" . }}
+kube-wl-ai {{ .Chart.AppVersion }} 已安装到命名空间 {{ .Release.Namespace }}。
+
+{{ if .Values.ingress.enabled -}}
+访问地址：{{ if .Values.ingress.tls.enabled }}https{{ else }}http{{ end }}://{{ .Values.ingress.host }}
+{{- else -}}
+尚未启用 Ingress。可以先用端口转发：
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "kube-wl-ai.fullname" . }}-web 8080:{{ .Values.web.service.port }}
+
+然后打开 http://localhost:8080 —— 注意这是 **web** 服务，它会把 /api 反代到后端，
+直接转发 api 服务只会看到 JSON。
+{{- end }}
+
+初始管理员（本地兜底账号）：
+{{- if .Values.secrets.existingSecret }}
+  用户名与密码在 Secret `{{ .Values.secrets.existingSecret }}` 中。
+{{- else }}
+  用户名：{{ .Values.config.localAdminUsername | default "admin" }}
+  密码：  kubectl -n {{ .Release.Namespace }} get secret {{ include "kube-wl-ai.secretName" . }} -o jsonpath='{.data.localAdminPassword}' | base64 -d
+{{- end }}
+
+登录后请立刻做的三件事：
+  1. 在「个人设置」页登记 SSH 公钥 —— 没有公钥的实例创建得出来，但 SSH 登不进去；
+  2. 在「用户组管理」里建组、在「工作空间管理」里建工作空间（= 一个 K8s 命名空间）；
+  3. 确认 FreeIPA 的 observer 组名与 `config.ldap.observerGroup` 一致，
+     否则目录同步会把只读用户提成普通用户。
+
+{{ if not (semverCompare ">=1.31-0" .Capabilities.KubeVersion.Version) -}}
+⚠️  本集群为 {{ .Capabilities.KubeVersion.Version }}，早于 1.31，没有
+    subject namespaceSelector，因此工作空间角色是 **集群范围** 授予的
+    （rbac.allowClusterWideWorkspaceAccess=true）。平台的 ServiceAccount
+    可以读取、进入本集群 *所有* 命名空间中的 Pod，而不只是自己管理的那些。
+    长期方案是升级到 1.31+，或改为在创建命名空间时写入 RoleBinding。
+{{ end -}}
+{{ if not .Values.networkPolicy.enabled -}}
+⚠️  NetworkPolicy 已关闭。数据库与 Redis 对命名空间内任意 Pod 可达。
+{{ end -}}
+{{ if .Values.networkPolicy.enabled -}}
+提醒：NetworkPolicy 只有被 CNI 实现时才生效。kubenet 会静默忽略，请确认
+集群运行的是 Calico / Cilium 之类。
+{{ end -}}
+{{ if not .Values.config.monitoring.grafanaPublicUrl -}}
+提醒：未配置 Grafana，监控中心的仪表盘目录会显示为「未接入」。
+{{ end -}}
+{{ if not .Values.migrations.enabled -}}
+⚠️  数据库迁移任务已关闭。请自行执行 `alembic upgrade head` 与
+    `python -m app.cli sync-rbac` —— 后者是必须的：新增权限只存在于代码里，
+    不同步到数据库就没人持有它。
+{{ end -}}
+撤销安装：
+
+  helm uninstall {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+注意 `helm uninstall` **不会**删除数据。Secret（含数据库口令与 JWT 私钥）和
+StatefulSet 的 PVC 都带 `helm.sh/resource-policy: keep`，这是刻意的：
+一次误卸载不应该带走一学期的用量记录。清理请显式执行：
+
+  kubectl -n {{ .Release.Namespace }} delete pvc -l app.kubernetes.io/instance={{ .Release.Name }}
+  kubectl -n {{ .Release.Namespace }} delete secret {{ include "kube-wl-ai.secretName" . }}
+
+平台创建的工作空间命名空间（标签 wl-managed=true）也不会被自动回收。

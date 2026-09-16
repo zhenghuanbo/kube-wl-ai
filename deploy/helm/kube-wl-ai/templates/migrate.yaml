@@ -1,0 +1,78 @@
+{{- if .Values.migrations.enabled }}
+{{/*
+Schema migration, run once and before the new code.
+
+A `pre-install,pre-upgrade` hook rather than an init container: an init container
+runs once per replica, so N replicas race to apply the same Alembic revision, and
+a failure there produces a CrashLoopBackOff on the app rather than a failed
+release. A hook runs once, and a non-zero exit **aborts the upgrade** — which is
+the behaviour worth having, because an old schema behind new code fails in ways
+that are hard to read.
+
+`before-hook-creation` means a leftover Job from a previous failed upgrade does
+not block the next attempt.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "kube-wl-ai.fullname" . }}-migrate
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migrations.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "kube-wl-ai.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "kube-wl-ai.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      {{- $pullSecrets := concat (default (list) .Values.image.pullSecrets) (default (list) .Values.imagePullSecrets) }}
+      {{- with $pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: migrate
+          image: {{ include "kube-wl-ai.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Two steps, in order, and neither is optional.
+          #
+          # `alembic upgrade head` moves the schema. `sync-rbac` then reconciles
+          # the permission and role catalogue — a code change that adds a
+          # permission is a *data* change in the database, and without this the
+          # new code checks a permission that no role holds.
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              alembic upgrade head
+              python -m app.cli sync-rbac
+          env:
+            {{- include "kube-wl-ai.commonEnv" . | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

@@ -35,7 +35,7 @@
 
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, extname, join } from 'node:path'
+import { basename, extname, join, relative } from 'node:path'
 import { fileURLToPath, pathToFileURL, URL } from 'node:url'
 
 const FRONTEND = fileURLToPath(new URL('../frontend', import.meta.url))
@@ -164,21 +164,25 @@ const INSTANCE = {
   updatedAt: '2025-01-03T00:00:00Z',
 }
 
+// The exact `UserSummary` wire shape. It used to carry a `groups` array that the
+// API has never sent, and no `fullName` at all — a mismatch nothing caught,
+// because `views/admin/` was outside the harness's non-recursive discovery and
+// the view was therefore never mounted. The moment discovery went recursive, the
+// name column rendered "—" and the mistake surfaced.
 const USER = {
   id: 2,
   username: 'zhangsan',
+  fullName: '张三',
   displayName: '张三',
   email: 'zhangsan@example.edu',
+  source: 'ldap',
   isActive: true,
-  roles: ['user'],
-  groups: [{ id: 1, name: 'nlp-lab', displayName: 'NLP 实验室', isPrimary: true }],
-  scope: 'group',
-  scopeGroupIds: [1],
-  scopeWorkspaceIds: [1],
-  globalAdmin: false,
+  isSuperuser: false,
+  expiresAt: null,
   lastLoginAt: '2025-01-03T00:00:00Z',
-  createdAt: '2025-01-01T00:00:00Z',
-  updatedAt: '2025-01-03T00:00:00Z',
+  roles: ['user'],
+  primaryGroupId: 1,
+  primaryGroupName: 'NLP 实验室',
 }
 
 const GROUP = {
@@ -338,6 +342,63 @@ const RETURNS = {
       publicKey: 'ssh-ed25519 AAAA',
       createdAt: '2025-01-01T00:00:00Z',
       lastUsedAt: null,
+    },
+  ],
+  listAuditLogs: page([
+    {
+      id: 41,
+      createdAt: '2025-01-03T10:15:00Z',
+      actorUserId: 2,
+      actorUsername: 'zhangsan',
+      action: 'instance:create',
+      objectType: 'instance',
+      objectId: '7',
+      status: 'success',
+      detail: { method: 'POST', path: 'instances' },
+      ipAddress: '10.0.0.9',
+      requestId: 'req-abcdef123456',
+      errorMessage: null,
+    },
+    {
+      // Unattributed: a failed login carries the name that was *typed*, and the
+      // view must mark it rather than present it as a verified identity.
+      id: 40,
+      createdAt: '2025-01-03T10:14:00Z',
+      actorUserId: null,
+      actorUsername: 'root',
+      action: 'auth:login',
+      objectType: 'user',
+      objectId: null,
+      status: 'denied',
+      detail: { username: 'root', provider: 'failed' },
+      ipAddress: '10.0.0.9',
+      requestId: 'req-abcdef123455',
+      errorMessage: '用户名或密码错误',
+    },
+  ]),
+  getAuditMeta: {
+    actions: ['instance:create', 'auth:login'],
+    objectTypes: ['instance', 'user'],
+    statuses: ['success', 'denied', 'error'],
+  },
+  listApiTokens: [
+    {
+      id: 1,
+      name: 'ci-deploy',
+      prefix: 'wl_abcdefgh',
+      scopes: ['instance:read', 'task:create'],
+      expiresAt: '2026-01-01T00:00:00Z',
+      lastUsedAt: '2025-01-03T09:00:00Z',
+      createdAt: '2025-01-01T00:00:00Z',
+    },
+    {
+      id: 2,
+      name: 'inherit-all',
+      prefix: 'wl_ijklmnop',
+      scopes: [],
+      expiresAt: null,
+      lastUsedAt: null,
+      createdAt: '2025-01-02T00:00:00Z',
     },
   ],
   listStorageEvents: [EVENT],
@@ -635,8 +696,22 @@ const EXPECTS = {
   // The gallery shows the display name and the introduction; the slug appears
   // only in the detail drawer.
   ApplicationsView: ['Jupyter + PyTorch', '开发环境', '8 核 / 32 GB'],
-  UsersView: ['zhangsan', '张三'],
+  UsersView: ['用户管理', 'zhangsan', '张三', 'NLP 实验室', 'zhangsan@example.edu'],
   GroupsView: ['NLP 实验室', 'nlp-lab'],
+  // Phase 8. The audit table's own columns, plus the two things that are easy to
+  // lose: the raw action code next to its label, and the mark on an
+  // unattributed row.
+  AuditView: ['审计日志', '创建实例', 'instance:create', 'zhangsan', '成功', '10.0.0.9'],
+  // The remaining admin screens are smoke-tested for the first time; before the
+  // discovery fix they were never mounted at all. Assertions are kept to text the
+  // fixtures actually drive, so a failure here means the screen changed.
+  ResourcesView: ['资源与配额'],
+  WorkspacesView: ['工作空间管理', 'nlp', '自然语言处理', 'nlp-lab'],
+  DashboardView: ['首页', '平台建设进度'],
+  // The profile page is where tokens live. Asserted here rather than in a view
+  // of its own because the card is a child component, and the interesting thing
+  // is that it renders *inside* the page a user already visits.
+  ProfileView: ['个人设置', 'API 令牌', 'ci-deploy', 'wl_abcdefgh…', '跟随我的角色'],
   // Driven by grants, not by the workspace record: with none issued the view
   // correctly reports that no pools are available.
   MyWorkspaceView: ['我的工作空间', '算力配额', '可用资源池'],
@@ -695,6 +770,10 @@ const EXPECTS_ABSENT = {
     // there is no positive string to assert on.
     '图表无法绘制',
   ],
+  // The fixture has records, so the empty branches must not render. Each of these
+  // is a plausible-looking screen that means "nothing happened" — the exact
+  // opposite of what the data says.
+  AuditView: ['还没有审计记录', '没有符合条件的记录', 'No data available'],
   MonitorView: [
     // The fixture has Grafana configured, so neither "unavailable" notice may
     // appear. Both render convincingly and mean the opposite of the truth.
@@ -812,9 +891,26 @@ writeFileSync(
 // ---------------------------------------------------------------------------
 
 const wanted = process.argv.slice(2)
-const viewFiles = readdirSync(VIEWS)
-  .filter((name) => name.endsWith('View.vue'))
-  .filter((name) => !wanted.length || wanted.some((w) => name.toLowerCase().includes(w.toLowerCase())))
+/**
+ * Every `*View.vue` under `src/views`, at any depth.
+ *
+ * Recursive on purpose. A flat `readdirSync` silently skipped `views/admin/` —
+ * five screens, including the audit trail — while still reporting a confident
+ * "13/13 views mounted". A check that quietly narrows its own scope is worse
+ * than no check: it reports the same success either way, so nobody looks.
+ */
+function discoverViews(dir) {
+  const found = []
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name)
+    if (entry.isDirectory()) found.push(...discoverViews(full))
+    else if (entry.name.endsWith('View.vue')) found.push(full)
+  }
+  return found
+}
+
+const viewFiles = discoverViews(VIEWS)
+  .filter((file) => !wanted.length || wanted.some((w) => file.toLowerCase().includes(w.toLowerCase())))
   .sort()
 
 if (!viewFiles.length) {
@@ -838,7 +934,9 @@ writeFileSync(
     "export { createVuetify } from 'vuetify'",
     "export { createRouter, createMemoryHistory } from 'vue-router'",
     "export { useAuthStore } from '@/stores/auth'",
-    ...viewFiles.map((file) => `export { default as ${basename(file, '.vue')} } from '@/views/${file}'`),
+    ...viewFiles.map(
+      (file) => `export { default as ${basename(file, '.vue')} } from './${relative(FRONTEND, file)}'`,
+    ),
     '',
   ].join('\n'),
 )

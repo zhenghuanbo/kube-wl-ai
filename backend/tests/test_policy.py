@@ -81,11 +81,38 @@ async def test_plain_user_can_create_instances_but_not_users(
 
 
 async def test_observer_is_read_only(seeded: AsyncSession) -> None:
+    """An observer cannot change anything the platform manages.
+
+    The exception is self-service API tokens, and it is worth being precise about
+    why it is not a hole. A token carries no authority of its own: it is
+    intersected with its owner's *current* permissions on every request
+    (`policy.permission_ceiling`, and `resolve_token`), so an observer's token is
+    read-only too — there is a smoke check for exactly that. What the two codes
+    permit is minting a credential that is weaker than or equal to the account
+    already holding it.
+
+    Withholding them would not make an observer safer. It would push them to
+    paste a human password into a script, which is worse in every respect.
+
+    The assertion is written to name the allowed codes rather than to exclude a
+    prefix, so granting an observer any *other* create/update/delete code still
+    fails this test.
+    """
     observer = await factories.create_user(seeded, username="watcher", role="observer")
     perms = policy.effective_permissions(observer)
 
     assert "instance:read" in perms
-    assert not any(code.endswith((":create", ":update", ":delete")) for code in perms)
+
+    self_service = {"api_token:create", "api_token:delete", "api_token:read"}
+    mutating = {
+        code
+        for code in perms
+        if code.endswith((":create", ":update", ":delete")) and code not in self_service
+    }
+    assert not mutating, f"observer gained mutating permissions: {sorted(mutating)}"
+
+    # And the exception really is confined to tokens.
+    assert {"api_token:create", "api_token:delete"} <= perms
 
 
 async def test_group_admin_can_manage_its_group(seeded: AsyncSession, world: World) -> None:

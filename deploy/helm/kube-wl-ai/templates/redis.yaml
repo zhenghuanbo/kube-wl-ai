@@ -1,0 +1,97 @@
+{{- if .Values.redis.enabled }}
+{{/*
+Bundled Redis.
+
+Celery's broker and result backend, and nothing else. **No platform state lives
+here** — the login rate-limit counter deliberately reads the audit table instead
+of Redis, precisely so that a Redis restart cannot reset an attacker's budget.
+Losing this volume loses in-flight tasks, not data.
+*/}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-redis
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: broker
+spec:
+  serviceName: {{ .Release.Name }}-redis
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "kube-wl-ai.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: broker
+  template:
+    metadata:
+      labels:
+        {{- include "kube-wl-ai.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: broker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis
+          image: "{{ .Values.redis.image.repository }}:{{ .Values.redis.image.tag }}"
+          # `--appendonly no` because nothing here is worth recovering; the
+          # broker's job is to hand a task to a worker, and a task lost to a
+          # restart is re-enqueued by the next beat tick.
+          args: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory-policy", "noeviction"]
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.redis.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      {{- if not .Values.redis.persistence.enabled }}
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.redis.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 4Gi
+  {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-redis
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: broker
+spec:
+  type: ClusterIP
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+  selector:
+    {{- include "kube-wl-ai.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: broker
+{{- end }}

@@ -5,7 +5,7 @@
 后端为 **FastAPI + SQLAlchemy 2.0 (async) + Alembic**，前端为 **Vue 3 + Vuetify 4 + Vite**，
 两者以 OpenAPI 为唯一契约；系统只**集成**集群侧既有的 Prometheus / Grafana，不负责部署监控栈。
 
-> 完整的架构设计、数据模型、权限模型与分期计划见 [`AGENTS.md`](./AGENTS.md)。
+> 完整的架构设计、数据模型、权限模型与分期计划见 [`agents.md`](./agents.md)。
 > 重写前的原始实现冻结在 [`legacy/`](./legacy/README.md)。
 
 ---

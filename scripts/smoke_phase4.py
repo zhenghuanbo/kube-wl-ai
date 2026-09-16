@@ -616,10 +616,7 @@ def main() -> int:
         },
     )
     check("取消后配额被释放（终态任务不再占用）", status == 201, str(freed))
-    if isinstance(freed, dict):
-        after_task_id = int(freed["id"])
-    else:
-        after_task_id = 0
+    after_task_id = int(freed["id"]) if isinstance(freed, dict) else 0
 
     status, events = call("GET", f"/tasks/{task_id}/events", token=token)
     kinds = [e.get("eventType") for e in events] if isinstance(events, list) else []

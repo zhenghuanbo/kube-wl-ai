@@ -80,7 +80,7 @@
           "auth"
         ],
         "summary": "Log in and start a session",
-        "description": "Verify credentials against the configured providers and issue a session.\n\nThe access token is returned in the body; the refresh token is set as an\nhttpOnly cookie and never appears in the response payload.",
+        "description": "Verify credentials against the configured providers and issue a session.\n\nThe access token is returned in the body; the refresh token is set as an\nhttpOnly cookie and never appears in the response payload.\n\nThe attempt is rate limited *before* the credentials are checked — see\n`app.auth.rate_limit` — so a locked-out attempt costs no directory round trip\nand cannot be used to make the LDAP server do work.",
         "operationId": "login_api_v1_auth_login_post",
         "requestBody": {
           "content": {
@@ -7288,6 +7288,557 @@
         ]
       }
     },
+    "/api/v1/api-tokens": {
+      "get": {
+        "tags": [
+          "api-tokens"
+        ],
+        "summary": "List the caller's API tokens",
+        "description": "The caller's own tokens. Returns a bare list, like the other small\ncatalogues, because a person has a handful of tokens and never pages them.",
+        "operationId": "list_api_tokens_api_v1_api_tokens_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ApiTokenRead"
+                  },
+                  "type": "array",
+                  "title": "Response List Api Tokens Api V1 Api Tokens Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "api-tokens"
+        ],
+        "summary": "Create a personal access token",
+        "description": "Mint a token and return it **once**.\n\nThe response is the only time the secret exists in a readable form. A client\nthat loses it revokes the token and makes another — which is a better\noutcome than a system that can reproduce secrets on demand.\n\nScopes are validated against what the caller holds right now, so a token can\nnever be created naming a permission its owner lacks. A token created *by*\nanother token is further limited to that token's own scopes, so a credential\ncannot mint a successor with more authority than itself.",
+        "operationId": "create_api_token_api_v1_api_tokens_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApiTokenCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiTokenIssued"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/api-tokens/{token_id}": {
+      "delete": {
+        "tags": [
+          "api-tokens"
+        ],
+        "summary": "Revoke one of the caller's API tokens",
+        "description": "Revoke a token by id.\n\nRevocation is immediate and total: the row is deleted, so the next request\npresenting the credential fails to resolve it. Out-of-scope ids are a 404\nrather than a 403 — token ids are sequential, and a 403 would confirm that\nsomebody else's token exists.",
+        "operationId": "revoke_api_token_api_v1_api_tokens__token_id__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "token_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Token Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiMessage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/audit-logs": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "List audit entries visible to the caller",
+        "description": "Newest first, always.\n\n`requestId` is the filter that turns this from a browsing screen into a\ndiagnostic one: every log line the application emitted while handling a\nrequest carries the same id, so one value ties the audit row to the trace.",
+        "operationId": "list_audit_logs_api_v1_audit_logs_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 20,
+              "title": "Pagesize"
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 150
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Search"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 96
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Action"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 16
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "objectType",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 64
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Objecttype"
+            }
+          },
+          {
+            "name": "objectId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 64
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Objectid"
+            }
+          },
+          {
+            "name": "actorUsername",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 150
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Actorusername"
+            }
+          },
+          {
+            "name": "requestId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 64
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Requestid"
+            }
+          },
+          {
+            "name": "occurredFrom",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Occurredfrom"
+            }
+          },
+          {
+            "name": "occurredTo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Occurredto"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_AuditLogRead_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/audit-logs/meta": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Filter options available within the caller's scope",
+        "description": "The values the filter controls should offer.\n\nDerived from scoped rows rather than from the permission catalogue: offering\nan action that nobody in the caller's scope has performed would disclose that\nthe action exists elsewhere.",
+        "operationId": "audit_meta_api_v1_audit_logs_meta_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditMeta"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/audit-logs/export": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Export audit entries as CSV",
+        "description": "The same rows as the listing, without the page bound, as CSV.\n\nIt reuses `AuditFilters` and therefore the same scoped statement as the\nlisting. That is not a convenience: an export assembled separately from the\nlisting eventually gets assembled *differently*, and on this table the\ndifference is handing somebody rows they cannot see on screen.\n\nWhen the row ceiling truncates the result, the file says so in its own last\nline. A CSV that stops early while claiming a date range is the one artefact\nmost likely to end up in an incident report unexamined.",
+        "operationId": "export_audit_logs_api_v1_audit_logs_export_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 150
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Search"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 96
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Action"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 16
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "objectType",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 64
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Objecttype"
+            }
+          },
+          {
+            "name": "objectId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 64
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Objectid"
+            }
+          },
+          {
+            "name": "actorUsername",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 150
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Actorusername"
+            }
+          },
+          {
+            "name": "requestId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 64
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Requestid"
+            }
+          },
+          {
+            "name": "occurredFrom",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Occurredfrom"
+            }
+          },
+          {
+            "name": "occurredTo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Occurredto"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/monitor/overview": {
       "get": {
         "tags": [
@@ -7391,6 +7942,170 @@
         ],
         "title": "ApiMessage",
         "description": "A plain confirmation payload for endpoints with nothing else to return."
+      },
+      "ApiTokenCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Scopes"
+          },
+          "expiresInDays": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiresindays"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "ApiTokenCreate",
+        "description": "Request body for minting a token."
+      },
+      "ApiTokenIssued": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "prefix": {
+            "type": "string",
+            "title": "Prefix"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Scopes"
+          },
+          "expiresAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiresat"
+          },
+          "lastUsedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lastusedat"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Createdat"
+          },
+          "token": {
+            "type": "string",
+            "title": "Token"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "prefix",
+          "scopes",
+          "createdAt",
+          "token"
+        ],
+        "title": "ApiTokenIssued",
+        "description": "A freshly minted token, with the one and only sight of the secret."
+      },
+      "ApiTokenRead": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "prefix": {
+            "type": "string",
+            "title": "Prefix"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Scopes"
+          },
+          "expiresAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiresat"
+          },
+          "lastUsedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lastusedat"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Createdat"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "prefix",
+          "scopes",
+          "createdAt"
+        ],
+        "title": "ApiTokenRead",
+        "description": "A token as it may be shown after creation.\n\nThere is no ``token`` field here and there must never be one: the secret is\nreturned exactly once, by `ApiTokenIssued`, and is not recoverable. Anything\nthat could render a stored token would mean we had stored it."
       },
       "ApplicationCategory": {
         "type": "string",
@@ -8285,6 +9000,153 @@
         ],
         "title": "ApplicationVisibility",
         "description": "Who may see and launch an application.\n\nWidening is deliberate and explicit: a private definition is the author's\nscratch space, ``workspace`` shares it with colleagues in the same\nnamespace, ``group`` with the whole lab, and ``global`` with the university."
+      },
+      "AuditLogRead": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Createdat"
+          },
+          "actorUserId": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actoruserid"
+          },
+          "actorUsername": {
+            "type": "string",
+            "title": "Actorusername"
+          },
+          "action": {
+            "type": "string",
+            "title": "Action"
+          },
+          "objectType": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Objecttype"
+          },
+          "objectId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Objectid"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "ipAddress": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ipaddress"
+          },
+          "requestId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requestid"
+          },
+          "errorMessage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Errormessage"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "createdAt",
+          "actorUsername",
+          "action",
+          "status"
+        ],
+        "title": "AuditLogRead",
+        "description": "One audit row.\n\n``actorUsername`` is read from the denormalised column rather than from the\nrelationship: it is the value recorded *at the time*, and a user renamed\nsince then must not retroactively rewrite history."
+      },
+      "AuditMeta": {
+        "properties": {
+          "actions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Actions"
+          },
+          "objectTypes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Objecttypes"
+          },
+          "statuses": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Statuses"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "actions",
+          "objectTypes"
+        ],
+        "title": "AuditMeta",
+        "description": "What the filter controls should offer.\n\nEvery list is built within the caller's scope, so a group administrator is\nnot shown a value that only exists in somebody else's history."
       },
       "ComputeNodeRead": {
         "properties": {
@@ -11089,6 +11951,27 @@
           "meta"
         ],
         "title": "Page[ApplicationSummary]"
+      },
+      "Page_AuditLogRead_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AuditLogRead"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/PageMeta"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "items",
+          "meta"
+        ],
+        "title": "Page[AuditLogRead]"
       },
       "Page_GroupMemberRead_": {
         "properties": {

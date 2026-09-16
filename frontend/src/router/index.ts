@@ -123,8 +123,8 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'admin/audit',
         name: 'admin-audit',
-        component: () => import('@/views/PlaceholderView.vue'),
-        meta: { title: '审计日志', roles: ADMIN_ROLES, phase: 'Phase 8' },
+        component: () => import('@/views/admin/AuditView.vue'),
+        meta: { title: '审计日志', roles: ADMIN_ROLES },
       },
       {
         path: 'profile',

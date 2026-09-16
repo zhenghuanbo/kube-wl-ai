@@ -1,0 +1,92 @@
+# 生产环境起点。所有占位值都必须替换。
+#
+# 安装前必做：
+#   ./scripts/helm-gen-keys.sh            # 生成 RS256 密钥对
+#   helm template wl . -f values-prod.example.yaml --kube-version <集群版本>
+# `helm template` 会执行全部校验，装到集群之前就能发现漏配。
+
+config:
+  appEnv: production
+  authProviders: "ldap,local"
+  corsOrigins: "https://wl.example.edu"
+  logJson: true
+
+  ldap:
+    uri: "ldaps://ipa.example.edu:636"
+    baseDn: "cn=accounts,dc=example,dc=edu"
+    userDnTemplate: "uid={username},cn=users,cn=accounts,dc=example,dc=edu"
+    groupBaseDn: "cn=groups,cn=accounts,dc=example,dc=edu"
+    bindDn: "uid=wl-platform,cn=sysaccounts,cn=etc,dc=example,dc=edu"
+    observerGroup: "wl-observers"
+
+  jwt:
+    algorithm: RS256
+    existingSecret: "kube-wl-ai-jwt"   # 由 helm-gen-keys.sh 创建
+
+  k8s:
+    enabled: true
+    inCluster: true
+
+  harbor:
+    url: "https://harbor.example.edu"
+    robotName: "robot$wl-platform"
+    verifyTls: true
+
+  monitoring:
+    prometheusUrl: "http://prometheus.monitoring.svc:9090"
+    grafanaUrl: "http://grafana.monitoring.svc:3000"
+    grafanaPublicUrl: "/grafana"
+
+  instance:
+    sshMode: nodeport
+    sshHost: "wl.example.edu"
+    ingressHost: "instances.wl.example.edu"
+
+  storageClasses:
+    # 必须填写：留空会让「创建数据盘」在运行时才报错。
+    home: "cephfs-hdd"
+    data: "ceph-rbd-ssd"
+    share: "cephfs-rwx"      # 需要 RWX；没有 RWX StorageClass 时共享盘不可用
+
+secrets:
+  existingSecret: ""          # 建议改用 External Secrets 等外部管理
+  secretKey: ""               # 必填：32 字节以上的随机串
+  localAdminPassword: ""      # 必填：兜底账号，密码请存入密码管理器
+  ldapBindPassword: ""
+
+postgresql:
+  # 生产环境不建议使用内置实例：单副本、无备份。请填 secrets.databaseUrl
+  # 指向托管数据库，并把这里设为 false。
+  enabled: false
+  persistence:
+    size: 100Gi
+
+redis:
+  enabled: true
+
+ingress:
+  enabled: true
+  className: nginx
+  host: "wl.example.edu"
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+  tls:
+    enabled: true
+    secretName: "wl-example-edu-tls"
+
+networkPolicy:
+  enabled: true
+  # 必填：留空会让 API 无法从 Ingress 访问，症状是没有日志的 502。
+  ingressNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: ingress-nginx
+
+rbac:
+  create: true
+  # 集群低于 1.31 时必须显式设为 true，并确认接受其后果。
+  # 见 templates/rbac.yaml 的说明。
+  allowClusterWideWorkspaceAccess: false
+
+podDisruptionBudget:
+  enabled: true

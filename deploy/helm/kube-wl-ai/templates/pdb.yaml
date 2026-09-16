@@ -1,0 +1,37 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{/*
+A drain should not take the API down.
+
+Only the API and web tiers get a budget. The worker and beat are singletons that
+are expected to stop during a drain, and a PDB with `minAvailable: 1` on a
+one-replica Deployment blocks the drain forever — which is how a node upgrade
+stalls at 3am.
+*/}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "kube-wl-ai.fullname" . }}-api
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "kube-wl-ai.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "kube-wl-ai.fullname" . }}-web
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "kube-wl-ai.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: web
+{{- end }}

@@ -1,0 +1,101 @@
+{{- include "kube-wl-ai.validate" . -}}
+{{/*
+The web tier.
+
+nginx serving the built SPA, and — the part that matters — proxying `/api`, `/ws`
+and `/grafana` to the services behind it. One origin means the refresh cookie is
+first-party, the WebSocket terminal needs no CORS negotiation, and the Grafana
+embed shares a host with the page that frames it.
+
+The `/grafana/` proxy uses a variable `proxy_pass` with a resolver rather than an
+`upstream` block, because an `upstream` naming a Service that does not exist
+makes nginx refuse to start. Grafana is optional here; a deployment without it
+must still boot.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kube-wl-ai.fullname" . }}-web
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.web.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "kube-wl-ai.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: web
+  template:
+    metadata:
+      labels:
+        {{- include "kube-wl-ai.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: web
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        seccompProfile:
+          type: RuntimeDefault
+      {{- $pullSecrets := concat (default (list) .Values.web.image.pullSecrets) (default (list) .Values.imagePullSecrets) }}
+      {{- with $pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: web
+          image: {{ include "kube-wl-ai.webImage" . }}
+          imagePullPolicy: {{ .Values.web.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 80
+          env:
+            # The nginx config is templated at image build time for /api and
+            # /ws, but the Grafana upstream is resolved per request, so a
+            # deployment without Grafana simply gets a 502 on that one path
+            # rather than failing to start.
+            - name: GRAFANA_UPSTREAM
+              value: {{ default "grafana:3000" .Values.config.monitoring.grafanaUpstream | quote }}
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.web.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /var/run
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.web.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.web.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

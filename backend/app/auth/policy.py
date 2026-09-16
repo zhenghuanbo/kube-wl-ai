@@ -16,7 +16,9 @@ implementation later without touching a single caller.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,6 +27,7 @@ from sqlalchemy import Select, false, or_, select
 from app.auth.permissions import ALL_PERMISSION_CODES
 from app.core.errors import NotFoundError, PermissionDeniedError
 from app.core.logging import get_logger
+from app.models.audit import AuditLog
 from app.models.enums import RoleCode, RoleScope
 from app.models.group import Group, UserGroupLink
 from app.models.instance import Instance
@@ -47,21 +50,91 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 # L1 — functional permissions (RBAC)
 # ---------------------------------------------------------------------------
-def effective_permissions(user: User) -> frozenset[str]:
-    """The union of permission codes granted by all of the user's roles.
+#: Permission ceiling imposed by the API token the current request arrived with.
+#:
+#: ``None`` means "no token, or a token that declares no scopes" — the user's
+#: roles decide, exactly as they do for a browser session. A frozenset means the
+#: request may use only the intersection of that set and the user's roles.
+#:
+#: Why a ContextVar rather than an attribute on ``User``: the ceiling describes
+#: *this request*, not the person. Putting it on the row risks it being flushed,
+#: cached or reused by the next request that loads the same identity — and the
+#: failure mode of that is a token's restriction silently outliving the token.
+#: A ContextVar is request-scoped by construction and disappears with the task.
+#:
+#: It is written exactly once, by ``app.core.deps.get_current_user``, and always
+#: written (to ``None`` for a session token) so no request inherits a value from
+#: whatever ran before it in the same context.
+_token_permission_ceiling: ContextVar[frozenset[str] | None] = ContextVar(
+    "token_permission_ceiling", default=None
+)
 
-    A superuser bypasses the mapping entirely. Group-scoped role assignments
-    contribute here too: *whether* the user may perform the action is a function
-    of their roles, *where* they may do it is decided by the data scope below.
+
+@contextmanager
+def permission_ceiling(scopes: frozenset[str] | None) -> Iterator[None]:
+    """Impose ``scopes`` as a ceiling for the duration of the block.
+
+    Public so tests can exercise the token semantics without going through HTTP,
+    and so a future non-HTTP caller (a Celery task acting as a user) has a
+    supported way to say *which* credential it is acting under.
     """
-    if user.is_superuser:
-        return ALL_PERMISSION_CODES
+    token = _token_permission_ceiling.set(scopes)
+    try:
+        yield
+    finally:
+        _token_permission_ceiling.reset(token)
 
-    codes: set[str] = set()
-    for link in user.role_links:
-        # `role` is non-nullable (FK), so no defensive check is needed here.
-        codes.update(grant.permission.code for grant in link.role.permission_links)
-    return frozenset(codes)
+
+def current_permission_ceiling() -> frozenset[str] | None:
+    """The ceiling in force, or ``None`` when the caller's roles decide."""
+    return _token_permission_ceiling.get()
+
+
+def set_permission_ceiling(scopes: frozenset[str] | None) -> None:
+    """Impose a ceiling for the remainder of the current request context.
+
+    The unconditional counterpart to :func:`permission_ceiling`, for the
+    authentication dependency: it must be able to write ``None`` as well as a
+    set, and it must not reset on exit — the endpoint runs after the dependency
+    returns.
+    """
+    _token_permission_ceiling.set(scopes)
+
+
+def effective_permissions(user: User) -> frozenset[str]:
+    """The permission codes the user may use *on this request*.
+
+    Two reductions, in this order:
+
+    1. **Roles.** A superuser bypasses the mapping entirely. Group-scoped role
+       assignments contribute here too: *whether* the user may perform the action
+       is a function of their roles; *where* they may do it is the data scope.
+    2. **The token ceiling**, when the request arrived with an API token. The
+       ceiling is an *intersection*, never a union, so a token can only ever
+       narrow. A token whose scopes name something its owner lacks is inert for
+       that scope rather than a way to acquire it — and the creation endpoint
+       rejects such a scope outright rather than handing back a credential that
+       silently does less than it says.
+
+    The superuser case is reduced too, and that matters: "my token may only read
+    instances" is a statement an administrator makes about a credential, and
+    honouring it for everyone except administrators would make the scopes field a
+    lie precisely where the blast radius is largest.
+    """
+    ceiling = _token_permission_ceiling.get()
+
+    if user.is_superuser:
+        granted = ALL_PERMISSION_CODES
+    else:
+        codes: set[str] = set()
+        for link in user.role_links:
+            # `role` is non-nullable (FK), so no defensive check is needed here.
+            codes.update(grant.permission.code for grant in link.role.permission_links)
+        granted = frozenset(codes)
+
+    if ceiling is None:
+        return granted
+    return granted & ceiling
 
 
 def has_permission(user: User, code: str) -> bool:
@@ -265,6 +338,20 @@ SCOPE_RULES: dict[type[Any], ScopeRule] = {
     # both are derived from the same scope, not because two lists were kept in
     # step by hand.
     UsageDaily: ScopeRule(owner="user_id", group="group_id", workspace="workspace_id"),
+    # --- Phase 8 ---------------------------------------------------------
+    # The audit trail has no group column and never will: a row records an
+    # *action by a person*, and the person's group is what decides who may read
+    # it. `via_user` follows the actor, so a group administrator sees their own
+    # group's actions and a global administrator sees everything.
+    #
+    # The consequence worth stating plainly: `actor_user_id` is NULL for a failed
+    # login, an unauthenticated probe, or a rate-limited attempt. Those rows match
+    # `via_user` for nobody, so they are visible only through `all_access`. That
+    # is the intended reading — an anonymous attempt belongs to no group — and it
+    # is asserted in `tests/test_acceptance_phase8.py` rather than left implicit,
+    # because the opposite assumption would quietly hide credential stuffing from
+    # every administrator except the global one, or expose it to all of them.
+    AuditLog: ScopeRule(owner="actor_user_id", via_user="actor_user_id"),
 }
 
 #: Column names consulted when a model has no explicit rule.

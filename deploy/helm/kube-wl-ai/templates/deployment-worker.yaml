@@ -1,0 +1,85 @@
+{{- include "kube-wl-ai.validate" . -}}
+{{/*
+The Celery worker.
+
+Runs `reconcile-workloads` and `rollup-usage`, and executes the tasks the API
+enqueues. It holds the same ServiceAccount as the API because it performs the
+same cluster mutations — reconciling a workload means writing to the namespace
+the API created.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kube-wl-ai.fullname" . }}-worker
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "kube-wl-ai.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        {{- include "kube-wl-ai.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "kube-wl-ai.serviceAccountName" . }}
+      # Longer than the API's: a reconcile loop interrupted mid-flight can leave a
+      # workload in an in-between state, so the worker is given room to finish.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      {{- $pullSecrets := concat (default (list) .Values.image.pullSecrets) (default (list) .Values.imagePullSecrets) }}
+      {{- with $pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: worker
+          image: {{ include "kube-wl-ai.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - celery
+            - -A
+            - app.workers.celery_app.celery_app
+            - worker
+            - --loglevel={{ .Values.config.logLevel | lower }}
+            - --concurrency={{ .Values.worker.concurrency }}
+            # Prefork is the default and is right here: the tasks are
+            # synchronous Kubernetes API calls, so threads would not help.
+            - --max-tasks-per-child=200
+          env:
+            {{- include "kube-wl-ai.commonEnv" . | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "kube-wl-ai.configMapName" . }}
+          # A liveness probe on a worker is the classic mistake: celery's `ping`
+          # answers while the worker is blocked on a long task, and a restart
+          # kills the task. The process exiting is the signal, and Kubernetes
+          # already restarts on that.
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

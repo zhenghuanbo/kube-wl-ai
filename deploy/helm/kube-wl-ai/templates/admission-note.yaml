@@ -1,0 +1,73 @@
+{{/*
+The admission policy the RBAC comments refer to.
+
+This is emitted as a **commented YAML document inside a ConfigMap**, not as a live
+object, and that is a deliberate choice rather than laziness. A
+ValidatingAdmissionPolicy is a cluster-scoped control with cluster-wide effect,
+and a chart that installs one on `helm install` would silently start rejecting
+namespace deletions for every other tenant. The operator is the one who can see
+the whole cluster and decide.
+
+The policy below says: the platform's ServiceAccount may only delete a namespace
+that carries `wl-managed=true`. That is the control RBAC cannot express (see
+`rbac.yaml`), and without it the identity this chart creates can delete *any*
+namespace in the cluster — including production workloads that have nothing to do
+with the platform.
+
+To apply it: copy the document out of the ConfigMap, set `WL_SA` and the
+namespace, and `kubectl apply -f`.
+*/}}
+{{- if .Values.rbac.admissionPolicyNotice }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kube-wl-ai.fullname" . }}-admission-policy
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+data:
+  README: |
+    The platform's ServiceAccount can delete namespaces cluster-wide. Kubernetes
+    RBAC cannot narrow that, because a namespace is cluster-scoped and a subject
+    `namespaceSelector` only filters namespaced resources.
+
+    Apply the ValidatingAdmissionPolicy below, substituting the ServiceAccount
+    name and namespace this release created:
+
+      ServiceAccount: {{ include "kube-wl-ai.serviceAccountName" . }}
+      Namespace:      {{ .Release.Namespace }}
+
+    It refuses a namespace DELETE from that identity unless the target carries
+    `wl-managed: "true"`. Requires Kubernetes 1.30+ (ValidatingAdmissionPolicy GA).
+
+  validating-admission-policy.yaml: |
+    apiVersion: admissionregistration.k8s.io/v1
+    kind: ValidatingAdmissionPolicy
+    metadata:
+      name: kube-wl-ai-protect-unmanaged-namespaces
+    spec:
+      failurePolicy: Fail
+      matchConstraints:
+        resourceRules:
+          - apiGroups: [""]
+            apiVersions: ["v1"]
+            operations: ["DELETE"]
+            resources: ["namespaces"]
+      validations:
+        - expression: >-
+            request.userInfo.username !=
+              "system:serviceaccount:{{ .Release.Namespace }}:{{ include "kube-wl-ai.serviceAccountName" . }}"
+            || object.metadata.labels["wl-managed"] == "true"
+          message: >-
+            只有带 wl-managed=true 标签的命名空间可以由平台删除。
+            Only namespaces labelled wl-managed=true may be deleted by kube-wl-ai.
+    ---
+    apiVersion: admissionregistration.k8s.io/v1
+    kind: ValidatingAdmissionPolicyBinding
+    metadata:
+      name: kube-wl-ai-protect-unmanaged-namespaces
+    spec:
+      policyName: kube-wl-ai-protect-unmanaged-namespaces
+      validationActions: [Deny]
+      matchResources:
+        namespaceSelector: {}
+{{- end }}

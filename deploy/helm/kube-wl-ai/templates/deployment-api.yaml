@@ -1,0 +1,134 @@
+{{- include "kube-wl-ai.validate" . -}}
+{{/*
+The API.
+
+The migration runs as a separate pre-install/pre-upgrade Job (see `migrate.yaml`)
+rather than as an init container. An init container would run once per replica,
+so two replicas race to apply the same migration; a hook runs once and, more
+usefully, blocks the whole release when it fails.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kube-wl-ai.fullname" . }}-api
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.api.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "kube-wl-ai.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # One at a time with a spare: an upgrade should not take the API down, and
+      # the refresh cookie makes a brief overlap harmless.
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "kube-wl-ai.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+      annotations:
+        # Rolls the pods when non-secret config changes, which Deployment
+        # otherwise ignores.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.api.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "kube-wl-ai.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ .Values.api.terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      {{- $pullSecrets := concat (default (list) .Values.image.pullSecrets) (default (list) .Values.imagePullSecrets) }}
+      {{- with $pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: api
+          image: {{ include "kube-wl-ai.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            {{- include "kube-wl-ai.commonEnv" . | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "kube-wl-ai.configMapName" . }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Readiness checks the database; liveness deliberately does not. A
+          # liveness probe that fails when the database is slow restarts healthy
+          # pods and turns a blip into an outage.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.config.ldapCaCertSecret }}
+            - name: ldap-ca
+              mountPath: /etc/ssl/ldap
+              readOnly: true
+            {{- end }}
+      volumes:
+        # The root filesystem is read-only, so anything that writes needs a
+        # writable mount. Python wants /tmp, and so does the audit CSV export.
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.config.ldapCaCertSecret }}
+        - name: ldap-ca
+          secret:
+            secretName: {{ .Values.config.ldapCaCertSecret }}
+        {{- end }}
+      {{- with .Values.api.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

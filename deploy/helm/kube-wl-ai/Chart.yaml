@@ -1,0 +1,18 @@
+apiVersion: v2
+name: kube-wl-ai
+description: GPU 工作负载平台（FastAPI + Celery + Vue），不含监控栈
+type: application
+version: 0.8.0
+appVersion: "0.8.0"
+kubeVersion: ">=1.27.0-0"
+keywords:
+  - gpu
+  - kubernetes
+  - scheduling
+maintainers:
+  - name: kube-wl-ai maintainers
+annotations:
+  # The monitoring stack is deliberately out of scope: this cluster already runs
+  # Prometheus and Grafana, and a chart that shipped a second copy would fight
+  # the first one for scrape targets. See README.md.
+  kube-wl-ai/scope: app-only

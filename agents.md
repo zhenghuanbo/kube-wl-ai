@@ -79,18 +79,22 @@ global_admin **69**（目录共 **69** 条）。**这个数字在每期验收里
 
 ```
 kube-wl-ai/
-├── AGENTS.md  README.md  .gitignore  .pre-commit-config.yaml
+├── agents.md  README.md  .gitignore  .pre-commit-config.yaml
 ├── .github/workflows/ci.yml
 ├── design/                       # 原型截图（功能/字段基线，非视觉基线）
 ├── docs/                         # 设计与运维文档
 ├── legacy/                       # 重写前旧代码，只读留档，Phase 8 删除
 ├── scripts/
 │   ├── gen-openapi.sh            # 导出 OpenAPI → frontend/openapi/schema.json
-│   └── migrate.sh                # Alembic 包装脚本
+│   ├── migrate.sh                # Alembic 包装脚本
+│   ├── helm-gen-keys.sh          # 生成 RS256 密钥对并写入 Secret（私钥不落盘）
+│   ├── check-frontend-types.py   # 前端类型 ↔ OpenAPI schema 比对
+│   ├── smoke_phaseN.py           # 每期一份，对着真实后端跑
+│   └── smoke_frontend_views.mjs  # 递归挂载全部视图，带「必须不出现」断言
 ├── deploy/
 │   ├── docker-compose.dev.yml
 │   ├── grafana/dashboards/       # Phase 7
-│   └── helm/kube-wl-ai/          # Phase 8（不含监控栈）
+│   └── helm/kube-wl-ai/          # Phase 8：应用本体，不含监控栈
 ├── backend/
 │   ├── Dockerfile  pyproject.toml  alembic.ini
 │   ├── requirements.txt  requirements-dev.txt  .env.example
@@ -1062,11 +1066,182 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 - **`GET /resource-specs` 返回裸列表、`/resource-groups` 返回信封** —— 两个列表接口的形状不同，
   冒烟脚本的 `rows_of()` 两种都要能处理。
 
-### ⏳ Phase 8（待开始）
+### ✅ Phase 8 — API 开放、审计与上线（已完成）
 
-| 阶段 | 内容 | 周期 |
-| --- | --- | --- |
-| Phase 8 | API 开放、审计与上线 | 2 周 |
+**交付（后端）**
+
+| 交付物 | 位置 |
+| --- | --- |
+| 时间工具 | `app/core/time.py`（`utc_now` / `as_aware` / `is_past`，见「本期踩到的坑」） |
+| 审计查询 | `app/services/audit.py`（`AuditFilters`、`_base_query`、`list_audit_logs`、`export_rows`、`to_csv`、`distinct_values`） |
+| 审计读模型 | `app/schemas/audit.py` |
+| 审计接口 | `app/api/v1/audit.py`：`GET /audit-logs`、`GET /audit-logs/meta`、`GET /audit-logs/export`（**只有 GET**） |
+| 令牌服务 | `app/services/api_tokens.py`（`create_token` / `list_tokens` / `revoke_token` / `resolve_token` / `touch`） |
+| 令牌接口 | `app/api/v1/api_tokens.py`：`GET` / `POST` / `DELETE /api-tokens[/{id}]` |
+| 登录限流 | `app/auth/rate_limit.py`（`enforce_login_rate_limit`、`record_login_failure`） |
+| 权限上限 | `app/auth/policy.py` 的 `permission_ceiling()` / `set_permission_ceiling()` / `current_permission_ceiling()` |
+| 三角色守卫 | `app/core/deps.py` 的 `_resolve_api_token`，`request.state.auth_method="api_token"` |
+| 新权限码 | `api_token:read` / `api_token:create` / `api_token:delete`（归入 observer 基线，见下） |
+| 错误类型 | `app/core/errors.py` 新增 `TooManyRequestsError`（429 / `rate_limited`） |
+
+**交付（前端）**
+
+| 交付物 | 位置 |
+| --- | --- |
+| 令牌类型与 API | `frontend/src/types/apiToken.ts`、`frontend/src/api/apiTokens.ts` |
+| 令牌组件 | `frontend/src/components/profile/ApiTokensCard.vue`（挂在 `/profile` 下） |
+| 审计类型与 API | `frontend/src/types/audit.ts`、`frontend/src/api/audit.ts` |
+| 审计页面 | `frontend/src/views/admin/AuditView.vue`（`/admin/audit` 已从 `PlaceholderView` 接出） |
+| 动作标签 | `ACTION_LABELS`：47 个常用动作码的中文名，未收录的回落到原码 |
+
+**交付（部署）**
+
+| 交付物 | 位置 |
+| --- | --- |
+| Helm chart | `deploy/helm/kube-wl-ai/`（Chart/values/README/`values-dev.yaml`/`values-prod.example.yaml`） |
+| 工作负载 | `templates/deployment-{api,worker,beat,web}.yaml`、`templates/migrate.yaml`（pre-upgrade hook） |
+| RBAC | `templates/rbac.yaml`（**含本期最重要的一段说明，见下**） |
+| 准入策略 | `templates/admission-note.yaml`（以 ConfigMap 内注释形式给出，不自动安装） |
+| 网络策略 | `templates/networkpolicy.yaml`（默认拒绝 + 三条放行） |
+| 密钥生成 | `scripts/helm-gen-keys.sh`（RS256，私钥不落盘） |
+| 冒烟脚本 | `scripts/smoke_phase8.py`（**60 项**） |
+
+**验收证据**
+
+| 项目 | 结果 |
+| --- | --- |
+| `pytest`（全量） | **461 passed** in 664.68s（其中 Phase 8 新增 43） |
+| `scripts/smoke_phase8.py` | **60/60**，连跑两次均通过（可重复） |
+| `ruff check` / `ruff format --check` / `mypy app` | 通过 / 通过 / 121 文件无问题 |
+| `check-frontend-types.py` | **74** 个接口比对 schema |
+| `smoke_frontend_views.mjs` | **18/18** 视图（此前只覆盖顶层视图，见「本期踩到的坑」） |
+| `vue-tsc --noEmit` / `vite build` | 通过 / 通过 |
+| `helm lint` | 1 chart, 0 failed |
+| `kubectl apply --dry-run=server` | 全部对象通过（真实 1.28 API Server） |
+| 集群 | 未触碰（只做 `--dry-run=server`） |
+
+**关键设计决策**
+
+1. **登录限流的计数器就是审计表。** 不引入 Redis：`auth:login` 且 `status=denied` 的行数
+   就是失败次数。这样限流**重启后仍然有效**，且每一次计数都能在审计页面里指给用户看
+   ——「你被限流了，这是那 10 次失败」是可以回答的。用 Redis 计数器，这个能力就没了。
+2. **成功登录把窗口重新计时。** 窗口下界取 `max(上次成功时间, 当前时间 - 窗口长度)`。
+   否则一个人正常登录后，前 14 分钟里的 3 次手误会在第 15 分钟突然凑成 429。
+3. **`record_login_failure` 自带会话并立即提交。** `get_session` 在任何异常时回滚，
+   而 `UnauthorizedError` 正是要抛出给中间的。若沿用请求会话，这条审计行会被回滚掉，
+   于是用户名永远为空、按账号的计数永远是 0——**限流会静默地只按 IP 生效**。
+   这个 bug 真的出现过，症状是「怎么也到不了 429」。
+4. **限额触顶后才写审计的 429 行。** 未触顶的失败由处理函数写、并置
+   `request.state.audit_recorded`，让 `AuditMiddleware` 跳过重复写入。一次尝试只有一行。
+5. **限流先于 `authenticate()`。** 否则每次被限流的请求仍会去打一次 LDAP，
+   把对目录服务的暴力破解放大成对目录服务的 DoS。
+6. **令牌的权限是「与当前角色取交集」，每次请求都算。** 令牌不存权限快照
+   （除非显式声明了 scopes）。因此**撤掉一个人的角色，他手里的令牌立刻变弱**，
+   不需要去吊销令牌。这是「令牌不能成为权限的避难所」这条要求的落地方式。
+7. **令牌创建令牌时，把可委派集合显式写下来。** 一个自身受限的令牌不能再造出
+   「继承我」的子令牌——否则子令牌会以父令牌**所有者**的完整角色去解析，把父令牌的
+   限制洗掉。有冒烟断言：父令牌 `["api_token:create", "instance:read"]` 造出的子令牌
+   恰好是这两个，且读不了存储。
+8. **观察者也能持有令牌，这不违背「只读」。** 令牌自身不带权限，它只是个身份。
+   观察者的令牌依旧是只读的（冒烟里两条断言）。收回这个能力不会让人更安全，
+   只会把人逼去把人类密码贴进脚本。
+9. **密钥只在创建响应里出现一次，审计里只有前缀。** 列表接口根本不返回明文
+   （`ApiTokenRead` 与 `ApiTokenIssued` 是两个类型，前端要拿 `token` 字段就必须显式声明）。
+   前端据此把创建对话框做成两态：签发成功后**不关闭**，直到用户复制过才允许离开。
+10. **令牌的作用域永远不改变数据范围。** `scopes` 决定「能不能做这个动作」，
+    `DataScope` 决定「能看见哪些行」，两者是正交的。一个带 `audit:read` 的令牌
+    不会因为持证人恰好是全局管理员就看见全平台——有测试与冒烟各一条断言。
+11. **吊销是 404 而不是 403。** 别人的令牌 id 与不存在的 id 应当无法区分。
+12. **审计表按构造不可写。** `/audit-logs` 只有 GET 路由，没有删除、没有清空、没有补录。
+    这不是「前端没放按钮」，是路由表里就没有。
+13. **未认证的审计行只有全局管理员看得见。** 失败登录行的 `actor_user_id` 是 NULL，
+    用户名是**尝试者填写的**、未经证实的字符串。让组管理员按它过滤，等于让任何人
+    猜一个名字就能把记录塞进别的组。代价是组管理员看不到针对自己成员的爆破，
+    必须向全局管理员要——这个取舍写进了测试的 docstring。
+14. **审计导出与列表共用同一条带范围的语句。** `_base_query` 只有一个实现，
+    导出不可能包含列表里看不见的行。导出上限 `MAX_EXPORT_ROWS = 50_000`，
+    截断时**在 CSV 末尾追加一行说明**，而不是安静地少给几行。
+15. **CSV 前置 UTF-8 BOM。** 不加的话 Excel 会把中文显示成乱码，
+    而「导出的表在 Excel 里是乱的」会被当成数据问题去查。
+16. **Helm 的 `_validate.tpl` 在渲染期就拒绝半成品生产安装。** `helm template` 也跑这些检查，
+    所以缺 `secretKey`、缺数据库口令、缺 JWT 密钥、LDAP 开着却没填 URI——
+    都在装到集群之前失败。一个「看起来装好了」但用着占位口令的系统不会自己报警。
+17. **迁移用 hook 而不是 initContainer。** initContainer 每个副本各跑一次，
+    两个副本会去抢同一个 Alembic revision；失败时表现为应用 CrashLoop，
+    而不是一次失败的发布。hook 只跑一次，且非零退出**会阻塞升级**。
+    迁移任务里还有 `python -m app.cli sync-rbac`——**新增权限只存在于代码里**，
+    不同步到数据库就没有任何角色持有它。
+18. **`beat` 用 `Recreate` 且只有一个副本。** 两个 beat 会各自看到同一份计划并各自触发。
+    滚动更新期间宁可短暂没有 beat（下一个 tick 会补上），也不要同时有两个。
+19. **内置 PostgreSQL 是便利，不是生产方案。** 单副本、无备份、无故障转移。
+    `secrets.databaseUrl` 才是正经用法，`values-prod.example.yaml` 里默认就把它关掉了。
+20. **`helm uninstall` 不删数据。** Secret（数据库口令与 JWT 私钥）和两个 PVC 都带
+    `helm.sh/resource-policy: keep`。一次误卸载不该带走一学期的用量记录。
+21. **工作空间命名空间的 RBAC 是本 chart 唯一无法兼顾「安全」与「可移植」的地方。**
+    详见下一条。
+
+**本期踩到的坑**
+
+- **SQLite 返回不带时区的 `datetime`，PostgreSQL 返回带时区的。** 两者相减直接
+  `TypeError: can't subtract offset-naive and offset-aware datetimes`。这不是测试环境
+  的怪癖，而是「开发用 SQLite、生产用 PG」这条常规路线上的真实分歧。修法是
+  `app/core/time.py` 的 `utc_now()` / `as_aware()` / `is_past()`，所有时间比较都走它。
+- **`export_rows` 的上限原本是默认参数**（`limit: int = MAX_EXPORT_ROWS`），
+  于是 `monkeypatch.setattr(module, "MAX_EXPORT_ROWS", 1)` 完全不起作用——
+  默认参数在函数定义时求值。改成 `limit: int | None = None` 并在调用时读模块全局。
+- **`client.headers["Authorization"] = None` 不会清除请求头。** httpx 会把 `None`
+  序列化成字符串 `"None"`，于是请求带着 `Authorization: None` 发出去，
+  测试验证的是另一回事。要用 `client.headers.pop("Authorization", None)`。
+- **`test_observer_is_read_only` 抓住了真实的设计冲突。** 它断言 observer 不含任何
+  `:create/:update/:delete`，而 Phase 8 有意给了所有角色 `api_token:create|delete`。
+  处理方式不是删断言，而是把它改写成**表达原本意图**：列出被豁免的两个码，
+  并断言「除这两个之外没有任何会导致变更的码」——将来误授第三个码仍然会失败。
+- **`smoke_frontend_views.mjs` 的视图发现是「不递归的 `readdirSync`」，`views/admin/` 下
+  五个页面从未被挂载过**，而脚本仍然报告「13/13 视图挂载成功」。
+  一个悄悄缩小了自己范围的检查比没有检查更糟：两种情况都报成功，所以没人去看。
+  改成递归后发现 `UsersView` 的夹具一直带着 API 从未发送过的 `groups` 数组、
+  又缺少 `fullName`，姓名列渲染成「—」。夹具与断言一起修正，现在是 **18/18**。
+- **`concat` 遇到 nil 会 panic。** `concat .Values.image.pullSecrets .Values.imagePullSecrets`
+  在 `web.image.pullSecrets` 未定义时直接
+  `error calling concat: invalid memory address or nil pointer dereference`。
+  用 `concat (default (list) …) (default (list) …)`。
+- **NetworkPolicy 的 `podSelector` 缩进少了两格**，`include | nindent 4` 把标签打到了
+  `matchLabels` 同一级。渲染出来是合法 YAML、看着也对，**只有 `--dry-run=server`
+  的严格解码才会报 `unknown field "spec.podSelector.app.kubernetes.io/name"`**。
+  这正是服务端 dry-run 值得跑的原因。
+- **`subjects[].namespaceSelector` 在 Kubernetes 1.29 才出现（alpha），1.31 才默认开启。**
+  本集群是 **1.28**，API Server 直接
+  `strict decoding error: unknown field "subjects[0].namespaceSelector"` 拒绝整个绑定
+  ——不是优雅降级，是整个对象不可用。原先的无条件写法让 chart **根本装不上目标集群**。
+  现在按 `.Capabilities.KubeVersion` 分支：≥1.31 用标签选择器；<1.31 必须显式
+  `rbac.allowClusterWideWorkspaceAccess=true`，并在 `NOTES.txt` 里把后果说清楚。
+  **`helm template` 不带 `--kube-version` 时用的是 Helm 二进制内置的版本，不是集群的**，
+  所以本地渲染验证两者都要跑。
+- **`randAlphaNum` 每次求值都重新生成。** 数据库口令若被两处 `include` 各自生成一次，
+  Secret 里的 URL 和 PostgreSQL 的 `POSTGRES_PASSWORD` 会是两个不同的值。
+  现在在 `secret.yaml` 里解析一次，并用 `lookup` 复用已存在的 Secret
+  （`initdb` 时写进数据目录的口令不能变）。
+
+**工作空间 RBAC：本 chart 唯一无法兼顾「安全」与「可移植」的地方**
+
+目标是一个「只能在自己创建的那些命名空间里活动」的 ServiceAccount。Kubernetes 有两种表达方式：
+
+1. **subjects 上的 `namespaceSelector`（≥ 1.31）**：一条绑定，按 `wl-managed=true` 标签匹配。
+   语义完全正确，不需要任何按命名空间的对象。**≥1.31 时自动使用这条路径。**
+2. **在每个工作空间里写一条 RoleBinding**：在创建命名空间的同一时刻创建。任何版本都能用，
+   但意味着**应用自己去写 RBAC 对象**——那是产品改动，不是 chart 改动。本 chart 没有采用。
+
+于是 <1.31 时只能集群范围授予，且必须显式打开开关。后果是实打实的：
+平台的服务账号可以读取、进入**所有**命名空间里的 Pod。这不是被忽略的细节，
+它写在 `templates/rbac.yaml` 的块注释里，也会在每次安装的 `NOTES.txt` 里打印出来。
+
+另有两条规则**任何版本都无法用 RBAC 限定**：`namespaces` 是集群作用域对象，
+subject 选择器对它无从匹配。因此 `-namespace-lifecycle`（含 `delete`）与
+`-workspace-namespaced`（<1.31 时）被单独拆成独立的 ClusterRole，
+让 `kubectl get clusterrole` 一眼能看见这份权力，而不是埋在四十条规则里。
+补上这个缺口的是 `templates/admission-note.yaml` 里那份
+ValidatingAdmissionPolicy——它**不自动安装**，因为它是集群级生效的，
+一次 `helm install` 不该顺手改掉整集群其他租户的命名空间删除行为。
 
 > 每期必须可运行并**通过验收**后才进入下一期。
 
@@ -1081,10 +1256,18 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
   会让采集中断直接变成少计费。**唯一的前置依赖是既有的 Prometheus 是否带
   `namespace` / `pod` 标签** —— 缺了它 GPU 利用率面板会是空的，而用量统计不受影响
   （见 14.4，以及 `deploy/grafana/README.md` 末尾的确认命令）。
-- `deploy/helm/` 属于 Phase 8。
-- `/auth/login` 的**登录限流**尚未实现，Phase 8 与审计告警一并落地。
-- **审计日志的读取接口尚未提供**（Phase 8）。写入一直是完整的，
-  缺的是查询界面 —— 有写入没有读取等于事后无法取证。
+- ~~`deploy/helm/`~~ 已随 Phase 8 交付（`deploy/helm/kube-wl-ai/`）。
+- ~~`/auth/login` 的登录限流~~ 已随 Phase 8 交付（`app/auth/rate_limit.py`），未做的是**告警**：限流会 429，但不会主动通知任何人。
+- ~~审计日志的读取接口~~ 已随 Phase 8 交付（`app/api/v1/audit.py` + `/admin/audit`）。
+  仍然没有的是**审计的实时告警**：写入完整、可查询、可导出，但没人盯着，所以
+  「有人正在爆破」这件事只有事后翻日志才知道。
+- **未在真实集群上部署验证。** Helm chart 过了 `helm lint`、两条版本分支的渲染，
+  以及针对真实 1.28 API Server 的 `kubectl apply --dry-run=server`，
+  但**从未真正 `helm install` 过**。镜像仓库地址、StorageClass 名称、
+  LDAP 服务账号口令都还是占位值。
+- **`legacy/` 目录未删除。** 计划里 Phase 8 要删，但没有执行：
+  它包含旧代码里泄漏的 kubeconfig 与硬编码 `SECRET_KEY`，删掉有利，
+  但也是一份只有一次的存档。**先确认集群侧的凭证已轮换**，再决定要不要删。
 
 ---
 

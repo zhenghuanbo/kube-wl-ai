@@ -118,6 +118,14 @@ async def test_login_with_disabled_account_is_403(
 async def test_failed_login_is_audited(
     client: AsyncClient, seeded: AsyncSession, audit_rows
 ) -> None:
+    """A failed login is recorded with the name that was *claimed*.
+
+    Not `anonymous`, and not an actor id. The distinction matters: the name is
+    what the per-account login rate limit counts, and it is what an operator
+    needs in order to see a guessing campaign aimed at one person. It is also
+    unverified — anyone can type any name — so `actor_user_id` stays NULL, and
+    these rows are consequently visible only to a global administrator.
+    """
     await factories.create_user(seeded, username="alice", password="correct-horse-battery")
     await seeded.commit()
 
@@ -126,8 +134,13 @@ async def test_failed_login_is_audited(
     entries = await audit_rows()
     denied = [entry for entry in entries if entry.status == "denied"]
     assert denied, f"expected a denied audit row, got {[e.action for e in entries]}"
-    assert denied[0].actor_username == "anonymous"
+    assert denied[0].actor_username == "alice"
+    assert denied[0].actor_user_id is None
+    assert denied[0].detail is not None and denied[0].detail["username"] == "alice"
     assert denied[0].ip_address is not None
+    # One attempt is one row: the handler writes it and suppresses the
+    # middleware's less informative copy.
+    assert len(denied) == 1
 
 
 async def test_successful_login_is_audited_once(

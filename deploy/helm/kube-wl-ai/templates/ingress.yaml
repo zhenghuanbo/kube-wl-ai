@@ -1,0 +1,60 @@
+{{- if .Values.ingress.enabled }}
+{{/*
+One host, four paths, and that is the design rather than a convenience.
+
+`/`, `/api`, `/ws` and `/grafana` on the same origin is what makes the refresh
+cookie first-party (`SameSite=Lax` would be dropped cross-site), what lets the
+Grafana iframe work without third-party-cookie exceptions, and what removes CORS
+from the WebSocket handshake entirely. Splitting the API onto its own hostname
+would break all three at once.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "kube-wl-ai.fullname" . }}
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+  annotations:
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- if .Values.ingress.tls.enabled }}
+    {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ required "ingress.tls.secretName is required when ingress.tls.enabled" .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "kube-wl-ai.fullname" . }}-api
+                port:
+                  name: http
+          {{- if .Values.ingress.webSocket }}
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "kube-wl-ai.fullname" . }}-api
+                port:
+                  name: http
+          {{- end }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "kube-wl-ai.fullname" . }}-web
+                port:
+                  name: http
+{{- end }}

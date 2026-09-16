@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request, Response
 
-from app.auth import policy
+from app.auth import policy, rate_limit
 from app.auth import service as auth_service
 from app.auth.cookies import REFRESH_COOKIE_NAME, clear_refresh_cookie, set_refresh_cookie
 from app.auth.providers import build_providers
@@ -62,12 +62,27 @@ async def login(
 
     The access token is returned in the body; the refresh token is set as an
     httpOnly cookie and never appears in the response payload.
+
+    The attempt is rate limited *before* the credentials are checked — see
+    `app.auth.rate_limit` — so a locked-out attempt costs no directory round trip
+    and cannot be used to make the LDAP server do work.
     """
-    user, provider = await auth_service.authenticate(
-        session, payload.username, payload.password, settings=settings
+    user_agent, ip_address = _client_meta(request)
+
+    await rate_limit.enforce_login_rate_limit(
+        session, username=payload.username, ip_address=ip_address, settings=settings
     )
 
-    user_agent, ip_address = _client_meta(request)
+    try:
+        user, provider = await auth_service.authenticate(
+            session, payload.username, payload.password, settings=settings
+        )
+    except UnauthorizedError as exc:
+        await rate_limit.record_login_failure(
+            request=request, username=payload.username, error_message=exc.message
+        )
+        raise
+
     issued = await auth_service.issue_session(
         session,
         user,

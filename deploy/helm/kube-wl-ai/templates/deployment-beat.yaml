@@ -1,0 +1,84 @@
+{{- include "kube-wl-ai.validate" . -}}
+{{/*
+Celery beat.
+
+One replica, enforced by `Recreate` rather than left to the honour system. Two
+beat schedulers both see the schedule and both fire it, so `reconcile-workloads`
+would run twice per interval. The duplicated reconcile is idempotent and merely
+wasteful; a duplicated `rollup-usage` writes the same day twice, which is also
+idempotent — but the general case is not, and the fix is one line.
+
+`Recreate` means a rolling update briefly has *no* beat rather than two. A missed
+tick is recovered on the next one.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kube-wl-ai.fullname" . }}-beat
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: beat
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.beat.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "kube-wl-ai.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: beat
+  template:
+    metadata:
+      labels:
+        {{- include "kube-wl-ai.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: beat
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "kube-wl-ai.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      {{- $pullSecrets := concat (default (list) .Values.image.pullSecrets) (default (list) .Values.imagePullSecrets) }}
+      {{- with $pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: beat
+          image: {{ include "kube-wl-ai.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - celery
+            - -A
+            - app.workers.celery_app.celery_app
+            - beat
+            - --loglevel={{ .Values.config.logLevel | lower }}
+            # The schedule is in code (`celery_app.conf.beat_schedule`), so the
+            # schedule file is scratch. Without this it persists between
+            # restarts and a changed schedule is ignored until someone deletes it.
+            - --schedule=/tmp/celerybeat-schedule
+          env:
+            {{- include "kube-wl-ai.commonEnv" . | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "kube-wl-ai.configMapName" . }}
+          resources:
+            {{- toYaml .Values.beat.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

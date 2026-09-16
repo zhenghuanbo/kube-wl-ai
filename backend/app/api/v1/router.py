@@ -9,7 +9,9 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.api.v1 import (
+    api_tokens,
     applications,
+    audit,
     auth,
     groups,
     images,
@@ -38,4 +40,6 @@ api_router.include_router(tasks.router)
 api_router.include_router(images.router)
 api_router.include_router(storages.router)
 api_router.include_router(usage.router)
+api_router.include_router(api_tokens.router)
+api_router.include_router(audit.router)
 api_router.include_router(monitor.router)

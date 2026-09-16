@@ -63,6 +63,22 @@ class Settings(BaseSettings):
     refresh_token_expire_days: int = 7
     jwt_issuer: str = "kube-wl-ai"
 
+    # Login rate limiting -----------------------------------------------------
+    # Counted from the audit trail rather than from a separate counter store, so
+    # the reason somebody is locked out is readable in the same table as
+    # everything else that happened. See `app.auth.rate_limit`.
+    login_rate_limit_enabled: bool = True
+    #: Sliding window. Long enough that a password-guessing run is cut off,
+    #: short enough that a person who mistyped a few times is not stranded.
+    login_rate_limit_window_seconds: int = 900
+    #: Per source address. Generous, because a whole lab can sit behind one NAT
+    #: address and a tight per-IP limit would lock out a lecture theatre.
+    login_rate_limit_attempts_per_ip: int = 30
+    #: Per account. Tighter, because this is the limit that actually stops
+    #: guessing against one name. Kept above the per-IP figure for a single
+    #: user only by being a separate window, not a lower number.
+    login_rate_limit_attempts_per_username: int = 10
+
     # FreeIPA / LDAP
     ldap_uri: str = ""
     ldap_base_dn: str = ""

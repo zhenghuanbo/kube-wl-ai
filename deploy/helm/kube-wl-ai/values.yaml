@@ -1,0 +1,298 @@
+# kube-wl-ai Helm values.
+#
+# The defaults describe a **development** install: no Ingress, no TLS, SQLite is
+# not used but the passwords are placeholders that the chart refuses to accept in
+# production (see `templates/_validate.tpl`). Everything an operator must change
+# before a real deployment is called out below.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  # The API, worker and beat containers all run the same image; only the command
+  # differs. That is deliberate — a migration that ships in one image and is
+  # applied by another is how schema drift starts.
+  repository: registry.example.edu/kube-wl-ai/backend
+  # Defaults to `.Chart.AppVersion` when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+web:
+  image:
+    repository: registry.example.edu/kube-wl-ai/frontend
+    tag: ""
+    pullPolicy: IfNotPresent
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  service:
+    type: ClusterIP
+    port: 80
+
+api:
+  replicaCount: 2
+  # A single uvicorn process per pod. The app is async, so concurrency comes from
+  # the event loop rather than from worker processes; multiple processes would
+  # multiply the connection pool without raising throughput on an I/O-bound app.
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+  service:
+    type: ClusterIP
+    port: 8000
+  # Graceful shutdown: long enough for an in-flight request to finish, short
+  # enough that a rollout does not stall.
+  terminationGracePeriodSeconds: 30
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # Extra environment for the API, worker and beat alike. Values are templated.
+  extraEnv: []
+
+worker:
+  replicaCount: 1
+  concurrency: 4
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+
+beat:
+  # Exactly one. Two beat schedulers means every periodic task runs twice —
+  # a duplicated usage rollup is merely wasteful, a duplicated reconcile is not.
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# --- application configuration ------------------------------------------------
+config:
+  appEnv: production
+  logLevel: INFO
+  logJson: true
+  authProviders: "ldap,local"
+  corsOrigins: ""
+  accessTokenExpireMinutes: 15
+  refreshTokenExpireDays: 7
+
+  # Login rate limiting. The counter is the audit trail, so it lives in the
+  # database and survives a restart; see agents.md §13 Phase 8.
+  loginRateLimitEnabled: true
+  loginRateLimitWindowSeconds: 900
+  loginRateLimitAttemptsPerIp: 30
+  loginRateLimitAttemptsPerUsername: 10
+
+  ldap:
+    uri: ""
+    baseDn: ""
+    userDnTemplate: ""
+    groupBaseDn: ""
+    bindDn: ""
+    observerGroup: ""
+  # A mounted PEM bundle, if the directory is signed by a private CA.
+  ldapCaCertSecret: ""
+  ldapCaCertKey: ca.crt
+
+  # Token signing. Strongly recommended in production: with RS256 the Grafana
+  # handoff verifies against the JWKS endpoint without ever holding the signing
+  # key. Generate with scripts/helm-gen-keys.sh.
+  jwt:
+    algorithm: RS256
+    issuer: kube-wl-ai
+    # An existing Secret holding `tls.key` / `tls.crt`. When empty the chart
+    # creates one from `.Values.secrets.jwtPrivateKey`, which is a development
+    # convenience and produces a key that ends up in the release's values.
+    existingSecret: ""
+  # Refuse to start unless a real key is present, in production.
+  requireJwtKeys: true
+
+  k8s:
+    # false ⇒ the instance/task APIs report themselves as unavailable rather than
+    # failing at call time. Set true and point `kubeconfigSecret` at a kubeconfig
+    # only when the platform runs outside the cluster it manages.
+    enabled: true
+    inCluster: true
+    kubeconfigSecret: ""
+
+  harbor:
+    url: ""
+    robotName: ""
+    verifyTls: true
+
+  monitoring:
+    prometheusUrl: ""
+    # Grafana is optional. With `grafanaPublicUrl` empty the monitoring centre
+    # says so plainly and the nginx `/grafana/` route is never exercised.
+    grafanaUrl: ""
+    grafanaPublicUrl: ""
+    grafanaDatasourceUid: wl-prometheus
+    grafanaOrgId: 1
+    grafanaJwtAudience: grafana
+    grafanaJwtTtlSeconds: 300
+
+  instance:
+    sshMode: nodeport
+    sshNodeportRange: "30000-32767"
+    sshHost: ""
+    ingressHost: ""
+    defaultStorageGb: 20
+    ideTicketSeconds: 120
+
+  storageClasses:
+    home: ""
+    data: ""
+    share: ""
+
+# --- secrets ------------------------------------------------------------------
+#
+# Prefer `existingSecret`. When it is unset the chart creates a Secret from the
+# values below; those land in the release values, which is fine for a lab
+# evaluation and wrong for anything real.
+secrets:
+  existingSecret: ""
+  secretKey: ""
+  databaseUrl: ""
+  redisUrl: ""
+  localAdminPassword: ""
+  ldapBindPassword: ""
+  harborRobotSecret: ""
+  grafanaJwtPrivateKey: ""
+  jwtPrivateKey: ""
+  jwtPublicKey: ""
+
+postgresql:
+  # Bundled for convenience. Point `secrets.databaseUrl` at a managed instance
+  # for anything that matters: an in-cluster single replica is not a backup
+  # strategy.
+  enabled: true
+  image:
+    repository: postgres
+    tag: "17-alpine"
+  auth:
+    username: kube_wl_ai
+    database: kube_wl_ai
+    password: ""
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+redis:
+  enabled: true
+  image:
+    repository: redis
+    tag: "7-alpine"
+  persistence:
+    enabled: false
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# --- migrations ---------------------------------------------------------------
+migrations:
+  # Run as a pre-install/pre-upgrade hook, so a failed migration blocks the
+  # release instead of leaving new code against an old schema.
+  enabled: true
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+
+# --- ingress ------------------------------------------------------------------
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  # The SPA, the API, the WebSocket terminal and the Grafana proxy are one
+  # origin: `/`, `/api`, `/ws`, `/grafana`. A single host keeps CORS, the refresh
+  # cookie and the Grafana session all first-party.
+  host: wl.example.edu
+  # The terminal WebSocket path. Separate from `/api` because some ingress
+  # controllers want different proxy timeouts for an upgraded connection.
+  webSocket: true
+  tls:
+    enabled: false
+    secretName: ""
+
+# --- platform RBAC ------------------------------------------------------------
+rbac:
+  # The API mutates namespaces, PVCs, pods and NodePort Services (SSH), so it
+  # needs a ServiceAccount with real permissions. `namespaceSelector` scopes the
+  # Role to the `wl-` prefixed namespaces the platform creates.
+  create: true
+  # The label every platform-created namespace carries, and the value RBAC's
+  # namespaceSelector matches on. Changing it here without changing the app's
+  # constant produces a chart whose ServiceAccount can do nothing.
+  managedLabelKey: "wl-managed"
+  # Required on Kubernetes < 1.31, where subject `namespaceSelector` does not
+  # exist and the workspace role therefore has to be granted cluster-wide.
+  #
+  # Read the block comment in templates/rbac.yaml before setting this. The
+  # consequence is that the platform's ServiceAccount can read pods, logs and
+  # exec in *every* namespace, including ones it does not manage.
+  allowClusterWideWorkspaceAccess: false
+  # Emit the ConfigMap describing the ValidatingAdmissionPolicy that closes the
+  # one gap RBAC cannot (see templates/rbac.yaml). The policy itself is never
+  # applied automatically — it is cluster-wide and the operator decides.
+  admissionPolicyNotice: true
+  serviceAccount:
+    annotations: {}
+
+# --- operational --------------------------------------------------------------
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+networkPolicy:
+  # Enabled by default. The API is reachable only from the ingress controller and
+  # from within the release; the database only from the app pods. The cluster's
+  # own CNI must enforce policies, otherwise this is decoration — but it is the
+  # right decoration.
+  enabled: true
+  # The namespace the ingress controller runs in. **Empty means the API is not
+  # reachable through the ingress at all** — the symptom is a 502 with no log
+  # line, which is why it is called out here rather than left to be discovered.
+  # Set it before enabling `ingress`.
+  ingressNamespaceSelector: {}
+  # Prometheus, when it lives in another namespace.
+  monitoringNamespaceSelector: {}
+
+serviceMonitor:
+  # Off by default. This cluster already runs Prometheus, and enabling a
+  # ServiceMonitor without knowing its label selector silently produces no
+  # scrape target; `monitoring.prometheusUrl` is what the app itself uses.
+  enabled: false
+  labels: {}
+  interval: 30s
+  path: /metrics
+
+commonLabels: {}
+commonAnnotations: {}
+imagePullSecrets: []

@@ -1,0 +1,31 @@
+# A development install: every check in `_validate.tpl` is either satisfied or
+# deliberately switched off, so this renders without a real cluster.
+#
+#     helm template wl . -f values-dev.yaml
+#
+# Not for a shared cluster: the passwords are literals in a file.
+config:
+  appEnv: development
+  authProviders: "local"
+  logJson: false
+  requireJwtKeys: false
+  monitoring:
+    grafanaPublicUrl: ""
+
+secrets:
+  secretKey: "dev-only-secret-key-at-least-32-bytes-long"
+  localAdminPassword: "dev-admin-password"
+
+ingress:
+  enabled: true
+  host: wl.dev.example.edu
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+
+networkPolicy:
+  ingressNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: ingress-nginx
+
+podDisruptionBudget:
+  enabled: false

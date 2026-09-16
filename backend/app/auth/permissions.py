@@ -115,6 +115,16 @@ PERMISSIONS: tuple[PermissionSpec, ...] = (
     PermissionSpec("monitor:read_self", "monitor", "查看本人监控"),
     PermissionSpec("monitor:read_group", "monitor", "查看本组监控"),
     PermissionSpec("monitor:read_all", "monitor", "查看全部监控"),
+    # API tokens (self-service) -----------------------------------------------
+    # These are self-service and granted to every role, including observer. The
+    # reason is that a token cannot exceed its owner: `effective_permissions`
+    # intersects the token's declared scopes with the user's *current* roles, so
+    # an observer's token reads and nothing more. Gating the self-service
+    # endpoints behind a privilege would mean only administrators could automate
+    # anything, which is the opposite of what an open API is for.
+    PermissionSpec("api_token:read", "api_token", "查看本人的 API 令牌"),
+    PermissionSpec("api_token:create", "api_token", "创建 API 令牌"),
+    PermissionSpec("api_token:delete", "api_token", "吊销 API 令牌"),
     # System ------------------------------------------------------------------
     PermissionSpec("audit:read", "system", "查看审计日志"),
     PermissionSpec("system:config", "system", "系统配置"),
@@ -161,6 +171,7 @@ _OBSERVER = frozenset(
         usage:read_self monitor:read_self
         user:read group:read
         workspace:read
+        api_token:read api_token:create api_token:delete
         """
     )
 )

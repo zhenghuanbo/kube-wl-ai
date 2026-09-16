@@ -28,6 +28,7 @@ from app.core.errors import (
     UnauthorizedError,
 )
 from app.core.logging import get_logger
+from app.core.time import as_aware
 from app.db.session import get_session_factory
 from app.models.enums import GroupRole, RoleCode, RoleScope, UserSource
 from app.models.group import Group, UserGroupLink
@@ -56,8 +57,14 @@ class IssuedSession:
 
 
 def _aware(value: datetime) -> datetime:
-    """SQLite returns naive datetimes; compare them in UTC."""
-    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    """SQLite returns naive datetimes; compare them in UTC.
+
+    Kept as a thin alias so existing call sites read the same; the logic lives in
+    `app.core.time` alongside the other datetime normalisation.
+    """
+    normalised = as_aware(value)
+    assert normalised is not None
+    return normalised
 
 
 # --- Authentication ----------------------------------------------------------

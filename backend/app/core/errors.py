@@ -103,6 +103,14 @@ class NotFoundError(AppError):
     message = "Resource not found"
 
 
+class TooManyRequestsError(AppError):
+    """The caller has made too many attempts; see `app.auth.rate_limit`."""
+
+    status_code = status.HTTP_429_TOO_MANY_REQUESTS
+    code = "rate_limited"
+    message = "Too many requests"
+
+
 class ConflictError(AppError):
     status_code = status.HTTP_409_CONFLICT
     code = "conflict"

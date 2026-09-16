@@ -1,0 +1,34 @@
+{{/*
+Non-secret configuration.
+
+Only things that are safe to read with `kubectl get configmap -o yaml` go here.
+Credentials live in the Secret even when they are empty strings, because an
+operator auditing "where do secrets live" should get one answer.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kube-wl-ai.configMapName" . }}
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  appEnv: {{ .Values.config.appEnv | quote }}
+  authProviders: {{ .Values.config.authProviders | quote }}
+  corsOrigins: {{ .Values.config.corsOrigins | quote }}
+  k8sEnabled: {{ .Values.config.k8s.enabled | quote }}
+  k8sInCluster: {{ .Values.config.k8s.inCluster | quote }}
+  # Whether the monitoring centre offers anything at all. Grafana is optional by
+  # design: with it unconfigured the page says so, and the nginx `/grafana/`
+  # route is simply never reached.
+  grafanaEnabled: {{ .Values.config.monitoring.grafanaPublicUrl | quote }}
+  sshMode: {{ .Values.config.instance.sshMode | quote }}
+  sshNodeportRange: {{ .Values.config.instance.sshNodeportRange | quote }}
+  loginRateLimitEnabled: {{ .Values.config.loginRateLimitEnabled | quote }}
+  # Surfaced so the value is visible to a reviewer without reading the Secret.
+  # The token *itself* is never here.
+  jwtAlgorithm: {{ .Values.config.jwt.algorithm | quote }}
+  jwtIssuer: {{ .Values.config.jwt.issuer | quote }}

@@ -1,0 +1,100 @@
+{{- if .Values.networkPolicy.enabled }}
+{{/*
+Default-deny, then allow exactly three flows.
+
+A NetworkPolicy is only enforced by a CNI that implements it — Calico, Cilium,
+and not the default `kubenet`. Where it is not enforced this file is inert, which
+is a reason to check the CNI rather than a reason to omit it: the failure mode of
+leaving it out is silent, and the failure mode of including it on an enforcing
+cluster is loud and immediate.
+
+The database and broker are the ones worth protecting. They hold every user
+record and every audit row, and neither has any business being reachable from a
+namespace that is not this one.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "kube-wl-ai.fullname" . }}-default-deny
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "kube-wl-ai.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress]
+---
+{{/*
+The API accepts traffic from the web tier and from whatever routes to the
+ingress controller — which is why the ingress namespace is a value. On a cluster
+where the controller lives elsewhere, an empty selector here means the API is
+unreachable from outside and the symptom is a 502 with no log line.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "kube-wl-ai.fullname" . }}-api
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "kube-wl-ai.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "kube-wl-ai.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: web
+      ports:
+        - protocol: TCP
+          port: 8000
+    {{- with .Values.networkPolicy.ingressNamespaceSelector }}
+    - from:
+        - namespaceSelector:
+            {{- toYaml . | nindent 12 }}
+      ports:
+        - protocol: TCP
+          port: 8000
+    {{- end }}
+    # Prometheus, when it scrapes from another namespace.
+    {{- with .Values.networkPolicy.monitoringNamespaceSelector }}
+    - from:
+        - namespaceSelector:
+            {{- toYaml . | nindent 12 }}
+      ports:
+        - protocol: TCP
+          port: 8000
+    {{- end }}
+---
+{{/*
+The data tier: reachable only from the pods of this release.
+
+Deliberately no `namespaceSelector` escape hatch. If an operator needs a psql
+prompt from a bastion, that is a `kubectl port-forward`, which is audited by the
+API server, rather than a standing network path that is not.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "kube-wl-ai.fullname" . }}-data
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [database, broker]
+      - key: app.kubernetes.io/instance
+        operator: In
+        values: [{{ .Release.Name }}]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "kube-wl-ai.selectorLabels" . | nindent 14 }}
+{{- end }}

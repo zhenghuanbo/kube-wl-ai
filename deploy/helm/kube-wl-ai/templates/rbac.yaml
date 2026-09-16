@@ -1,0 +1,260 @@
+{{- include "kube-wl-ai.validate" . -}}
+{{- if .Values.rbac.create }}
+{{/*
+One ServiceAccount for the API and its worker.
+
+They perform the same cluster mutations — the worker reconciles workloads the
+API created — so a second, narrower identity would have to hold the same rules.
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "kube-wl-ai.serviceAccountName" . }}
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+  {{- with .Values.rbac.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+---
+{{/*
+Cluster-scoped reads.
+
+Nodes and their GPU capacity are cluster-scoped objects, so listing them cannot
+be expressed in a Role. This is read-only on purpose: the platform never creates
+or deletes a node.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kube-wl-ai.fullname" . }}-node-reader
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [nodes/status]
+    verbs: [get]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: [nodes, pods]
+    verbs: [get, list]
+  # The platform schedules onto nodes by label, so it must read their labels.
+  - apiGroups: ["nvidia.com"]
+    resources: [clusterpolicies]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kube-wl-ai.fullname" . }}-node-reader
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kube-wl-ai.fullname" . }}-node-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kube-wl-ai.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+{{/*
+The permission that actually matters, and the one to keep narrow.
+
+The platform creates a namespace per workspace, labelled `wl-managed=true`. This
+Role is bound in *its own* namespace so the platform can read the resources it
+creates there, and the creating of new namespaces is granted separately below.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kube-wl-ai.fullname" . }}-app
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [configmaps, secrets, services, persistentvolumeclaims, pods]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [pods/log, pods/exec]
+    verbs: [get, create]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: ["networking.k8s.io"]
+    resources: [ingresses]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: [workloads, localqueues, resourceflavors]
+    verbs: [get, list, watch]
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: [workloads]
+    verbs: [create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kube-wl-ai.fullname" . }}-app
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kube-wl-ai.fullname" . }}-app
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kube-wl-ai.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+{{/*
+Workspace namespaces — and the one place this chart cannot be both safe and
+portable, stated plainly.
+
+The goal is a ServiceAccount that can act inside the namespaces the platform
+creates and nowhere else. Kubernetes offers two ways to say that, and which one
+is available depends on the cluster version.
+
+**1. Subject `namespaceSelector` (Kubernetes >= 1.31).** Bind one ClusterRole with
+a selector on the subject:
+`namespaceSelector: {matchLabels: {wl-managed: "true"}}`. The rules apply only in
+namespaces carrying the label. This is exactly the intended semantics, it needs no
+per-namespace objects, and it is used automatically when the cluster supports it.
+The field was alpha in 1.29 (feature gate `SubjectNamespaceSelector`), beta and
+on by default in 1.31.
+
+**2. Older clusters, including the 1.28 cluster this was written against.** The
+field does not exist, and the server rejects the whole binding — not gracefully,
+with `strict decoding error: unknown field "subjects[0].namespaceSelector"`, so a
+chart that always emits it simply cannot install. The textbook alternative is a
+RoleBinding created *inside* each workspace namespace at the moment the platform
+creates it, which needs no new API and works everywhere. It is **not** what this
+chart ships, because it means the application itself creates RBAC objects, and
+that is a product change rather than a chart change.
+
+So on <1.31 the chart grants the workspace role cluster-wide and **requires an
+explicit opt-in** (`rbac.allowClusterWideWorkspaceAccess`). It is not a default
+because the consequence is real: the platform's ServiceAccount can read pods,
+logs and exec into *every* namespace in the cluster, not only its own. The
+label-based guard remains in the application (`is_managed_namespace` refuses to
+delete an unlabelled namespace), but that is code, not a control.
+
+The correct fix on a long-lived <1.31 cluster is option 2, and the upgrade to
+1.31+ makes this paragraph moot.
+*/}}
+{{- $supportsSelector := semverCompare ">=1.31-0" .Capabilities.KubeVersion.Version -}}
+{{- if and (not $supportsSelector) (not .Values.rbac.allowClusterWideWorkspaceAccess) -}}
+{{- fail (printf "Kubernetes %s predates subject namespaceSelector (1.31). Set rbac.allowClusterWideWorkspaceAccess=true to grant workspace access cluster-wide, or upgrade the cluster. See templates/rbac.yaml." .Capabilities.KubeVersion.Version) -}}
+{{- end }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kube-wl-ai.fullname" . }}-workspace-namespaced
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [resourcequotas, limitranges]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: ["networking.k8s.io"]
+    resources: [networkpolicies]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims, services, configmaps, secrets, serviceaccounts]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, delete]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create, get]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: [workloads, localqueues]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: ["networking.k8s.io"]
+    resources: [ingresses]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kube-wl-ai.fullname" . }}-workspace
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+  {{- if not $supportsSelector }}
+  annotations:
+    kube-wl-ai/risk: >-
+      Cluster-wide, because this cluster is older than 1.31 and has no subject
+      namespaceSelector. The platform's ServiceAccount can reach every namespace.
+  {{- end }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kube-wl-ai.fullname" . }}-workspace-namespaced
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kube-wl-ai.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+    {{- if $supportsSelector }}
+    # The boundary. Only namespaces carrying this label are in scope.
+    namespaceSelector:
+      matchLabels:
+        {{ .Values.rbac.managedLabelKey }}: "true"
+    {{- end }}
+---
+{{/*
+Namespace lifecycle, kept separate so the unscopable part is visible.
+
+`delete` on namespaces is cluster-wide on every version, and no RBAC construct
+narrows it — a namespace is a cluster-scoped object, so a subject selector has
+nothing to match against. It lives in its own ClusterRole named for what it is,
+so `kubectl get clusterrole` shows the power rather than burying it among forty
+namespaced rules. `templates/admission-note.yaml` describes the admission policy
+that closes the gap.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kube-wl-ai.fullname" . }}-namespace-lifecycle
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+  annotations:
+    kube-wl-ai/risk: >-
+      Unscopable by RBAC. Pair with the ValidatingAdmissionPolicy in
+      templates/admission-note.yaml so only namespaces labelled wl-managed=true
+      can be deleted by this identity.
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [create, get, list, watch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kube-wl-ai.fullname" . }}-namespace-lifecycle
+  labels:
+    {{- include "kube-wl-ai.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kube-wl-ai.fullname" . }}-namespace-lifecycle
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kube-wl-ai.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

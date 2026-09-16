@@ -89,7 +89,7 @@ def login(username: str, password: str) -> str | None:
     return payload.get("accessToken")
 
 
-def main() -> int:  # noqa: C901 - a linear acceptance script reads better flat
+def main() -> int:
     print(f"Phase 2 冒烟验收 → {BASE}\n")
 
     admin = login(ADMIN_USERNAME, ADMIN_PASSWORD)
@@ -315,7 +315,7 @@ def main() -> int:  # noqa: C901 - a linear acceptance script reads better flat
             str(listing),
         )
 
-        status, other = call("GET", f"/workspaces/{second_id}", token=member_token)
+        status, _other = call("GET", f"/workspaces/{second_id}", token=member_token)
         check("越权读取他人工作空间返回 404", status == 404, str(status))
 
         status, _ = call("GET", "/nodes", token=member_token)

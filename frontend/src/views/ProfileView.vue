@@ -13,6 +13,7 @@ import { onMounted, reactive, ref } from 'vue'
 
 import { ApiError } from '@/api/client'
 import { addSshKey, deleteSshKey, listSshKeys } from '@/api/instances'
+import ApiTokensCard from '@/components/profile/ApiTokensCard.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import PageHeader from '@/components/common/PageHeader.vue'
@@ -144,6 +145,8 @@ onMounted(() => void load())
         </v-table>
       </v-card-text>
     </v-card>
+
+    <ApiTokensCard />
 
     <v-card>
       <v-card-title>SSH 公钥</v-card-title>

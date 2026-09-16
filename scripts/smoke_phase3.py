@@ -114,7 +114,7 @@ def ensure_user(admin: str, username: str, group_id: int | None = None) -> int |
     return None
 
 
-def main() -> int:  # noqa: C901 - a linear acceptance script reads better flat
+def main() -> int:
     print("\n\033[1mPhase 3 — 容器实例、SSH 与 IDE\033[0m")
 
     admin = login(ADMIN_USERNAME, ADMIN_PASSWORD)
@@ -295,7 +295,7 @@ def main() -> int:  # noqa: C901 - a linear acceptance script reads better flat
     check("停止实例", status == 200 and stopped["status"] == "stopped",
           f"{status} {stopped}")
 
-    status, still_blocked = call("POST", "/instances", token=token, body=payload("dev-four"))
+    status, _still_blocked = call("POST", "/instances", token=token, body=payload("dev-four"))
     check("停止后配额仍被占用（重启不会因自己而失败）", status == 409, f"{status}")
 
     status, started = call("POST", f"/instances/{instance_id}/start", token=token, body={})

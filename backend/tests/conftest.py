@@ -12,6 +12,7 @@ touch the developer's database.
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Generator
+from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -105,11 +106,23 @@ async def admin(seeded: AsyncSession):
 
 
 @pytest.fixture
-def app(settings: Settings, engine: AsyncEngine, session_factory: async_sessionmaker[AsyncSession]):
+async def app(
+    settings: Settings, engine: AsyncEngine, session_factory: async_sessionmaker[AsyncSession]
+) -> AsyncGenerator[Any]:
     """The FastAPI app wired to the test database.
 
     ``init_engine`` matters: the audit middleware opens its own session through
-    the module-level factory, so that has to point at the scratch database too.
+    the module-level *global* factory, so that has to point at the scratch
+    database too.
+
+    **Whoever initialises disposes.** The teardown lives here rather than in the
+    `client` fixture because `init_engine` writes module-level state, and a test
+    that builds the app without an HTTP client used to leave that global engine —
+    and its SQLite connection — alive past the test. The socket was then closed
+    by the garbage collector during a *later* test, sometimes while pytest was
+    removing that test's `tmp_path`, which surfaced as
+    `OSError: Directory not empty` on an unrelated test. A leaked connection is a
+    flake that blames the wrong test, so the fix belongs at the owner.
     """
     init_engine(settings)
     application = create_app(settings)
@@ -126,7 +139,8 @@ def app(settings: Settings, engine: AsyncEngine, session_factory: async_sessionm
                 raise
 
     application.dependency_overrides[get_session] = _override_get_session
-    return application
+    yield application
+    await dispose_engine()
 
 
 @pytest.fixture
@@ -135,7 +149,6 @@ async def client(app) -> AsyncGenerator[AsyncClient]:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
-    await dispose_engine()
 
 
 @pytest.fixture

@@ -14,12 +14,10 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+# Importing the models package registers every table on Base.metadata.
+import app.models  # noqa: F401
 from app.core.config import get_settings
 from app.db.base import Base
-
-# Importing the models package registers every table on Base.metadata.
-# (No models yet in Phase 0 — added in Phase 1.)
-# import app.models
 
 config = context.config
 

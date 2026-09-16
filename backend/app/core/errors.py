@@ -80,8 +80,17 @@ class UnauthorizedError(AppError):
     message = "Authentication required"
 
 
-class PermissionDeniedError(AppError):
+class ForbiddenError(AppError):
+    """The caller is authenticated but this action is not allowed for them."""
+
     status_code = status.HTTP_403_FORBIDDEN
+    code = "forbidden"
+    message = "Operation not permitted"
+
+
+class PermissionDeniedError(ForbiddenError):
+    """Specifically: a required permission code was missing."""
+
     code = "permission_denied"
     message = "You do not have permission to perform this action"
 

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import StrEnum
+from typing import ClassVar
 
 from sqlalchemy import DateTime, MetaData, func
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # Deterministic constraint/index names make Alembic migrations reproducible.
@@ -17,10 +20,37 @@ NAMING_CONVENTION = {
 }
 
 
+def str_enum(enum_cls: type[StrEnum], name: str) -> SAEnum:
+    """Portable enum column type.
+
+    Stored as VARCHAR + CHECK constraint rather than a native database enum so
+    that SQLite (used by the test suite) and PostgreSQL behave identically and
+    adding a value does not require a type migration.
+    """
+    return SAEnum(
+        enum_cls,
+        name=name,
+        native_enum=False,
+        length=32,
+        validate_strings=True,
+        values_callable=lambda cls: [member.value for member in cls],
+    )
+
+
 class Base(DeclarativeBase):
-    """Base class for all ORM models."""
+    """Base class for all ORM models.
+
+    ``eager_defaults`` makes SQLAlchemy fetch server-generated column values
+    (``created_at`` / ``updated_at``) as part of the same INSERT/UPDATE via
+    RETURNING. Without it those attributes are left expired after a flush, and
+    the next access triggers a lazy load — which raises ``MissingGreenlet``
+    under an async session rather than quietly working as it would in sync code.
+    """
 
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
+    # ClassVar is how SQLAlchemy documents this, but DeclarativeBase declares
+    # the same name as an instance variable — hence the targeted ignore.
+    __mapper_args__: ClassVar[dict[str, bool]] = {"eager_defaults": True}  # type: ignore[misc]
 
 
 class TimestampMixin:

@@ -9,7 +9,7 @@ httpx>=0.28.1
 
 ruff>=0.9.6
 mypy>=1.14.1
-types-passlib>=1.7.7
 types-PyJWT>=1.0.0
+types-requests>=2.32.0
 
 pre-commit>=4.1.0

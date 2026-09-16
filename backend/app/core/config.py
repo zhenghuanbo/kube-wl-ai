@@ -6,7 +6,7 @@ import json
 from functools import lru_cache
 from typing import Annotated, Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -128,6 +128,39 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.app_env == "production"
+
+    @model_validator(mode="after")
+    def _guard_production_secrets(self) -> Settings:
+        """Refuse obviously unsafe configuration in production.
+
+        Failing fast at startup is far better than silently signing sessions with
+        a placeholder key or leaving the break-glass password at its shipped
+        default.
+        """
+        if not self.is_production:
+            return self
+
+        problems: list[str] = []
+
+        secret = self.secret_key.get_secret_value()
+        if len(secret) < 32 or secret in {"change-me", "replace-with-a-long-random-string"}:
+            problems.append("SECRET_KEY must be a random string of at least 32 characters")
+
+        if "local" in self.auth_providers:
+            password = self.local_admin_password.get_secret_value()
+            if password in {"", "change-me", "replace-me"}:
+                problems.append(
+                    "LOCAL_ADMIN_PASSWORD is still the default; set a strong password "
+                    "or remove 'local' from AUTH_PROVIDERS"
+                )
+
+        if not self.cors_origins:
+            problems.append("CORS_ORIGINS must list the allowed web origins in production")
+
+        if problems:
+            raise ValueError("invalid production configuration: " + "; ".join(problems))
+
+        return self
 
 
 @lru_cache(maxsize=1)

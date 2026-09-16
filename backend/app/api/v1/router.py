@@ -1,13 +1,18 @@
-"""Aggregate router for ``/api/v1``.
+"""Versioned API router.
 
-Phase 1+ routers are registered here as they are implemented, e.g.::
-
-    from app.api.v1 import auth
-    api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
+Every resource router is registered here; `app.main` mounts this once at
+``settings.api_v1_prefix``.
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter
 
+from app.api.v1 import auth, groups, rbac, users
+
 api_router = APIRouter()
+
+api_router.include_router(auth.router)
+api_router.include_router(users.router)
+api_router.include_router(groups.router)
+api_router.include_router(rbac.router)

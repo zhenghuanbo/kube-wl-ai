@@ -10,10 +10,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1 import health
 from app.api.v1.router import api_router
+from app.api.wellknown import router as wellknown_router
 from app.core.config import Settings, get_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
 from app.db.session import dispose_engine, init_engine
+from app.middleware.audit import AuditMiddleware
+from app.middleware.request_context import REQUEST_ID_HEADER, RequestContextMiddleware
 
 logger = get_logger(__name__)
 
@@ -60,6 +63,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     register_exception_handlers(app)
 
+    # Middleware order matters: `add_middleware` prepends, so the last one added
+    # is the outermost. Desired nesting, outermost first:
+    #   CORS -> request context (id/logging) -> audit -> router
+    # CORS must wrap everything so error responses still carry its headers, and
+    # the audit layer must run inside the request context to see the request id.
+    app.add_middleware(AuditMiddleware, api_prefix=settings.api_v1_prefix)
+    app.add_middleware(RequestContextMiddleware)
+
     cors_origins = _resolve_cors_origins(settings)
     if cors_origins:
         app.add_middleware(
@@ -68,10 +79,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
+            expose_headers=[REQUEST_ID_HEADER],
         )
 
-    # Infra probes live at the root, outside the versioned API surface.
+    # Infra probes and well-known documents live at the root, outside the
+    # versioned API surface.
     app.include_router(health.router)
+    app.include_router(wellknown_router)
     app.include_router(api_router, prefix=settings.api_v1_prefix)
 
     return app

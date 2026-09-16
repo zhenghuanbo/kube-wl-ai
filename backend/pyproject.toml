@@ -27,6 +27,9 @@ select = [
 ignore = [
     "E501",  # line length is handled by the formatter
     "B008",  # FastAPI Depends() in defaults is idiomatic
+    "RUF001",  # Chinese text legitimately uses full-width punctuation
+    "RUF002",
+    "RUF003",
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -67,13 +70,15 @@ addopts = [
     "-ra",
     "--strict-markers",
     "--strict-config",
+    # Keep pytest's scratch files inside the workspace: the sandbox does not
+    # reliably allow writes to the system temp directory.
+    "--basetemp=.pytest-tmp",
 ]
 markers = [
     "integration: tests that require a real PostgreSQL / Kubernetes cluster",
 ]
 filterwarnings = [
     "error",
-    "ignore::DeprecationWarning:passlib.*",
 ]
 
 [tool.coverage.run]

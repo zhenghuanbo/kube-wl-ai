@@ -19,4 +19,7 @@ if [[ ! -x "$ALEMBIC" ]]; then
     exit 1
 fi
 
+# Put the virtualenv on PATH so alembic's post_write_hooks (ruff format) resolve.
+export PATH="$ROOT/backend/.venv/bin:$PATH"
+
 exec "$ALEMBIC" "$@"

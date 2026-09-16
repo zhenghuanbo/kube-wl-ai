@@ -32,7 +32,7 @@ from app.core.config import Settings
 from app.core.errors import BadRequestError, ConflictError, NotFoundError, QuotaExceededError
 from app.core.logging import get_logger
 from app.k8s import InstanceObjects, K8sError, K8sGateway, run_gateway
-from app.k8s.gateway import WorkloadRefs
+from app.k8s.gateway import VolumeMountSpec, WorkloadRefs
 from app.k8s.naming import INSTANCE_LABEL, WORKSPACE_LABEL, is_managed_workload
 from app.k8s.workloads import SSH_PORT, build_instance_objects, ingress_path
 from app.models.enums import (
@@ -51,6 +51,7 @@ from app.models.ssh_key import SshKey
 from app.models.user import User
 from app.models.workspace import Workspace
 from app.schemas.instance import InstanceCreate, InstanceSummary, InstanceUpdate
+from app.services import storages as storage_service
 from app.services.quota_guard import (
     LIVE_INSTANCE_STATUSES,
     Usage,
@@ -278,6 +279,18 @@ async def create_instance(
     session.add(instance)
     await session.flush()
 
+    # Attachments are resolved *after* the instance row exists so the join rows
+    # have a foreign key, but *before* the cluster state is built, because the
+    # mounts are part of the pod spec.
+    #
+    # Attached volumes do not count against the instance's own storage quota:
+    # each volume was already charged when it was created, and counting the same
+    # gigabyte twice would make a workspace hit its ceiling for no reason.
+    attached = await storage_service.resolve_attachments(
+        session, actor, workspace, payload.storage_ids or []
+    )
+    await storage_service.record_attachments(session, instance.id, attached)
+
     await apply_cluster_state(session, instance, workspace, pool, settings, gateway)
 
     logger.info(
@@ -340,6 +353,21 @@ async def apply_cluster_state(
     """
     keys = await authorized_keys(session, instance.owner_user_id)
 
+    # Read the attachments from the database rather than taking them as an
+    # argument: this function is also the repair path, and a reconcile that
+    # forgot the mounts would silently produce an instance missing its data.
+    attachments = await storage_service.list_attachments(session, instance.id)
+    extra_mounts = tuple(
+        VolumeMountSpec(
+            pvc_name=row.storage.pvc_name or "",
+            mount_path=row.mount_path,
+            read_only=row.is_read_only,
+            sub_path=row.sub_path,
+        )
+        for row in attachments
+        if row.storage is not None and row.storage.pvc_name
+    )
+
     objects = build_instance_objects(
         instance_id=instance.id,
         instance_name=instance.name,
@@ -361,6 +389,7 @@ async def apply_cluster_state(
         tolerations=tuple(pool.k8s_tolerations or ()),
         ingress_host=settings.instance_ingress_host,
         storage_class=pool.storage_class or settings.storage_class_home or None,
+        extra_mounts=extra_mounts,
     )
 
     try:

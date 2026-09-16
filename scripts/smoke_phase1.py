@@ -117,9 +117,10 @@ check(
 _, token, _ = login("carol", "carol-password-123")
 status, payload = call("GET", "/auth/permissions", token)
 # Counts move whenever a permission is added; `application:update` landed in
-# Phase 4 and took this from 42 to 43. The number is asserted so that an
-# accidental widening of a role is caught, not so that it stays fixed.
-check("组管理员权限数", len(payload["permissions"]), 43)
+# Phase 4 (42 -> 43) and `storage:manage` in Phase 5 (43 -> 44). The number is
+# asserted so that an accidental widening of a role is caught, not so that it
+# stays fixed.
+check("组管理员权限数", len(payload["permissions"]), 44)
 check("数据范围为组", payload["scope"]["kind"], "group")
 check("可见组", payload["scope"]["groupIds"], [gid])
 check("非全局管理员", payload["isGlobalAdmin"], False)

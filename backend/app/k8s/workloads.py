@@ -34,6 +34,7 @@ from app.k8s.gateway import (
     SecretSpec,
     ServicePort,
     ServiceSpec,
+    VolumeMountSpec,
     WorkloadRefs,
     WorkloadSpec,
 )
@@ -42,9 +43,13 @@ from app.k8s.naming import (
     INSTANCE_LABEL,
     MANAGED_LABEL,
     MANAGED_LABEL_VALUE,
+    STORAGE_ID_LABEL,
+    STORAGE_KIND_LABEL,
+    STORAGE_LABEL,
     TASK_ID_LABEL,
     TASK_LABEL,
     WORKSPACE_LABEL,
+    storage_pvc_name,
     task_job_name,
     workload_name,
 )
@@ -161,6 +166,7 @@ def build_instance_objects(
     tolerations: tuple[dict[str, object], ...],
     ingress_host: str,
     storage_class: str | None,
+    extra_mounts: tuple[VolumeMountSpec, ...] = (),
 ) -> InstanceObjects:
     """Build the full object set for an instance.
 
@@ -210,6 +216,7 @@ def build_instance_objects(
         pvc_name=pvc_name,
         mount_path=HOME_MOUNT_PATH,
         ssh_secret_name=ssh_secret_name,
+        extra_mounts=extra_mounts,
         node_selector=node_selector,
         tolerations=tolerations,
     )
@@ -399,3 +406,65 @@ def build_task_objects(
         job=job,
         pvc=pvc,
     )
+
+
+# ---------------------------------------------------------------------------
+# Standalone storage
+# ---------------------------------------------------------------------------
+#: Access modes, by how many pods must share the volume at once.
+#:
+#: ``ReadWriteMany`` is not available from every CSI driver, and a dataset that
+#: silently falls back to ``ReadWriteOnce`` would work for the first user and
+#: fail for everyone else. The mode is therefore recorded on the row and
+#: reported honestly when the cluster refuses it, rather than downgraded.
+STORAGE_ACCESS_MODES: dict[str, tuple[str, ...]] = {
+    "ReadWriteOnce": ("ReadWriteOnce",),
+    "ReadOnlyMany": ("ReadOnlyMany",),
+    "ReadWriteMany": ("ReadWriteMany",),
+    "ReadWriteOncePod": ("ReadWriteOncePod",),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class StorageObjects:
+    """The cluster objects behind one storage volume."""
+
+    refs: WorkloadRefs
+    pvc: PvcSpec
+
+
+def build_storage_objects(
+    *,
+    storage_id: int,
+    storage_name: str,
+    namespace: str,
+    workspace_labels: dict[str, str],
+    size_gb: int,
+    storage_class: str | None,
+    access_mode: str | None = None,
+    kind: str | None = None,
+) -> StorageObjects:
+    """Build the claim for a standalone volume.
+
+    No Deployment or Service: a volume exists whether or not anything is
+    attached to it, which is the entire point of separating it from an instance.
+    """
+    name = storage_pvc_name(storage_id, storage_name)
+    labels = {
+        **workspace_labels,
+        MANAGED_LABEL: MANAGED_LABEL_VALUE,
+        STORAGE_LABEL: storage_name,
+        STORAGE_ID_LABEL: str(storage_id),
+    }
+    if kind:
+        labels[STORAGE_KIND_LABEL] = kind
+
+    pvc = PvcSpec(
+        name=name,
+        namespace=namespace,
+        size_gb=size_gb,
+        storage_class=storage_class,
+        access_modes=STORAGE_ACCESS_MODES.get(access_mode or "", ("ReadWriteOnce",)),
+        labels=labels,
+    )
+    return StorageObjects(refs=WorkloadRefs(pvc=name), pvc=pvc)

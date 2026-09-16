@@ -164,6 +164,8 @@ class WorkloadSpec:
     mount_path: str = HOME_MOUNT_PATH
     #: Secret whose ``authorized_keys`` entry is mounted for SSH.
     ssh_secret_name: str | None = None
+    #: Attached storage, beyond the home claim above.
+    extra_mounts: tuple[VolumeMountSpec, ...] = ()
     node_selector: dict[str, str] = field(default_factory=dict)
     tolerations: tuple[dict[str, Any], ...] = ()
     replicas: int = 1
@@ -224,6 +226,41 @@ class PvcSpec:
     storage_class: str | None = None
     access_modes: tuple[str, ...] = ("ReadWriteOnce",)
     labels: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class VolumeMountSpec:
+    """An additional volume attached to a workload.
+
+    ``read_only`` is applied to both the volume and the mount. Setting only the
+    mount leaves the volume writable, and a process that opens the device node
+    or remounts can then write to a dataset the platform promised was
+    immutable.
+    """
+
+    pvc_name: str
+    mount_path: str
+    read_only: bool = False
+    #: Mount a sub-directory of the volume rather than its root, so a shared
+    #: volume can hold per-user folders without exposing them all.
+    sub_path: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PvcInfo:
+    """The observed state of a PersistentVolumeClaim."""
+
+    name: str
+    #: ``Pending`` | ``Bound`` | ``Lost``
+    phase: str
+    #: The StorageClass the cluster actually used, which may differ from the one
+    #: requested when the request was empty and a default applies.
+    storage_class: str | None = None
+    capacity_gb: int | None = None
+    #: Why it is not Bound. ``WaitForFirstConsumer`` volumes sit Pending until a
+    #: pod schedules, which is normal and must not be reported as a failure.
+    message: str | None = None
+    access_modes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -393,7 +430,18 @@ class K8sGateway(Protocol):
         """Create or replace a Secret."""
 
     def apply_pvc(self, spec: PvcSpec) -> None:
-        """Create the claim if absent; never shrink an existing one."""
+        """Create the claim if absent; never expand it either.
+
+        Growth is a separate call on purpose: Kubernetes permits expansion but
+        never shrinkage, so a resize that silently failed to grow would leave
+        the row and the cluster disagreeing.
+        """
+
+    def read_pvc(self, namespace: str, name: str) -> PvcInfo | None:
+        """Read one claim; ``None`` when it does not exist."""
+
+    def resize_pvc(self, namespace: str, name: str, size_gb: int) -> None:
+        """Grow a claim. Shrinking is rejected by Kubernetes and by this method."""
 
     def scale_deployment(self, namespace: str, name: str, replicas: int) -> None:
         """Start (1) or stop (0) a workload by scaling it."""
@@ -477,6 +525,10 @@ class FakeK8sGateway:
         self.ingresses: dict[str, IngressSpec] = {}
         self.secrets: dict[str, SecretSpec] = {}
         self.pvcs: dict[str, PvcSpec] = {}
+        #: Scripted observations, keyed ``namespace/name``. A claim with no
+        #: scripted state reports ``Bound`` at its requested size, because that
+        #: is what a working cluster does and what most tests mean.
+        self.pvc_states: dict[str, PvcInfo] = {}
         self.pods: dict[str, PodInfo] = {}
         #: Scripted log output per ``"namespace/pod"``.
         self.pod_logs: dict[str, str] = {}
@@ -568,6 +620,34 @@ class FakeK8sGateway:
         # alone, matching the cluster, which also refuses to shrink.
         if existing is None or spec.size_gb >= existing.size_gb:
             self.pvcs[key] = spec
+
+    def read_pvc(self, namespace: str, name: str) -> PvcInfo | None:
+        self._record("read_pvc", namespace, name)
+        key = f"{namespace}/{name}"
+        scripted = self.pvc_states.get(key)
+        if scripted is not None:
+            return scripted
+        spec = self.pvcs.get(key)
+        if spec is None:
+            return None
+        return PvcInfo(
+            name=name,
+            phase="Bound",
+            storage_class=spec.storage_class,
+            capacity_gb=spec.size_gb,
+            access_modes=spec.access_modes,
+        )
+
+    def resize_pvc(self, namespace: str, name: str, size_gb: int) -> None:
+        self._record("resize_pvc", namespace, name, size_gb)
+        key = f"{namespace}/{name}"
+        existing = self.pvcs.get(key)
+        if existing is None:
+            raise K8sError(f"cannot resize missing claim {key}")
+        if size_gb < existing.size_gb:
+            # Mirrors the API server: PVCs may grow, never shrink.
+            raise K8sError(f"cannot shrink claim {key} from {existing.size_gb} to {size_gb}")
+        self.pvcs[key] = replace(existing, size_gb=size_gb)
 
     def scale_deployment(self, namespace: str, name: str, replicas: int) -> None:
         self._record("scale_deployment", namespace, name, replicas)

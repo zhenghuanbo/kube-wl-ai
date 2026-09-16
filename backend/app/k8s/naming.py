@@ -110,6 +110,21 @@ def task_job_name(task_id: int, task_name: str) -> str:
     return truncate_name(f"{WORKLOAD_PREFIX}-job-{task_name}-{task_id}")
 
 
+STORAGE_LABEL = "wl-storage"
+STORAGE_ID_LABEL = "wl-storage-id"
+STORAGE_KIND_LABEL = "wl-storage-kind"
+
+
+def storage_pvc_name(storage_id: int, storage_name: str) -> str:
+    """PVC name for a standalone volume.
+
+    Deliberately *not* derived from the owning instance: this claim outlives
+    every instance that mounts it, so its name must not change when one is
+    recreated.
+    """
+    return truncate_name(f"{WORKLOAD_PREFIX}-vol-{slug(storage_name)}-{storage_id}")
+
+
 def is_managed_workload(name: str) -> bool:
     """Whether a workload object belongs to this platform."""
     return name.startswith(f"{WORKLOAD_PREFIX}-")

@@ -85,6 +85,7 @@ PERMISSIONS: tuple[PermissionSpec, ...] = (
     PermissionSpec("storage:create", "storage", "创建存储"),
     PermissionSpec("storage:resize", "storage", "扩容存储"),
     PermissionSpec("storage:delete", "storage", "删除存储"),
+    PermissionSpec("storage:manage", "storage", "管理共享存储与数据集（发布、改归属）"),
     # Instances ---------------------------------------------------------------
     PermissionSpec("instance:read", "instance", "查看容器实例"),
     PermissionSpec("instance:create", "instance", "创建容器实例"),
@@ -179,6 +180,7 @@ _GROUP_ADMIN = _USER | frozenset(
         user:read group:read
         workspace:read workspace:create workspace:update
         workspace:assign_member workspace:grant_resource
+        storage:manage
         resource_group:read resource_spec:read runtime_limit:read
         node:read quota:read
         usage:read_group monitor:read_group audit:read

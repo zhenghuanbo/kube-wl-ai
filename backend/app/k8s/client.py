@@ -31,6 +31,7 @@ from app.k8s.gateway import (
     NamespaceSpec,
     NodeInfo,
     PodInfo,
+    PvcInfo,
     PvcSpec,
     QuotaSpec,
     SecretSpec,
@@ -95,6 +96,27 @@ def parse_memory_mb(value: str) -> int:
         return int(float(number) * _MEMORY_SUFFIXES[suffix] / (1024**2))
     # A bare number is bytes.
     return int(float(number) / (1024**2))
+
+
+def parse_storage_gb(value: str) -> int | None:
+    """Parse a storage quantity (``"10Gi"``, ``"500Mi"``) into whole GiB.
+
+    Returns ``None`` rather than 0 for anything unparseable: (None) means "the
+    cluster did not say", (0) means "an empty volume", and conflating the two
+    would let a claim that failed to report its size look like a zero-byte one.
+    """
+    match = _QUANTITY_RE.match(str(value).strip())
+    if not match:
+        return None
+    number, suffix = match.groups()
+    if suffix in _MEMORY_SUFFIXES:
+        return int(float(number) * _MEMORY_SUFFIXES[suffix] / (1024**3))
+    if suffix in _QUANTITY_SUFFIXES:
+        return int(float(number) * _QUANTITY_SUFFIXES[suffix] / (1000**3))
+    try:
+        return int(float(number) / (1024**3))
+    except ValueError:  # pragma: no cover - the regex already guarantees a float
+        return None
 
 
 def gpu_model_from_labels(labels: dict[str, str]) -> str | None:
@@ -424,6 +446,18 @@ class RealK8sGateway:
         mounts: list[Any] = []
         if spec.pvc_name:
             mounts.append(k8s.V1VolumeMount(name="home", mount_path=spec.mount_path))
+        for index, extra in enumerate(spec.extra_mounts):
+            mounts.append(
+                k8s.V1VolumeMount(
+                    name=f"attached-{index}",
+                    mount_path=extra.mount_path,
+                    sub_path=extra.sub_path,
+                    # Read-only on the mount *and* on the volume below. Setting
+                    # only one leaves a path that a process can remount or write
+                    # through, which is not what "read-only dataset" means.
+                    read_only=extra.read_only or None,
+                )
+            )
         if spec.ssh_secret_name:
             mounts.append(
                 k8s.V1VolumeMount(
@@ -459,6 +493,16 @@ class RealK8sGateway:
                     name="home",
                     persistent_volume_claim=k8s.V1PersistentVolumeClaimVolumeSource(
                         claim_name=spec.pvc_name
+                    ),
+                )
+            )
+        for index, extra in enumerate(spec.extra_mounts):
+            volumes.append(
+                k8s.V1Volume(
+                    name=f"attached-{index}",
+                    persistent_volume_claim=k8s.V1PersistentVolumeClaimVolumeSource(
+                        claim_name=extra.pvc_name,
+                        read_only=extra.read_only or None,
                     ),
                 )
             )
@@ -657,6 +701,72 @@ class RealK8sGateway:
             self._core.create_namespaced_persistent_volume_claim(spec.namespace, body)
         except ApiException as exc:
             raise self._raise(f"create pvc {spec.name}", exc) from exc
+
+    def read_pvc(self, namespace: str, name: str) -> PvcInfo | None:
+        try:
+            claim = self._core.read_namespaced_persistent_volume_claim(name, namespace)
+        except ApiException as exc:
+            if self._is_not_found(exc):
+                return None
+            raise self._raise(f"read pvc {name}", exc) from exc
+
+        phase = getattr(getattr(claim, "status", None), "phase", None) or "Pending"
+        capacity = None
+        raw_capacity = (getattr(getattr(claim, "status", None), "capacity", None) or {}).get(
+            "storage"
+        )
+        if raw_capacity:
+            capacity = parse_storage_gb(str(raw_capacity))
+
+        spec = getattr(claim, "spec", None)
+        storage_class = getattr(spec, "storage_class_name", None)
+        access_modes = tuple(getattr(spec, "access_modes", None) or ())
+
+        # A ``WaitForFirstConsumer`` claim stays Pending until a pod schedules.
+        # That is normal, and reporting it as a problem would make every
+        # freshly created dataset look broken.
+        message = None
+        for condition in getattr(getattr(claim, "status", None), "conditions", None) or []:
+            if getattr(condition, "type", "") == "Resizing":
+                message = getattr(condition, "message", None)
+                break
+        if phase == "Pending" and not message:
+            message = "等待调度（WaitForFirstConsumer 卷在 Pod 调度前保持 Pending）"
+
+        return PvcInfo(
+            name=name,
+            phase=phase,
+            storage_class=storage_class,
+            capacity_gb=capacity,
+            message=message,
+            access_modes=access_modes,
+        )
+
+    def resize_pvc(self, namespace: str, name: str, size_gb: int) -> None:
+        """Grow a claim in place.
+
+        Only ever an increase. Kubernetes rejects shrinkage at the API server,
+        and a patch that silently no-ops would leave the database claiming
+        capacity the volume does not have.
+        """
+        current = self.read_pvc(namespace, name)
+        if current is None:
+            raise K8sError(f"cannot resize missing claim {namespace}/{name}")
+        if current.capacity_gb is not None and size_gb < current.capacity_gb:
+            raise K8sError(
+                f"cannot shrink claim {namespace}/{name} "
+                f"from {current.capacity_gb}Gi to {size_gb}Gi"
+            )
+
+        body = k8s.V1PersistentVolumeClaim(
+            spec=k8s.V1PersistentVolumeClaimSpec(
+                resources=k8s.V1VolumeResourceRequirements(requests={"storage": f"{size_gb}Gi"})
+            )
+        )
+        try:
+            self._core.patch_namespaced_persistent_volume_claim(name, namespace, body)
+        except ApiException as exc:
+            raise self._raise(f"resize pvc {name}", exc) from exc
 
     def scale_deployment(self, namespace: str, name: str, replicas: int) -> None:
         try:

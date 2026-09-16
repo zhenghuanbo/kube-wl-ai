@@ -604,14 +604,70 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
    它们此前「通过」是因为账号确实建成了、组关联压根没建、而 `roleCodes` 的默认值恰好
    也是 `["user"]` —— 断言的是从未发生的事。已全部修正。
 
-### ⏳ Phase 5–8（待开始）
+### 🔄 Phase 5 — 镜像与存储（后端已完成，前端待做）
+
+**交付（后端）**
+
+| 交付物 | 位置 |
+| --- | --- |
+| 存储/镜像枚举 | `app/models/enums.py`（`StorageKind`、`StorageStatus`、`LIVE_STORAGE_STATUSES`、`ImageKind`、`ImageVisibility`） |
+| 数据模型 | `app/models/storage.py`（`Storage`、`InstanceStorage`）、`app/models/image.py` |
+| 迁移 | `alembic/versions/d0d900699fb4_*.py`（新增 3 张表，head 共 **30** 张，`downgrade base` 可往返） |
+| K8s 抽象 | `VolumeMountSpec`、`PvcInfo`、`read_pvc`、`resize_pvc`、`parse_storage_gb`、`build_storage_objects` |
+| 服务 | `app/services/storages.py` |
+| Schema | `app/schemas/storage.py` |
+| API | `app/api/v1/storages.py`（7 个端点，注册于 `app/api/v1/router.py`） |
+| 权限 | `storage:read/create/resize/delete/manage`（`storage:manage` 为本期新增，组管理员权限数 43 → **44**） |
+| 验收测试 | `tests/test_acceptance_phase5.py`（**32** 项） |
+| 冒烟脚本 | `scripts/smoke_phase5.py`（**45** 项） |
+
+**验收证据**：`ruff check` + `ruff format --check` + `mypy app`（strict）全绿；
+后端全量 **304** 项测试通过；Phase 1–4 冒烟（30/33/49/61）无回归；
+`kubectl get ns,pvc -l wl-managed=true` 为空（未触碰真实集群）。
+
+**关键设计决策**
+
+1. **存储不再从属于实例**。`Storage` 是独立实体，PVC 名 `wl-vol-{name}-{id}`
+   **不含实例信息** —— 否则删除那个恰好挂了它的实例就会把数据一起带走。
+2. **可见性按 *类型* 分叉**，这是 `visible_condition()` 返回裸条件而非
+   `policy.scope_filter()` 的原因：个人盘只有本人可见，而 `group_share`/`dataset`
+   对全组可见 —— 同一张表上两类行的可见规则不同，行级 scope 表达不了。
+3. **附加存储不重复计配额**。容量在**创建存储时**结算一次；实例挂载它时不再计入
+   `storage_gb`，否则同一个 GB 会被收两次费，工作空间会莫名撞上配额上限。
+4. **失败的操作 ≠ 失败的卷**。扩容被集群拒绝时，容量与**状态都保持原样**，
+   不标记 `FAILED` —— 卷仍然是 Bound、仍然可用，把它标红会让用户去追一个不存在的问题。
+5. **数据集强制只读，且只读落在挂载点上**。`read_only` 同时写在 volume 和 mount 两处，
+   否则「只读」只是 API 响应里的一句话，训练任务照样能写穿。
+   数据集还必须有 `source`（`dataset_source_required`）：没有来源，下一个人无法判断能不能用。
+6. **先查可见性，再描述对象**。`resolve_attachments()` 把可见性检查放在最前面：
+   「该存储属于其他工作空间」「该存储已停用」这类消息都在确认对象存在，
+   而看不见它的人不该知道它存在（对普通用户是 404，对管理员才是解释性的 400）。
+7. **`usage_by_owner` 统计的是「你被收费的」，不是「你能看见的」**。二者必须分开：
+   一个组共享数据集对五十个成员都可见、却不属于任何人，按可见性统计会让每个人都
+   被告知自己占用了那 100 GB。全局管理员拿到的是全站总量（个人总量对他们没有意义）。
+
+**本期踩到的坑**
+
+- **`MissingGreenlet` 复发（与 Phase 3 的 `Workspace.group` 同类）**：`Storage.workspace`
+  等关系是 `lazy="joined"`，但 `joined` 只对**从查询返回的**行生效；刚 `session.add()`
+  的行关系是空的，序列化时触碰它就触发同步上下文的懒加载并抛错。已在创建路径显式
+  赋值 `storage.workspace = workspace` 等，并写明原因。
+- **`run_gateway()` 包错了对象**：它用 `asyncio.to_thread` 跑**同步**函数，包住一个
+  `async def` 服务函数会返回协程而不执行 —— 扩容/删除会「成功」但什么都没发生。
+  正确做法是服务内部**只**把阻塞的 gateway 调用丢进 `run_gateway`。
+  （`mypy` 的 `unused-coroutine` 抓到了它。）
+- `PvcSpec.medium` 不存在：PVC 没有 medium 字段（那是 emptyDir 的），已移除。
+
+### ⏳ Phase 6–8（待开始）
 
 | 阶段 | 内容 | 周期 |
 | --- | --- | --- |
-| Phase 5 | 镜像与存储 | 1.5 周 |
 | Phase 6 | 用量中心 | 1.5 周 |
 | Phase 7 | Grafana 监控集成 | 1.5 周 |
 | Phase 8 | API 开放、审计与上线 | 2 周 |
+
+> Phase 5 前端（`StorageView.vue`、`ImagesView.vue`、镜像选择器）与镜像服务
+> （`app/services/images.py`、Harbor 客户端）尚未完成。
 
 > 每期必须可运行并**通过验收**后才进入下一期。
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 from app.models.application import Application
 from app.models.audit import AuditLog
 from app.models.enums import (
+    LIVE_STORAGE_STATUSES,
     TERMINAL_TASK_STATUSES,
     ApplicationCategory,
     ApplicationVisibility,
@@ -16,6 +17,8 @@ from app.models.enums import (
     GroupKind,
     GroupRole,
     IdeType,
+    ImageKind,
+    ImageVisibility,
     InstanceStatus,
     NetworkType,
     NodeStatus,
@@ -24,6 +27,8 @@ from app.models.enums import (
     ResourceGroupKind,
     RoleCode,
     RoleScope,
+    StorageKind,
+    StorageStatus,
     TaskStatus,
     UserSource,
     WorkloadEventType,
@@ -32,6 +37,7 @@ from app.models.enums import (
     WorkspaceStatus,
 )
 from app.models.group import Group, UserGroupLink
+from app.models.image import Image
 from app.models.instance import Instance
 from app.models.rbac import Permission, Role, RolePermission, UserRole
 from app.models.resource import (
@@ -47,6 +53,7 @@ from app.models.resource import (
     gpu_resource_key,
 )
 from app.models.ssh_key import SshKey
+from app.models.storage import InstanceStorage, Storage
 from app.models.task import Task
 from app.models.token import ApiToken, RefreshToken
 from app.models.user import User
@@ -55,6 +62,7 @@ from app.models.workspace import Workspace, WorkspaceMember, WorkspaceResourceGr
 
 __all__ = [
     "GPU_MODELS",
+    "LIVE_STORAGE_STATUSES",
     "TERMINAL_TASK_STATUSES",
     "ApiToken",
     "Application",
@@ -68,8 +76,12 @@ __all__ = [
     "GroupKind",
     "GroupRole",
     "IdeType",
+    "Image",
+    "ImageKind",
+    "ImageVisibility",
     "Instance",
     "InstanceStatus",
+    "InstanceStorage",
     "NetworkType",
     "NodeStatus",
     "Permission",
@@ -88,6 +100,9 @@ __all__ = [
     "RoleScope",
     "RuntimeLimit",
     "SshKey",
+    "Storage",
+    "StorageKind",
+    "StorageStatus",
     "Task",
     "TaskStatus",
     "User",

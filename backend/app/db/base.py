@@ -23,9 +23,21 @@ NAMING_CONVENTION = {
 def str_enum(enum_cls: type[StrEnum], name: str) -> SAEnum:
     """Portable enum column type.
 
-    Stored as VARCHAR + CHECK constraint rather than a native database enum so
-    that SQLite (used by the test suite) and PostgreSQL behave identically and
-    adding a value does not require a type migration.
+    Stored as a plain ``VARCHAR`` rather than a native database enum, so SQLite
+    (used by the test suite) and PostgreSQL behave identically and adding a
+    value never needs a type migration.
+
+    Note that this emits **no CHECK constraint**. SQLAlchemy 2.0 defaults
+    ``create_constraint`` to ``False``, so the only guard against an invalid
+    value is ``validate_strings`` at the Python layer, on the way in. That is
+    sufficient while every write goes through the ORM, and it is why adding
+    ``WorkloadKind.STORAGE`` in Phase 5 needed no migration at all — but it does
+    mean an out-of-band ``INSERT`` can plant a value the ORM will later fail to
+    load. Enable ``create_constraint`` if that ever becomes a realistic threat;
+    it costs a migration per affected table.
+
+    The ``name`` argument is unused at the database level and is kept only
+    because ``SAEnum`` requires one.
     """
     return SAEnum(
         enum_cls,

@@ -243,6 +243,7 @@ class WorkloadKind(StrEnum):
     INSTANCE = "instance"
     APPLICATION = "application"
     TASK = "task"
+    STORAGE = "storage"
 
 
 class WorkloadEventType(StrEnum):
@@ -254,3 +255,75 @@ class WorkloadEventType(StrEnum):
     DELETED = "deleted"
     FAILED = "failed"
     STATUS_CHANGED = "status_changed"
+    UPDATED = "updated"
+
+
+class StorageKind(StrEnum):
+    """What a volume is *for*. The kind decides who may own it and how it mounts.
+
+    This is not cosmetic taxonomy. A ``dataset`` is read-only everywhere it
+    appears — enforced at the mount, not merely in the UI — because the one
+    thing worse than an unreadable dataset is a dataset that a training job
+    silently overwrote. ``PERSONAL_HOME`` is the volume that makes an instance
+    disposable: it is what survives when the container is deleted.
+    """
+
+    PERSONAL_HOME = "personal_home"
+    PERSONAL_DATA = "personal_data"
+    GROUP_SHARE = "group_share"
+    DATASET = "dataset"
+    OBJECT = "object"
+
+
+class StorageStatus(StrEnum):
+    """Lifecycle of a volume.
+
+    ``PENDING`` and ``BOUND`` mirror the PersistentVolumeClaim phases rather
+    than inventing a parallel vocabulary, so an operator reading
+    ``kubectl get pvc`` and the UI see the same word.
+    """
+
+    PENDING = "pending"
+    BOUND = "bound"
+    RESIZING = "resizing"
+    RELEASED = "released"
+    FAILED = "failed"
+    DELETING = "deleting"
+
+
+#: Statuses in which a volume still occupies its capacity.
+LIVE_STORAGE_STATUSES: frozenset[StorageStatus] = frozenset(
+    {
+        StorageStatus.PENDING,
+        StorageStatus.BOUND,
+        StorageStatus.RESIZING,
+        StorageStatus.FAILED,
+    }
+)
+
+
+class ImageKind(StrEnum):
+    """Where an image stands in the catalogue.
+
+    ``PERSONAL`` images belong to one user and are pushed by them;
+    ``OFFICIAL`` ones are curated by an administrator and are what the picker
+    offers by default; ``SHARED`` covers a group's agreed images.
+    """
+
+    PERSONAL = "personal"
+    OFFICIAL = "official"
+    SHARED = "shared"
+
+
+class ImageVisibility(StrEnum):
+    """Who may *see* an image in the catalogue.
+
+    Distinct from :class:`~app.models.enums.ApplicationVisibility` only in
+    audience; the same four steps apply, and the same rule holds: visibility
+    governs reads, not ownership.
+    """
+
+    PRIVATE = "private"
+    WORKSPACE = "workspace"
+    GROUP = "group"
+    GLOBAL = "global"

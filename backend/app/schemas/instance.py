@@ -137,6 +137,10 @@ class InstanceCreate(ApiModel):
     #: pool's cap is rejected rather than clamped: the options are offered by
     #: the UI, so exceeding the cap is an attempt to bypass it.
     max_runtime_seconds: int | None = Field(default=None, ge=60)
+    #: Persistent volumes to mount, beyond the instance's own scratch claim.
+    #: Attached capacity is *not* charged against `storage_gb`: each volume was
+    #: already accounted for when it was created.
+    storage_ids: list[int] = Field(default_factory=list, max_length=16)
 
     @field_validator("name")
     @classmethod

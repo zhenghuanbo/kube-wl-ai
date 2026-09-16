@@ -1,0 +1,36 @@
+# Grafana provisioning: which dashboards load, and into which folder.
+#
+# The folder split is one of the three isolation layers (§10). It is the weakest
+# of the three and is not relied on for anything: a Grafana viewer can usually
+# browse every folder, so `AI-Admin` hides nothing on its own. The layers that
+# actually stop somebody are the scope baked into the signed URL and the
+# namespace/pod filters the dashboard generation refuses to omit.
+
+apiVersion: 1
+
+providers:
+  - name: kube-wl-ai-user
+    orgId: 1
+    folder: AI-User
+    folderUid: ai-user
+    type: file
+    disableDeletion: true
+    # Provisioned dashboards are read-only in the UI. Editing one here means
+    # editing `deploy/grafana/build_dashboards.py`, which is the point: an edit
+    # made in the browser would be reverted on the next reload, and the person
+    # who made it would have no way to know.
+    allowUiUpdates: false
+    updateIntervalSeconds: 60
+    options:
+      path: /var/lib/grafana/dashboards/user
+
+  - name: kube-wl-ai-admin
+    orgId: 1
+    folder: AI-Admin
+    folderUid: ai-admin
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 60
+    options:
+      path: /var/lib/grafana/dashboards/admin

@@ -7287,6 +7287,81 @@
           }
         ]
       }
+    },
+    "/api/v1/monitor/overview": {
+      "get": {
+        "tags": [
+          "monitor"
+        ],
+        "summary": "监控总览（含已签名的 Grafana 面板地址）",
+        "description": "Inventory, the caller's live containers, and signed panel URLs.",
+        "operationId": "overview_api_v1_monitor_overview_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MonitorOverview"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/monitor/dashboards/{key}/embed": {
+      "post": {
+        "tags": [
+          "monitor"
+        ],
+        "summary": "重新签发某个面板的短期地址",
+        "description": "Mint a fresh URL for one dashboard.\n\nA `POST` because it creates a credential — it is not safe to retry blindly\nfrom a cache, and the method says so. The permission is checked against the\n*dashboard*, not merely against monitoring in general: holding\n`monitor:read_self` must not produce a fleet-wide URL by naming its key.",
+        "operationId": "mint_embed_api_v1_monitor_dashboards__key__embed_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MonitorEmbedRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -8494,6 +8569,30 @@
           "status"
         ],
         "title": "GpuDeviceRead"
+      },
+      "GpuModelSummary": {
+        "properties": {
+          "model": {
+            "type": "string",
+            "title": "Model"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "default": 0
+          },
+          "allocated": {
+            "type": "integer",
+            "title": "Allocated",
+            "default": 0
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "model"
+        ],
+        "title": "GpuModelSummary"
       },
       "GroupCreate": {
         "properties": {
@@ -10346,6 +10445,25 @@
         "title": "InstanceStatus",
         "description": "Lifecycle of a container instance.\n\nMirrors what the UI shows, not the Kubernetes phase: ``PENDING`` is \"accepted\nbut nothing applied yet\", ``CREATING`` is \"objects applied, waiting for the\npod\", and ``RUNNING`` is \"the pod is up\". Collapsing those would leave a user\nstaring at a spinner with no idea which half is stuck."
       },
+      "InstanceStatusCount": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "status",
+          "count"
+        ],
+        "title": "InstanceStatusCount"
+      },
       "InstanceSummary": {
         "properties": {
           "id": {
@@ -10648,6 +10766,236 @@
           "password"
         ],
         "title": "LoginRequest"
+      },
+      "MonitorDashboardRead": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "uid": {
+            "type": "string",
+            "title": "Uid"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "icon": {
+            "type": "string",
+            "title": "Icon"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "key",
+          "uid",
+          "title",
+          "description",
+          "icon"
+        ],
+        "title": "MonitorDashboardRead",
+        "description": "One dashboard the caller may open."
+      },
+      "MonitorEmbedRead": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url"
+          },
+          "expiresIn": {
+            "type": "integer",
+            "title": "Expiresin"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "key",
+          "url",
+          "expiresIn"
+        ],
+        "title": "MonitorEmbedRead",
+        "description": "A freshly minted, scope-locked Grafana URL.\n\nShort-lived by construction: the URL carries the scope, so it is re-minted\nevery time the page needs one rather than handed out once and cached."
+      },
+      "MonitorInventory": {
+        "properties": {
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/MonitorNodeSummary"
+            },
+            "type": "array",
+            "title": "Nodes"
+          },
+          "nodesReady": {
+            "type": "integer",
+            "title": "Nodesready",
+            "default": 0
+          },
+          "gpuByModel": {
+            "items": {
+              "$ref": "#/components/schemas/GpuModelSummary"
+            },
+            "type": "array",
+            "title": "Gpubymodel"
+          },
+          "instances": {
+            "items": {
+              "$ref": "#/components/schemas/InstanceStatusCount"
+            },
+            "type": "array",
+            "title": "Instances"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "MonitorInventory",
+        "description": "The platform's own view of the cluster. Not tenant-scoped."
+      },
+      "MonitorNodeSummary": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "displayName": {
+            "type": "string",
+            "title": "Displayname"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "schedulable": {
+            "type": "boolean",
+            "title": "Schedulable"
+          },
+          "gpuCount": {
+            "type": "integer",
+            "title": "Gpucount"
+          },
+          "cpuTotalMilli": {
+            "type": "integer",
+            "title": "Cputotalmilli"
+          },
+          "memoryTotalMb": {
+            "type": "integer",
+            "title": "Memorytotalmb"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "displayName",
+          "status",
+          "schedulable",
+          "gpuCount",
+          "cpuTotalMilli",
+          "memoryTotalMb"
+        ],
+        "title": "MonitorNodeSummary"
+      },
+      "MonitorOverview": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "disabledReason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disabledreason"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/MonitorScopeRead"
+          },
+          "inventory": {
+            "$ref": "#/components/schemas/MonitorInventory"
+          },
+          "containers": {
+            "items": {
+              "$ref": "#/components/schemas/WatchedContainer"
+            },
+            "type": "array",
+            "title": "Containers"
+          },
+          "dashboards": {
+            "items": {
+              "$ref": "#/components/schemas/MonitorDashboardRead"
+            },
+            "type": "array",
+            "title": "Dashboards"
+          },
+          "embeds": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/MonitorEmbedRead"
+            },
+            "type": "object",
+            "title": "Embeds"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "enabled",
+          "scope",
+          "inventory"
+        ],
+        "title": "MonitorOverview",
+        "description": "Everything the monitoring page needs on first paint.\n\nOne response rather than four round-trips, because four requests that can\ndisagree with each other produce a page that describes two different moments."
+      },
+      "MonitorScopeRead": {
+        "properties": {
+          "namespaces": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Namespaces"
+          },
+          "pods": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Pods"
+          },
+          "unrestricted": {
+            "type": "boolean",
+            "title": "Unrestricted",
+            "default": false
+          },
+          "empty": {
+            "type": "boolean",
+            "title": "Empty",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "MonitorScopeRead",
+        "description": "What the caller's monitoring is currently limited to.\n\nReturned to the page so the filter is visible rather than implied. A user\nlooking at a flat line deserves to know whether it is flat because nothing is\nhappening or because they are filtered to a namespace with nothing in it."
       },
       "NetworkType": {
         "type": "string",
@@ -14780,6 +15128,78 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "WatchedContainer": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "displayName": {
+            "type": "string",
+            "title": "Displayname"
+          },
+          "namespace": {
+            "type": "string",
+            "title": "Namespace"
+          },
+          "podName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Podname"
+          },
+          "ownerUsername": {
+            "type": "string",
+            "title": "Ownerusername"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "gpuType": {
+            "type": "string",
+            "title": "Gputype"
+          },
+          "gpuCount": {
+            "type": "integer",
+            "title": "Gpucount"
+          },
+          "nodeName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nodename"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "displayName",
+          "namespace",
+          "ownerUsername",
+          "status",
+          "gpuType",
+          "gpuCount"
+        ],
+        "title": "WatchedContainer",
+        "description": "A live instance the caller may watch, with the names Grafana filters on."
       },
       "WorkloadEventRead": {
         "properties": {

@@ -82,6 +82,12 @@ PAYLOAD_ALIASES = {
     "UsageSummary": "UsageSummaryRead",
     "UsageRollupResult": "UsageRollupResultRead",
     "UsageMeta": "UsageMetaRead",
+    # Monitoring names its read models after what they *are* rather than
+    # appending `Read`, so the mapping has to be spelled out.
+    "MonitorScope": "MonitorScopeRead",
+    "MonitorDashboard": "MonitorDashboardRead",
+    "MonitorEmbed": "MonitorEmbedRead",
+    "MonitorNode": "MonitorNodeSummary",
 }
 # A field line: `name?: type` or `name: type`. Indented, so object literal types
 # nested inside a field never match at the start of their own line.

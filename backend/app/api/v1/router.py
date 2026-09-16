@@ -14,6 +14,7 @@ from app.api.v1 import (
     groups,
     images,
     instances,
+    monitor,
     rbac,
     resources,
     storages,
@@ -37,3 +38,4 @@ api_router.include_router(tasks.router)
 api_router.include_router(images.router)
 api_router.include_router(storages.router)
 api_router.include_router(usage.router)
+api_router.include_router(monitor.router)

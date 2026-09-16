@@ -103,8 +103,28 @@ class Settings(BaseSettings):
 
     # --- Monitoring ----------------------------------------------------------
     prometheus_url: str = ""
+    #: Internal address, used by the backend to health-check Grafana. Optional —
+    #: nothing on the request path needs it.
     grafana_url: str = ""
+    #: Browser-facing address, and the switch that turns the monitoring panels
+    #: on. Empty (the default) means "this deployment has no Grafana": the page
+    #: still shows the platform's own inventory and says the time-series panels
+    #: are unavailable, rather than offering a link that 404s. In the reference
+    #: deployment this is the nginx-proxied ``/grafana``, so the iframe is
+    #: same-origin and needs no third-party cookie exemption.
+    grafana_public_url: str = ""
     grafana_datasource_uid: str = ""
+    #: Grafana's `orgId`, echoed into the minted token.
+    grafana_org_id: int = 1
+    grafana_jwt_audience: str = "grafana"
+    #: Lifetime of a minted monitoring token. Deliberately short: the URL carries
+    #: the scope, so a leaked one is usable for minutes rather than days, and the
+    #: frontend re-mints on demand. Grafana's own `token_ttl` must be >= this.
+    grafana_jwt_ttl_seconds: int = 300
+
+    @property
+    def grafana_enabled(self) -> bool:
+        return bool(self.grafana_public_url)
 
     # --- SSH -----------------------------------------------------------------
     ssh_mode: Literal["nodeport"] = "nodeport"

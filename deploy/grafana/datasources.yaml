@@ -1,0 +1,29 @@
+# Grafana provisioning: the datasource the dashboards read from.
+#
+# Mount this directory at `/etc/grafana/provisioning/datasources` (the compose
+# file and the Helm chart both do). The `uid` is fixed and deliberately not
+# derived from anything: the dashboard JSON references it literally, so a
+# datasource that gets renamed in the Grafana UI cannot silently break every
+# panel.
+#
+# `PROMETHEUS_URL` is substituted by Grafana's own `$__env{}` interpolation, so
+# the address stays a deployment concern.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: wl-prometheus
+    type: prometheus
+    access: proxy
+    # The cluster's existing Prometheus. Grafana is not deployed by this project
+    # (plan D6) — only configured to read the one that is already there.
+    url: ${PROMETHEUS_URL}
+    isDefault: true
+    jsonData:
+      # Matches the scrape interval of a typical kube-prometheus-stack install.
+      # Lowering it here does not make Prometheus produce samples faster; it only
+      # makes Grafana ask more often.
+      timeInterval: 30s
+      httpMethod: POST
+    editable: false

@@ -959,11 +959,113 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
   并把 `RegistryStatus → RegistryStatusRead` 一并补上。
   **新增请求体类型后一定要看这一行计数有没有涨** —— 它不涨就说明映射没生效。
 
-### ⏳ Phase 7–8（待开始）
+### ✅ Phase 7 — Grafana 监控集成（已完成）
+
+**交付（后端）**
+
+| 交付物 | 位置 |
+| --- | --- |
+| 配置 | `app/core/config.py`（`grafana_public_url` / `grafana_url` / `grafana_org_id` / `grafana_jwt_audience` / `grafana_jwt_ttl_seconds` / `grafana_datasource_uid`，`grafana_enabled` 属性） |
+| 面板编目与签名 | `app/monitoring/grafana.py`（`DashboardSpec`、`DASHBOARDS`、`MonitorScope`、`dashboard_variables`、`build_grafana_token`、`build_embed_url`、`dashboards_for`） |
+| 范围计算 | `app/services/monitor.py`（`watched_instances`、`resolve_scope`、`inventory`） |
+| 读模型 | `app/schemas/monitor.py` |
+| 接口 | `app/api/v1/monitor.py`：`GET /monitor/overview`、`POST /monitor/dashboards/{key}/embed` |
+
+**交付（前端）**
+
+| 交付物 | 位置 |
+| --- | --- |
+| 类型 | `frontend/src/types/monitor.ts`（含 `EMBED_REFRESH_MARGIN_SECONDS` 与三个标签函数） |
+| API | `frontend/src/api/monitor.ts` |
+| 页面 | `frontend/src/views/MonitorView.vue`（`/monitor` 已从 `PlaceholderView` 接出） |
+
+**交付（部署）**
+
+| 交付物 | 位置 |
+| --- | --- |
+| 面板生成器 | `deploy/grafana/build_dashboards.py`（**含越权自检，见下**） |
+| 面板 JSON | `deploy/grafana/dashboards/{user,admin}/*.json`（四个 uid 与编目一致，有测试保证不漂移） |
+| Provisioning | `deploy/grafana/dashboards.yaml`、`deploy/grafana/datasources.yaml` |
+| 部署说明 | `deploy/grafana/README.md` |
+| 同源反代 | `frontend/nginx.conf` 的 `location /grafana/` |
+
+**验收证据**
+
+| 项目 | 结果 |
+| --- | --- |
+| `pytest tests/test_acceptance_phase7.py` | 32 passed |
+| `scripts/smoke_phase7.py`（Grafana 关闭） | **44/44** |
+| `scripts/smoke_phase7.py`（Grafana 开启） | **53/53** |
+| `ruff check` / `ruff format --check` / `mypy app` | 通过 / 通过 / 113 文件无问题 |
+| `check-frontend-types.py` | 69 个接口比对 schema |
+| `smoke_frontend_views.mjs` | **13/13** 视图挂载 |
+| `nginx -t` | syntax ok（含 `/grafana/`） |
+| 集群 | 未触碰（`kubectl get ns,pvc -l wl-managed=true` 为空） |
+
+**关键设计决策**
+
+1. **两层信息，地位不等。** 平台自己的 `instances` / `ComputeNode` / `GpuDevice` 记录是第一层，
+   **没有 Grafana 也能用**；Grafana 只回答「此刻在干什么」，不回答「用掉了多少」。
+   后者是 Phase 6 的 `usage_daily` 的职责。这条分工意味着 Prometheus 挂了、标签缺失、
+   Grafana 根本没部署，页面都还有内容。
+2. **Grafana 未配置是一种受支持的状态，不是故障。** `grafana_enabled` 就是
+   `bool(grafana_public_url)`。关闭时 `enabled: false` + `disabledReason`，页面照常渲染清单与统计，
+   并且**不下发任何面板**——给一个打不开的磁贴比不给更糟，它看起来像监控坏了。
+3. **范围同时写进签名令牌和 `var-*` 参数。** 两处都要有：令牌是 Grafana 侧无法绕过的约束，
+   `var-*` 是让面板一打开就落在正确范围上。只有令牌没有参数，面板会先显示全局再被过滤；
+   只有参数没有令牌，改一下地址栏就绕过去了。
+4. **管理员拿到的是「没有参数」，不是 `$__all`。** `$__all` 只对多值变量有意义，
+   传给单值变量会静默地选中「空」。少一个参数让面板回落到它自己的 All 默认值，
+   才是管理员要的效果。这个区别在测试里有单独一条断言。
+5. **空范围发送字面量 `none`，绝不省略参数。** 工作空间就是命名空间，一个组共用一个。
+   用户的面板之所以是「我的」，靠的就是 `var-pod`。省略它不会显示空，会显示整个实验室。
+   没有已调度的 Pod 时发 `none`（匹配不到任何 Pod），失败方向是安全的。
+6. **未知 key 与无权 key 都返回 404 `dashboard_not_found`。** 403 等于确认「这个面板存在」。
+   报错文案只回显调用方自己传进来的 key，不泄露标题、uid 或任何编目信息（有测试断言）。
+7. **`POST` 签发地址。** 它创建的是一份凭证，不是读取资源；`POST` 的语义让缓存和
+   自动重试都不会意外地把它当幂等读操作处理。
+8. **五个面板编目，四个面板文件。** `my-containers` 要 `monitor:read_self`，
+   `lab-overview` 要 `monitor:read_group`，`gpu-fleet` / `node-health` 要 `monitor:read_all`。
+   编目按权限过滤后**根本不出现在响应里**，前端不需要判断能不能点。
+9. **`/monitor/overview` 是一个响应而不是四个请求。** 四个并发请求会在四个不同时刻被应答，
+   拼出来的页面描述的是一个从未存在过的状态。
+10. **`MonitorScope` 用两个独立布尔表达「无限制」与「空」。** 管理员和「没有任何容器的新用户」
+    都得到空列表；把这两者合并，就会把全平台的面板发给一个刚注册的人。
+11. **面板生成器拒绝写出会越权的面板。** `build_dashboards.py` 的 `verify()` 强制每条 `expr`
+    含 `namespace=~"$namespace"`，有 `pod` 变量时还必须含 `pod=~"$pod"`，且这两个变量必须是
+    `multi: True`（后端发的是逗号拼接的单值，只有多值变量才会被 Grafana 拆开）。
+    **违规时在任何文件落盘之前就抛错**，不会留下半更新的目录。已用植入缺陷验证会退出 1。
+12. **nginx 用变量而非 `upstream` 块反代 Grafana。** `upstream { server grafana:3000; }` 在 nginx
+    启动时解析，名字不存在会**让 nginx 拒绝启动**，于是没部署 Grafana 的安装连 SPA 和 API
+    都没有了。变量形式把解析推迟到请求期，坏掉的只有 `/grafana/` 这一个 location。
+13. **前端在令牌到期前 60 秒重新签发当前面板。** Grafana 不会告诉 iframe 令牌过期了，
+    它只会变成一个登录页，读起来就是「监控坏了」。只刷新当前面板，不为没人看的地址造凭证。
+
+**本期踩到的坑**
+
+- **`monkeypatch.setattr(settings, "jwt_private_key", "…")` 必须包 `SecretStr`。**
+  直接塞 `str` 不会在设置时报错，而是在下一次登录时以
+  `AttributeError: 'str' object has no attribute 'get_secret_value'` 的形式炸在
+  `auth/tokens.py` 里，离现场很远。
+- **`SecretStr` 的字段不能用普通字符串赋值**，`Settings` 不是 frozen 的，
+  所以 `monkeypatch` 能改，但改的类型要对。
+- **`workspace_members.user_id` 有 UNIQUE 约束** —— 这是「一个用户只属于一个工作空间」
+  这条需求在数据库层的落实。写多命名空间范围的测试时不能给普通用户加第二个工作空间，
+  要改用**组管理员**：他管理的组里可以有很多工作空间，这才是多命名空间范围的真实来源。
+- **冒烟脚本断言「等于」在共享数据库上必然失败。** 前几期留下的实例仍归同一个管理员所有，
+  所以「管理员看到 2 个容器」应写成「**包含**这 2 个」，而真正有分量的是
+  **排除**断言：「组管理员的范围里不含乙组命名空间」。
+- **冒烟环境没有 reconciler，实例停在 `creating` 且 `pod_name` 为 NULL。**
+  这不是缺陷而是一种真实状态（实例刚创建、或 reconciler 挂了），
+  所以断言要落在「`pods` 是列表」而不是「`pods` 非空」，Pod 锁定的行为放到 pytest 里
+  用确定的数据覆盖。
+- **`GET /resource-specs` 返回裸列表、`/resource-groups` 返回信封** —— 两个列表接口的形状不同，
+  冒烟脚本的 `rows_of()` 两种都要能处理。
+
+### ⏳ Phase 8（待开始）
 
 | 阶段 | 内容 | 周期 |
 | --- | --- | --- |
-| Phase 7 | Grafana 监控集成 | 1.5 周 |
 | Phase 8 | API 开放、审计与上线 | 2 周 |
 
 > 每期必须可运行并**通过验收**后才进入下一期。
@@ -974,13 +1076,15 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
   FreeIPA，接入 OIDC 需要校方先提供客户端注册；在拿到之前不写不可验证的代码。
 - `app/workers/celery_app.py` 的 `beat_schedule` 已接入 `reconcile-workloads`（30 秒）
   与 `rollup-usage`（20 分钟）。
-- **Prometheus 记账尚未接入**：Phase 6 的用量来自平台自身的记录（见设计决策 5）。
-  接入需要在 Phase 7 与 Grafana 一起做，并且**前置问题是既有的 Prometheus 是否带
-  `namespace` / `pod` 标签** —— 没有这两个标签就无法把指标归到租户上，
-  而这必须先确认再写代码（见 14.4）。
-- `frontend/nginx.conf` 尚未包含 `/grafana/` 反代，Phase 7 添加。
-- `deploy/helm/` 与 `deploy/grafana/dashboards/` 分别属于 Phase 8 与 Phase 7。
+- **Prometheus 记账不会接入，这是有意为之**。Phase 6 的用量来自平台自身的记录；
+  Phase 7 的 Grafana 只做「此刻在干什么」的展示。两者不交叉：把计费建立在 Prometheus 上
+  会让采集中断直接变成少计费。**唯一的前置依赖是既有的 Prometheus 是否带
+  `namespace` / `pod` 标签** —— 缺了它 GPU 利用率面板会是空的，而用量统计不受影响
+  （见 14.4，以及 `deploy/grafana/README.md` 末尾的确认命令）。
+- `deploy/helm/` 属于 Phase 8。
 - `/auth/login` 的**登录限流**尚未实现，Phase 8 与审计告警一并落地。
+- **审计日志的读取接口尚未提供**（Phase 8）。写入一直是完整的，
+  缺的是查询界面 —— 有写入没有读取等于事后无法取证。
 
 ---
 
@@ -1124,7 +1228,11 @@ Vuex `namespace: true` 拼写错误、`Admin/User.vue` 为 0 字节、
 | 用量定时重算 | `backend/app/workers/tasks/usage.py`、`backend/app/workers/celery_app.py` |
 | 用量中心前端 | `frontend/src/views/UsageView.vue`、`frontend/src/api/usage.ts`、`frontend/src/types/usage.ts` |
 | 图表宿主（ECharts 生命周期/resize/降级） | `frontend/src/components/common/EChart.vue` |
-| **部署冒烟验收** | `scripts/smoke-env.sh` + `scripts/smoke_phase1.py` … `scripts/smoke_phase6.py` |
+| **监控范围与清单（后端）** | `backend/app/services/monitor.py`、`backend/app/api/v1/monitor.py` |
+| Grafana 面板编目与签名令牌 | `backend/app/monitoring/grafana.py` |
+| Grafana 部署（生成器/面板/provisioning/说明） | `deploy/grafana/`（`build_dashboards.py` 带越权自检） |
+| 监控中心前端 | `frontend/src/views/MonitorView.vue`、`frontend/src/api/monitor.ts`、`frontend/src/types/monitor.ts` |
+| **部署冒烟验收** | `scripts/smoke-env.sh` + `scripts/smoke_phase1.py` … `scripts/smoke_phase7.py` |
 | **前端契约校验** | `scripts/check-frontend-types.py`（新请求体类型记得同步 `PAYLOAD_ALIASES`） |
 | **前端视图冒烟** | `scripts/smoke_frontend_views.mjs`（`happy-dom` 里真实挂载 + 内容断言 + `EXPECTS_ABSENT` 反向断言） |
 | 旧实现参考 | `legacy/README.md` |

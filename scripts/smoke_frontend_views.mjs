@@ -469,6 +469,84 @@ const RETURNS = {
     outsideWindow: 4,
   },
   downloadUsageCsv: undefined,
+  getMonitorOverview: {
+    enabled: true,
+    disabledReason: null,
+    scope: {
+      namespaces: ['wl-nlp-alpha'],
+      pods: ['wl-dev-a-1-abc'],
+      unrestricted: false,
+      empty: false,
+    },
+    inventory: {
+      nodes: [
+        {
+          id: 1,
+          name: 'gpu-node-01',
+          displayName: '计算节点一',
+          status: 'ready',
+          schedulable: true,
+          gpuCount: 4,
+          cpuTotalMilli: 64000,
+          memoryTotalMb: 262144,
+        },
+        {
+          id: 2,
+          name: 'gpu-node-02',
+          displayName: '计算节点二',
+          status: 'cordoned',
+          schedulable: false,
+          gpuCount: 2,
+          cpuTotalMilli: 32000,
+          memoryTotalMb: 131072,
+        },
+      ],
+      nodesReady: 1,
+      gpuByModel: [
+        { model: 'A100', total: 6, allocated: 3 },
+        { model: 'V100', total: 4, allocated: 0 },
+      ],
+      instances: [
+        { status: 'running', count: 5 },
+        { status: 'stopped', count: 2 },
+      ],
+    },
+    containers: [
+      {
+        id: 7,
+        name: 'dev-dana',
+        displayName: '戴娜的开发环境',
+        namespace: 'wl-nlp-alpha',
+        podName: 'wl-dev-dana-7-abcde',
+        ownerUsername: 'dana',
+        status: 'running',
+        gpuType: 'A100',
+        gpuCount: 1,
+        nodeName: 'gpu-node-01',
+      },
+    ],
+    dashboards: [
+      {
+        key: 'my-containers',
+        uid: 'wl-my-containers',
+        title: '我的容器',
+        description: '本人容器的资源曲线。',
+        icon: 'mdi-cube-outline',
+      },
+    ],
+    embeds: {
+      'my-containers': {
+        key: 'my-containers',
+        url: '/grafana/d/wl-my-containers?auth_token=stub&var-namespace=wl-nlp-alpha',
+        expiresIn: 300,
+      },
+    },
+  },
+  mintMonitorEmbed: {
+    key: 'my-containers',
+    url: '/grafana/d/wl-my-containers?auth_token=stub2&var-namespace=wl-nlp-alpha',
+    expiresIn: 300,
+  },
   getImageUsage: { count: 2, totalBytes: 7516192768, inUse: 3 },
   getRegistryStatus: {
     reachable: true,
@@ -564,6 +642,25 @@ const EXPECTS = {
   MyWorkspaceView: ['我的工作空间', '算力配额', '可用资源池'],
   // `covered` is true in the fixture, so the "not yet summarised" alert must be
   // absent — asserted below. These are the figures a reader would look for.
+  // The fixture is Grafana-enabled, so the panel frame and the scope banner both
+  // render. The counts are chosen so none is a substring of another.
+  MonitorView: [
+    '监控中心',
+    '1/2',
+    '就绪 / 总数',
+    '3/10',
+    '运行中实例',
+    '监控范围已限定',
+    'wl-nlp-alpha',
+    '戴娜的开发环境',
+    'dev-dana',
+    'wl-dev-dana-7-abcde',
+    '1 × A100',
+    'gpu-node-01',
+    '我的容器',
+    'A100',
+    'V100',
+  ],
   UsageView: [
     '用量中心',
     '255',
@@ -597,6 +694,14 @@ const EXPECTS_ABSENT = {
     // enough and `setOption` actually ran — the chart itself renders no text, so
     // there is no positive string to assert on.
     '图表无法绘制',
+  ],
+  MonitorView: [
+    // The fixture has Grafana configured, so neither "unavailable" notice may
+    // appear. Both render convincingly and mean the opposite of the truth.
+    '未接入 Grafana',
+    '没有正在运行的容器',
+    '没有登记的加速卡',
+    '没有同步到节点',
   ],
 }
 

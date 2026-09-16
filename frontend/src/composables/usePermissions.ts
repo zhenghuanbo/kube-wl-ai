@@ -24,6 +24,8 @@ export interface UsePermissions {
   scope: ComputedRef<DataScope>
   /** Groups the caller administers — drives the group picker in admin forms. */
   adminGroupIds: ComputedRef<number[]>
+  /** Workspaces the caller may target, straight from the server's data scope. */
+  scopeWorkspaceIds: ComputedRef<number[]>
   primaryGroup: ComputedRef<GroupMembership | null>
 }
 
@@ -42,6 +44,7 @@ export function usePermissions(): UsePermissions {
     isGlobalAdmin: computed(() => auth.globalAdmin || auth.hasRole('global_admin')),
     scope: computed(() => (auth.globalAdmin ? 'all' : auth.scopeKind)),
     adminGroupIds: computed(() => auth.scopeGroupIds),
+    scopeWorkspaceIds: computed(() => auth.scopeWorkspaceIds),
     primaryGroup: computed(() => auth.primaryGroup),
   }
 }

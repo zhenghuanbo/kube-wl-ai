@@ -93,12 +93,16 @@ def error_code(body: object) -> str:
 
 def ensure_user(admin: str, username: str, group_id: int | None = None) -> int | None:
     """Create or fetch a user, returning their id."""
+    # `fullName` and `groupIds` (plural). This used to send `displayName` and
+    # `groupId`, both of which were silently discarded: the account was created
+    # and the script moved on, so every later check that depended on the group
+    # link was quietly testing a user who belonged to no group at all.
     status, body = call("POST", "/users", token=admin, body={
         "username": username,
         "password": PASSWORD,
-        "displayName": username,
+        "fullName": username,
         "roleCodes": ["user"],
-        "groupId": group_id,
+        "groupIds": [group_id] if group_id is not None else [],
     })
     if status == 201 and isinstance(body, dict):
         return int(body["id"])

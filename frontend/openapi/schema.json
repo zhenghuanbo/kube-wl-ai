@@ -5462,6 +5462,7 @@
             "title": "Code"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "message"
@@ -5621,6 +5622,7 @@
             "default": "workspace"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "name",
@@ -5822,6 +5824,7 @@
             "title": "Ports"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "id",
@@ -5938,6 +5941,7 @@
             "default": true
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "ApplicationLaunch",
         "description": "Launch an application as an instance in the caller's workspace.\n\nEvery field is optional and falls back to the application's default, so the\ncommon case is a bare ``{}``."
@@ -6099,6 +6103,7 @@
             "title": "Updatedat"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "id",
@@ -6344,6 +6349,7 @@
             "title": "Isactive"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "ApplicationUpdate"
       },
@@ -6430,6 +6436,7 @@
             "title": "Lastseenat"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "id",
@@ -6541,6 +6548,7 @@
             ]
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "id",
@@ -6575,15 +6583,25 @@
             },
             "type": "array",
             "title": "Groupids"
+          },
+          "workspaceIds": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Workspaceids"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "kind",
           "allAccess",
-          "groupIds"
+          "groupIds",
+          "workspaceIds"
         ],
-        "title": "DataScopeResponse"
+        "title": "DataScopeResponse",
+        "description": "The caller's row-level scope, as the policy layer resolved it.\n\n``workspace_ids`` is part of the wire format because ``DataScope`` carries\nit and clients need it: it answers \"which workspaces may I target\" without a\nsecond request, and it is what ``scope_filter`` actually applies for a plain\nuser. Omitting it here meant the value was computed, returned by\n``to_dict()``, and then quietly dropped on the floor by Pydantic."
       },
       "GpuDeviceRead": {
         "properties": {
@@ -6619,6 +6637,7 @@
             "title": "Uuid"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "id",
@@ -6671,6 +6690,7 @@
             "title": "Owneruserid"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "name"
@@ -6702,6 +6722,7 @@
             "default": false
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "userId"
@@ -6758,6 +6779,7 @@
             "title": "Joinedat"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "userId",
@@ -6798,6 +6820,7 @@
             "title": "Isprimary"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "GroupMemberUpdate"
       },
@@ -6827,6 +6850,7 @@
             "title": "Isdirectorymanaged"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "groupId",
@@ -6907,6 +6931,7 @@
             "title": "Updatedat"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "id",
@@ -6929,6 +6954,7 @@
             "default": false
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "GroupSyncRequest",
         "description": "Ask the backend to refresh memberships from the directory.\n\n``dry_run`` reports what would change without writing anything."
@@ -6982,6 +7008,7 @@
             "default": false
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "GroupSyncResult"
       },
@@ -7043,6 +7070,7 @@
             "title": "Isactive"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "GroupUpdate"
       },
@@ -7070,6 +7098,7 @@
             "title": "Expiresin"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "url",
@@ -7104,6 +7133,7 @@
             "title": "Reason"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "InstanceAction",
         "description": "Optional body for start/stop, so the reason lands in the audit trail."
@@ -7205,6 +7235,7 @@
             "title": "Maxruntimeseconds"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "name",
@@ -7512,6 +7543,7 @@
             "title": "Maxruntimeseconds"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "id",
@@ -7749,6 +7781,7 @@
             "title": "Updatedat"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "id",
@@ -7798,6 +7831,7 @@
             "title": "Description"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "InstanceUpdate"
       },
@@ -7819,6 +7853,7 @@
             "title": "Oidcenabled"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "providers",
@@ -7842,6 +7877,7 @@
             "title": "Password"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "username",
@@ -7878,6 +7914,7 @@
             "title": "Devicesseen"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "nodesSeen",
@@ -7910,6 +7947,7 @@
             "title": "Pages"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "page",
@@ -7932,6 +7970,7 @@
             "$ref": "#/components/schemas/PageMeta"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "items",
@@ -7952,6 +7991,7 @@
             "$ref": "#/components/schemas/PageMeta"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "items",
@@ -7972,6 +8012,7 @@
             "$ref": "#/components/schemas/PageMeta"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "items",
@@ -7992,6 +8033,7 @@
             "$ref": "#/components/schemas/PageMeta"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "items",
@@ -8012,6 +8054,7 @@
             "$ref": "#/components/schemas/PageMeta"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "items",
@@ -8032,6 +8075,7 @@
             "$ref": "#/components/schemas/PageMeta"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "items",
@@ -8052,6 +8096,7 @@
             "$ref": "#/components/schemas/PageMeta"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "items",
@@ -8072,6 +8117,7 @@
             "$ref": "#/components/schemas/PageMeta"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "items",
@@ -8088,6 +8134,7 @@
             "title": "Password"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "password"
@@ -8111,6 +8158,7 @@
             "title": "Total"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "categories",
@@ -8141,6 +8189,7 @@
             "title": "Description"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "code",
@@ -8173,6 +8222,7 @@
             "title": "Isglobaladmin"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "permissions",
@@ -8194,6 +8244,7 @@
             "title": "Description"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "name",
@@ -8241,6 +8292,7 @@
             "title": "Isactive"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "id",
@@ -8263,6 +8315,7 @@
             "title": "Limitvalue"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "limitValue"
@@ -8283,6 +8336,7 @@
             "title": "Refreshtoken"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "RefreshRequest",
         "description": "The refresh token normally arrives as an httpOnly cookie.\n\nThe body field exists for non-browser clients that cannot use cookies."
@@ -8370,6 +8424,7 @@
             "title": "Storageclass"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "name"
@@ -8508,6 +8563,7 @@
             "title": "Specs"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "id",
@@ -8561,6 +8617,7 @@
             "title": "Maxstoragegbperuser"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "maxConcurrentInstances",
@@ -8664,6 +8721,7 @@
             "title": "Maxstoragegbperuser"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "ResourceGroupLimitsUpdate"
       },
@@ -8769,6 +8827,7 @@
             "title": "Updatedat"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "id",
@@ -8901,6 +8960,7 @@
             "title": "Isactive"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "ResourceGroupUpdate"
       },
@@ -8958,6 +9018,7 @@
             "default": 0
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "name"
@@ -9010,6 +9071,7 @@
             "title": "Isactive"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "id",
@@ -9111,6 +9173,7 @@
             "title": "Isactive"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "ResourceSpecUpdate"
       },
@@ -9139,6 +9202,7 @@
             "title": "Groupid"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "code",
@@ -9180,6 +9244,7 @@
             "title": "Permissions"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "code",
@@ -9232,6 +9297,7 @@
             "default": false
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "name"
@@ -9272,6 +9338,7 @@
             "title": "Isactive"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "id",
@@ -9331,6 +9398,7 @@
             "title": "Isactive"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "RuntimeLimitUpdate"
       },
@@ -9349,6 +9417,7 @@
             "title": "Publickey"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "name",
@@ -9380,6 +9449,7 @@
             "title": "Createdat"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "id",
@@ -9510,6 +9580,7 @@
             "default": 3600
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "name",
@@ -9782,6 +9853,7 @@
             "default": 3600
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "id",
@@ -9832,6 +9904,7 @@
             "default": false
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "taskId",
@@ -10067,6 +10140,7 @@
             "title": "Updatedat"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "id",
@@ -10128,6 +10202,7 @@
             "title": "Priority"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "TaskUpdate",
         "description": "Only the fields that can honestly change after submission."
@@ -10156,6 +10231,7 @@
             "$ref": "#/components/schemas/CurrentUserResponse"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "accessToken",
@@ -10238,6 +10314,7 @@
             "title": "Groupids"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "username"
@@ -10374,6 +10451,7 @@
             "title": "Roleassignments"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "id",
@@ -10420,6 +10498,7 @@
             "default": "member"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "groupIds"
@@ -10451,6 +10530,7 @@
             "title": "Groupid"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "roleCode"
@@ -10485,6 +10565,7 @@
             "title": "Fullname"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "UserSelfUpdate",
         "description": "What a user may change about themselves."
@@ -10506,6 +10587,7 @@
             "title": "Isactive"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "isActive"
@@ -10606,6 +10688,7 @@
             "title": "Primarygroupname"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "id",
@@ -10686,6 +10769,7 @@
             "title": "Password"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "UserUpdate",
         "description": "Partial update; only the fields present are applied."
@@ -10790,6 +10874,7 @@
             "title": "Createdat"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "id",
@@ -10855,6 +10940,7 @@
             "title": "Owneruserid"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "name"
@@ -10969,6 +11055,7 @@
             "title": "Resourcegrants"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "id",
@@ -10999,6 +11086,7 @@
             "default": false
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "userId"
@@ -11048,6 +11136,7 @@
             "title": "Joinedat"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "userId",
@@ -11079,6 +11168,7 @@
             "title": "Unit"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "resource",
@@ -11113,6 +11203,7 @@
             "title": "Message"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "applied"
@@ -11139,6 +11230,7 @@
             "title": "Groupname"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "id",
@@ -11156,6 +11248,7 @@
             "title": "Resourcegroupid"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "resourceGroupId"
@@ -11194,6 +11287,7 @@
             "title": "Isactive"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "resourceGroupId",
@@ -11322,6 +11416,7 @@
             "title": "Updatedat"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "id",
@@ -11388,6 +11483,7 @@
             "title": "Status"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "title": "WorkspaceUpdate"
       }

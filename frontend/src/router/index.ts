@@ -45,14 +45,14 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'applications',
         name: 'applications',
-        component: () => import('@/views/PlaceholderView.vue'),
-        meta: { title: '应用程序', phase: 'Phase 4' },
+        component: () => import('@/views/ApplicationsView.vue'),
+        meta: { title: '应用程序' },
       },
       {
         path: 'tasks',
         name: 'tasks',
-        component: () => import('@/views/PlaceholderView.vue'),
-        meta: { title: '自定义任务', phase: 'Phase 4' },
+        component: () => import('@/views/TasksView.vue'),
+        meta: { title: '自定义任务' },
       },
       {
         path: 'images',

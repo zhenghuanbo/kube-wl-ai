@@ -27,9 +27,19 @@ class RefreshRequest(ApiModel):
 
 
 class DataScopeResponse(ApiModel):
+    """The caller's row-level scope, as the policy layer resolved it.
+
+    ``workspace_ids`` is part of the wire format because ``DataScope`` carries
+    it and clients need it: it answers "which workspaces may I target" without a
+    second request, and it is what ``scope_filter`` actually applies for a plain
+    user. Omitting it here meant the value was computed, returned by
+    ``to_dict()``, and then quietly dropped on the floor by Pydantic.
+    """
+
     kind: str
     all_access: bool
     group_ids: list[int]
+    workspace_ids: list[int]
 
 
 class GroupMembership(ApiModel):

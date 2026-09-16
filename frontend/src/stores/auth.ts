@@ -29,6 +29,7 @@ export const useAuthStore = defineStore('auth', () => {
   const permissions = ref<Set<PermissionCode>>(new Set())
   const scopeKind = ref<DataScope>('self')
   const scopeGroupIds = ref<number[]>([])
+  const scopeWorkspaceIds = ref<number[]>([])
   const globalAdmin = ref(false)
   const status = ref<AuthStatus>('unknown')
   const busy = ref(false)
@@ -65,12 +66,13 @@ export const useAuthStore = defineStore('auth', () => {
   function applyPermissions(payload: {
     permissions: string[]
     roles: Role[]
-    scope: { kind: DataScope; allAccess: boolean; groupIds: number[] }
+    scope: { kind: DataScope; allAccess: boolean; groupIds: number[]; workspaceIds: number[] }
     isGlobalAdmin: boolean
   }): void {
     permissions.value = new Set(payload.permissions)
     scopeKind.value = payload.scope.kind
     scopeGroupIds.value = payload.scope.groupIds
+    scopeWorkspaceIds.value = payload.scope.workspaceIds
     globalAdmin.value = payload.isGlobalAdmin
     if (user.value) {
       user.value.roles = payload.roles
@@ -82,6 +84,7 @@ export const useAuthStore = defineStore('auth', () => {
     permissions.value = new Set()
     scopeKind.value = 'self'
     scopeGroupIds.value = []
+    scopeWorkspaceIds.value = []
     globalAdmin.value = false
     status.value = 'anonymous'
     setAccessToken(null)
@@ -141,6 +144,7 @@ export const useAuthStore = defineStore('auth', () => {
     permissions,
     scopeKind,
     scopeGroupIds,
+    scopeWorkspaceIds,
     globalAdmin,
     status,
     busy,

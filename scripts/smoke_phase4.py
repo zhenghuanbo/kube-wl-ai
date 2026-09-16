@@ -117,12 +117,17 @@ def ensure_user(admin: str, username: str, group_id: int | None = None) -> int |
         body={
             "username": username,
             "password": PASSWORD,
-            "displayName": username,
+            # `fullName`, not `displayName`: `User.display_name` is a derived
+            # property (`full_name or username`), so there is no display-name
+            # column to write. This script used to send `displayName`, which was
+            # silently discarded — the account was still created, so the check
+            # passed while verifying something that never happened.
+            "fullName": username,
             "roleCodes": ["user"],
             # `groupIds`, plural: an account may be linked to several directory
-            # groups, and the singular spelling is silently ignored rather than
-            # rejected — which is how this script first "passed" without ever
-            # creating a group link.
+            # groups. The singular spelling used to be silently ignored rather
+            # than rejected, which is how this script first "passed" without ever
+            # creating a group link at all.
             "groupIds": [group_id] if group_id is not None else [],
         },
     )
@@ -670,6 +675,52 @@ def main() -> int:
     )
 
     status, _ = call("DELETE", f"/instances/{app_instance_id}", token=token)
+
+    # ------------------------------------------------------------------
+    # Unknown request fields are refused, not ignored.
+    #
+    # This is the check that would have caught two real bugs: `groupId` sent
+    # where the API wants `groupIds`, and query parameters that silently
+    # dropped a filter. Both returned 200 and did nothing.
+    # ------------------------------------------------------------------
+    print("\n\033[1m未知字段必须被拒绝\033[0m")
+
+    status, body = call(
+        "POST",
+        "/tasks",
+        token=token,
+        body={
+            "name": f"typo-{SUFFIX}",
+            "resourceGroupId": pool_id,
+            "resourceSpecId": spec_id,
+            "image": "registry.local/pytorch:2.4",
+            "script": "echo hi",
+            # `maxRuntimeSecond` — a typo a frontend author would plausibly make.
+            "maxRuntimeSecond": 600,
+        },
+    )
+    check(
+        "任务体里的拼错字段被拒绝（422）",
+        status == 422 and error_code(body) == "validation_failed",
+        f"{status} {body}",
+    )
+    check(
+        "错误信息点名了出错的字段",
+        "maxRuntimeSecond" in json.dumps(body, ensure_ascii=False),
+        json.dumps(body, ensure_ascii=False)[:200],
+    )
+
+    status, body = call(
+        "POST",
+        f"/applications/{app_id}/launch",
+        token=token,
+        body={"name": f"typo-launch-{SUFFIX}", "stroageGb": 10},
+    )
+    check(
+        "启动体里的拼错字段被拒绝（422）",
+        status == 422 and error_code(body) == "validation_failed",
+        f"{status} {body}",
+    )
 
     print("\n" + "─" * 46)
     if failures:

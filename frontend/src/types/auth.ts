@@ -83,7 +83,14 @@ export interface PermissionsPayload {
   scope: {
     kind: DataScope
     allAccess: boolean
+    /** Groups the caller administers; drives admin group pickers. */
     groupIds: number[]
+    /**
+     * Workspaces the caller may target. For a plain user this is the single
+     * workspace they belong to, which is what the server's row filter actually
+     * applies — so a form can offer it without another round trip.
+     */
+    workspaceIds: number[]
   }
   isGlobalAdmin: boolean
 }

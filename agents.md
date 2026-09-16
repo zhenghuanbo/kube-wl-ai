@@ -528,7 +528,7 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 8. `decode_access_token` 的三条错误信息是英文（`Invalid token` 等），而全项目其余面向用户的文案都是中文。
    由 WebSocket 拒绝路径暴露。已统一为中文。
 
-### 🔄 Phase 4 — 应用程序与自定义任务（后端已完成，前端待做）
+### ✅ Phase 4 — 应用程序与自定义任务（已完成）
 
 **Phase 4 后端交付**：
 
@@ -540,12 +540,16 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 | 服务 | `applications.py`（可见性、启动、编辑权）、`tasks.py`（提交/取消/删除/对齐/日志）、`workload_events.py`、`quota_guard.py`（实例与任务共用配额） |
 | 接口 | `/applications`（列表/详情/创建/修改/下架/启动/时间线）、`/tasks`（列表/详情/提交/修改/取消/对齐/日志/删除/时间线）；OpenAPI **58 → 68 条路径** |
 | 定时任务 | `app/workers/tasks/reconcile.py` 接入 Celery beat（30 秒一次）；`python -m app.cli reconcile` 支持手动对齐 |
-| 测试 | 新增 51 项，全量 **277 项通过** |
+| 前端 | `ApplicationsView.vue`（应用目录 / 发布 / 启动）、`TasksView.vue`（任务列表 / 提交 / 日志 / 时间线）、`types/application.ts`、`types/task.ts`、`api/applications.ts`、`api/tasks.ts` |
+| 测试 | 新增 51 项，全量 **274 项通过** |
 
 **Phase 4 验收结果**：
-- 质量门禁：`ruff check` + `ruff format --check` + `mypy --strict`（91 文件）+ `pytest`（277 项）全绿。
-- 真实进程联调：`scripts/smoke_phase4.py` 对 uvicorn 实例执行 **58 项检查全部通过**。
-- 回归：`scripts/smoke_phase3.py` 仍为 49/49。
+- 质量门禁：`ruff check` + `ruff format --check` + `mypy --strict`（91 文件）+ `pytest`（274 项）全绿；
+  前端 `vue-tsc --noEmit` 与 `vite build` 通过。
+- 真实进程联调（同一 uvicorn 实例，干净数据库）：
+  Phase 1 **30/30**、Phase 2 **33/33**、Phase 3 **49/49**、Phase 4 **61/61**，共 173 项。
+- 类型一致性：`scripts/check-frontend-types.py` 核对 39 个接口（含全部请求体）
+  与 OpenAPI schema，零漂移。
 - 集群零污染：跑完后 `kubectl get ns -l wl-managed=true` 为空。
 
 **关键设计决定**：
@@ -580,8 +584,25 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 2. **任务从未记录开始时间**。`started_at` 原本只在对齐时观察到 Running 才写入，
    于是「两次巡检之间就跑完的任务」会得到 `durationSeconds: null`。
    现在在 Job 提交成功时打点 —— 用户想知道的「这个任务花了我多久」包含排队时间。
-3. **`/auth/login` 之外的用户创建接口用 `groupIds`（复数）**，脚本里写成 `groupId` 时
-   被静默忽略，用户根本没有进组。这是第 1 条同一个病根：**未知字段应当报错而不是被吞掉**。
+3. **`/users` 用 `groupIds`（复数）**，脚本里写成 `groupId` 时被静默忽略，用户根本没有进组。
+   这是第 1 条同一个病根。
+
+**根治：请求体不再静默丢弃未知字段**（`ApiModel` 设 `extra="forbid"`）。
+
+前面两条都只是症状。真正的病因是 Pydantic 默认**忽略**未声明字段：拼错一个字段名，
+接口返回 200、数据只写了一半，调用方和审计日志都看不出任何异常。
+改成拒绝之后，一次性翻出三处一直存在的问题：
+
+1. **`DataScopeResponse` 漏了 `workspace_ids`** —— `DataScope.to_dict()` 一直在返回它，
+   Pydantic 一直在丢掉它。数据范围里「我能操作哪些工作空间」这一项从未到达前端。
+   已补进 schema，并透传到前端 `usePermissions().scopeWorkspaceIds`。
+2. **`PATCH /users/me` 会静默忽略 `isSuperuser`** —— 提权尝试拿到 200，什么都没发生。
+   现在返回 422 并点名该字段，且**整个请求都不生效**（不做「一半照做」），
+   提权尝试因此会留在审计日志里。
+3. **三个冒烟脚本一直在发不存在的字段**：`displayName`（`User.display_name` 是派生属性，
+   由 `full_name` 推导）、`groupId`（应为 `groupIds`）、`role`（应为 `roleCodes`）。
+   它们此前「通过」是因为账号确实建成了、组关联压根没建、而 `roleCodes` 的默认值恰好
+   也是 `["user"]` —— 断言的是从未发生的事。已全部修正。
 
 ### ⏳ Phase 5–8（待开始）
 
@@ -641,10 +662,15 @@ Vuex `namespace: true` 拼写错误、`Admin/User.vue` 为 0 字节、
   且是有意为之。
 - **异常类型决定对外状态码**：`K8sError` 曾继承 `RuntimeError`，导致集群故障对外是 500 traceback；
   现继承 `KubernetesError`（502 `kubernetes_error`）。**新增外部依赖的异常时，让它成为 `AppError` 的子类。**
-- **查询参数不会因为拼错而报错，只会被忽略**：FastAPI 按名字匹配，多余的 query 参数
-  既不报错也不进函数。多词参数一律 `Query(alias="camelCase")`，并有结构性测试兜底
-  （`test_every_multi_word_query_parameter_is_camel_case`）。请求体同理：
-  `ApiModel` 目前不禁止未知字段，把 `groupIds` 写成 `groupId` 会静默丢失。
+- **查询参数拼错不会报错，只会被忽略**：FastAPI 按名字匹配，多余的 query 参数既不报错
+  也不进函数。多词参数一律 `Query(alias="camelCase")`，并有结构性测试兜底
+  （`test_every_multi_word_query_parameter_is_camel_case`）。
+- **请求体已禁止未知字段**（`ApiModel` 的 `extra="forbid"`）：拼错字段名会得到 422 并点名
+  出错字段，而不是 200 + 数据只写一半。新增请求体字段时前端要同步改，否则会在联调时立刻暴露
+  ——这正是想要的效果。`scripts/check-frontend-types.py` 会在提交前做这个核对。
+- **前端类型是手写的，会与后端漂移**：`scripts/check-frontend-types.py` 解析 `src/types/*.ts`
+  的接口（含 `extends` 继承与 `...Payload` → `...Create` 的别名映射），要求每个字段都能在
+  OpenAPI schema 里找到。字段被改名时 TypeScript 不会报错，只会在运行时变成 `undefined`。
 - **`lazy="joined"` 的关系不参与惰性加载**：它只在**查询加载**时连表取回，因此
   `Model(...)` 刚构造出来的对象上该属性是未加载的，任何读它的地方都会 `MissingGreenlet`。
   新增此类关系时，要么在服务层显式赋值（如 `workspace.group = group`），

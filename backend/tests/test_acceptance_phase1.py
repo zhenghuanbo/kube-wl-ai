@@ -7,6 +7,7 @@ leaks the existence of another tenant's data.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 import pytest
@@ -340,16 +341,48 @@ async def test_user_can_read_and_update_own_profile(client: AsyncClient, world: 
 
 
 async def test_user_cannot_escalate_through_self_update(client: AsyncClient, world: World) -> None:
-    """`is_superuser` and roles are simply not part of the self-update payload."""
+    """`is_superuser` and `is_active` are not part of the self-update payload.
+
+    The request is now *rejected* rather than partially applied. That is the
+    stronger behaviour and the reason is worth stating: silently accepting the
+    body while ignoring `isSuperuser` returns 200 to an escalation attempt, so
+    the caller has no way to tell the field was dropped — and neither does
+    anyone reading the audit log. A 422 records the attempt.
+
+    It also stops the legitimate half of the payload, which is the point: a
+    request that tries to escalate is not half-honoured.
+    """
     await act_as(client, "user-a")
 
     response = await client.patch(
         "/api/v1/users/me", json={"fullName": "X", "isSuperuser": True, "isActive": False}
     )
 
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "validation_failed"
+    # The offending field is named, so this is debuggable rather than merely refused.
+    assert "isSuperuser" in json.dumps(body["error"])
+
+    # And nothing changed: the attempt had no effect at all, not even the
+    # legitimate half of the payload.
+    me = await client.get("/api/v1/users/me")
+    assert me.status_code == 200
+    assert me.json()["isSuperuser"] is False
+    assert me.json()["isActive"] is True
+    assert me.json()["fullName"] != "X"
+
+
+async def test_a_self_update_that_stays_in_bounds_still_works(
+    client: AsyncClient, world: World
+) -> None:
+    """The escalation guard must not have closed the legitimate path."""
+    await act_as(client, "user-a")
+
+    response = await client.patch("/api/v1/users/me", json={"fullName": "合法的名字"})
+
     assert response.status_code == 200
-    assert response.json()["isSuperuser"] is False
-    assert response.json()["isActive"] is True
+    assert response.json()["fullName"] == "合法的名字"
 
 
 async def test_user_cannot_read_another_users_permissions(

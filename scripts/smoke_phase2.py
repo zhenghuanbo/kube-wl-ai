@@ -119,8 +119,12 @@ def main() -> int:  # noqa: C901 - a linear acceptance script reads better flat
         body={
             "username": "smoke-user",
             "password": PASSWORD,
-            "displayName": "冒烟用户",
-            "role": "user",
+            # `fullName`, not `displayName`: the display name is derived from it.
+            "fullName": "冒烟用户",
+            # `roleCodes`, not `role`. The old spelling was discarded and the
+            # schema default (["user"]) happened to match, so the check passed
+            # for the wrong reason.
+            "roleCodes": ["user"],
             "groupIds": [group_id],
         },
     )

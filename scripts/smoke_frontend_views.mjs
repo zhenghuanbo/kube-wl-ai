@@ -290,6 +290,28 @@ const page = (items) => ({
  * renders, and it stops an unlisted endpoint from appearing to return data the
  * view would then mishandle.
  */
+/**
+ * A full totals object with only the GPU figure varied.
+ *
+ * The series fixture needs one point per day and the other measures are noise
+ * for the chart under test; spelling all ten fields out three times would make
+ * the interesting number harder to find, not easier.
+ */
+function dayTotals(gpuHours) {
+  return {
+    runtimeSeconds: gpuHours * 3600,
+    gpuSeconds: gpuHours * 3600,
+    cpuMilliSeconds: gpuHours * 36000,
+    memoryMbSeconds: gpuHours * 20480,
+    workloadCount: gpuHours > 0 ? 2 : 0,
+    gpuHours,
+    cpuCoreHours: gpuHours * 0.01,
+    memoryGbHours: gpuHours * 0.02,
+    userCount: gpuHours > 0 ? 1 : 0,
+    workspaceCount: gpuHours > 0 ? 1 : 0,
+  }
+}
+
 const RETURNS = {
   listStorages: page([STORAGE]),
   listImages: page([IMAGE]),
@@ -336,6 +358,117 @@ const RETURNS = {
   getGroup: GROUP,
   getResourceGroup: RESOURCE_GROUP,
   getStorageUsage: { count: 3, capacityGb: 137 },
+  // Figures chosen so no expected string is a substring of any other: a total of
+  // 150 once made the assertion "50 GB" pass against the wrong field, which is
+  // how a planted display bug slipped through.
+  getUsageSummary: {
+    dayFrom: '2026-03-01',
+    dayTo: '2026-03-30',
+    totals: {
+      runtimeSeconds: 432000,
+      gpuSeconds: 918000,
+      cpuMilliSeconds: 72000000,
+      memoryMbSeconds: 54000000,
+      workloadCount: 17,
+      gpuHours: 255,
+      cpuCoreHours: 20,
+      memoryGbHours: 14.6,
+      userCount: 4,
+      workspaceCount: 2,
+    },
+    selfTotals: {
+      runtimeSeconds: 108000,
+      gpuSeconds: 91800,
+      cpuMilliSeconds: 7200000,
+      memoryMbSeconds: 5400000,
+      workloadCount: 3,
+      gpuHours: 25.5,
+      cpuCoreHours: 2,
+      memoryGbHours: 1.46,
+      userCount: 1,
+      workspaceCount: 1,
+    },
+    covered: true,
+  },
+  getUsageSeries: {
+    dayFrom: '2026-03-01',
+    dayTo: '2026-03-03',
+    points: [
+      { day: '2026-03-01', totals: dayTotals(37) },
+      { day: '2026-03-02', totals: dayTotals(41) },
+      { day: '2026-03-03', totals: dayTotals(0) },
+    ],
+  },
+  getUsageBreakdown: {
+    by: 'user',
+    dayFrom: '2026-03-01',
+    dayTo: '2026-03-30',
+    truncated: false,
+    rows: [
+      {
+        key: '1',
+        label: '张三',
+        entityId: 1,
+        totals: {
+          runtimeSeconds: 108000,
+          gpuSeconds: 61200,
+          cpuMilliSeconds: 7200000,
+          memoryMbSeconds: 5400000,
+          workloadCount: 3,
+          gpuHours: 17,
+          cpuCoreHours: 2,
+          memoryGbHours: 1.46,
+          userCount: 1,
+          workspaceCount: 1,
+        },
+        kinds: { instance: 61200 },
+      },
+      {
+        key: '2',
+        label: '李四',
+        entityId: 2,
+        totals: {
+          runtimeSeconds: 72000,
+          gpuSeconds: 43200,
+          cpuMilliSeconds: 3600000,
+          memoryMbSeconds: 2700000,
+          workloadCount: 2,
+          gpuHours: 12,
+          cpuCoreHours: 1,
+          memoryGbHours: 0.73,
+          userCount: 1,
+          workspaceCount: 1,
+        },
+        kinds: { task: 43200 },
+      },
+    ],
+  },
+  getUsageMeta: {
+    dimensions: [
+      { key: 'user', label: '按用户' },
+      { key: 'group', label: '按用户组' },
+      { key: 'workspace', label: '按工作空间' },
+      { key: 'gpu_type', label: '按加速卡型号' },
+      { key: 'workload_kind', label: '按负载类型' },
+    ],
+    kinds: [
+      { value: 'instance', label: '开发实例' },
+      { value: 'task', label: '自定义任务' },
+    ],
+    maxRangeDays: 731,
+    defaultRollupLookbackDays: 3,
+  },
+  rollupUsage: {
+    dayFrom: '2026-03-01',
+    dayTo: '2026-03-30',
+    rowsWritten: 9,
+    instancesScanned: 6,
+    tasksScanned: 3,
+    runtimeSeconds: 432000,
+    gpuSeconds: 918000,
+    outsideWindow: 4,
+  },
+  downloadUsageCsv: undefined,
   getImageUsage: { count: 2, totalBytes: 7516192768, inUse: 3 },
   getRegistryStatus: {
     reachable: true,
@@ -429,6 +562,42 @@ const EXPECTS = {
   // Driven by grants, not by the workspace record: with none issued the view
   // correctly reports that no pools are available.
   MyWorkspaceView: ['我的工作空间', '算力配额', '可用资源池'],
+  // `covered` is true in the fixture, so the "not yet summarised" alert must be
+  // absent — asserted below. These are the figures a reader would look for.
+  UsageView: [
+    '用量中心',
+    '255',
+    'GPU 卡时',
+    '20.0',
+    '14.6',
+    '5.0 天',
+    '17 个负载',
+    '其中你自己',
+    '25.5 GPU·h',
+    '张三',
+    '李四',
+    '开发实例',
+  ],
+}
+
+/**
+ * Text that must **not** appear, per view.
+ *
+ * The complement of `EXPECTS`, and the check that does not depend on anybody
+ * having written an expectation: a fixture optionally overridden, a date range
+ * the user never picked, an alert that belongs to a different branch. The usage
+ * page is where this matters most, because its two most important states — "the
+ * rollup ran and found nothing" and "the rollup never ran" — differ by a single
+ * boolean and look identical otherwise.
+ */
+const EXPECTS_ABSENT = {
+  UsageView: [
+    '该时间段内还没有用量汇总数据',
+    // ECharts' fallback notice. Its absence is what proves the canvas stub was
+    // enough and `setOption` actually ran — the chart itself renders no text, so
+    // there is no positive string to assert on.
+    '图表无法绘制',
+  ],
 }
 
 // ---------------------------------------------------------------------------
@@ -627,6 +796,40 @@ try {
   const window = new Window({ url: 'https://wl.example.edu/' })
 
   /**
+   * Give the canvas element a 2D context.
+   *
+   * happy-dom returns `null` from `getContext('2d')`, which makes ECharts throw
+   * on `init` — and a chart that throws takes the whole view down with it, so the
+   * usage page could not be mounted at all. The stub is deliberately thin: it
+   * exists so that `setOption` *runs*, which is what catches a malformed option
+   * (a missing series, a category axis fed numbers). It proves nothing about
+   * pixels, and it is not meant to.
+   */
+  window.HTMLCanvasElement.prototype.getContext = function getContext() {
+    const target = {
+      canvas: this,
+      measureText: (text) => ({ width: String(text).length * 7, height: 12 }),
+      createLinearGradient: () => ({ addColorStop() {} }),
+      createRadialGradient: () => ({ addColorStop() {} }),
+      createPattern: () => ({}),
+      getImageData: () => ({ data: new Uint8ClampedArray(4) }),
+      createImageData: () => ({ data: new Uint8ClampedArray(4) }),
+      setLineDash() {},
+      getLineDash: () => [],
+      isPointInPath: () => false,
+      save() {},
+      restore() {},
+    }
+    return new Proxy(target, {
+      get: (object, key) => (key in object ? object[key] : () => undefined),
+      set: (object, key, value) => {
+        object[key] = value
+        return true
+      },
+    })
+  }
+
+  /**
    * Populate the global scope from the DOM window.
    *
    * The constructors are enumerated rather than listed by hand, because Vuetify
@@ -756,6 +959,15 @@ try {
       const absent = (EXPECTS[label] ?? []).filter((needle) => !html.includes(needle))
       if (absent.length) {
         throw new Error(`rendered, but without: ${absent.map((a) => JSON.stringify(a)).join(', ')}`)
+      }
+
+      const unexpected = (EXPECTS_ABSENT[label] ?? []).filter((needle) => html.includes(needle))
+      if (unexpected.length) {
+        throw new Error(
+          `rendered something that should not be there: ${unexpected
+            .map((n) => JSON.stringify(n))
+            .join(', ')}`,
+        )
       }
 
       app.unmount()

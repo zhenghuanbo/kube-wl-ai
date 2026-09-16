@@ -30,6 +30,7 @@ from app.models.enums import (
     StorageKind,
     StorageStatus,
     TaskStatus,
+    UsageKind,
     UserSource,
     WorkloadEventType,
     WorkloadKind,
@@ -56,6 +57,7 @@ from app.models.ssh_key import SshKey
 from app.models.storage import InstanceStorage, Storage
 from app.models.task import Task
 from app.models.token import ApiToken, RefreshToken
+from app.models.usage import UsageDaily
 from app.models.user import User
 from app.models.workload_event import WorkloadEvent
 from app.models.workspace import Workspace, WorkspaceMember, WorkspaceResourceGrant
@@ -105,6 +107,8 @@ __all__ = [
     "StorageStatus",
     "Task",
     "TaskStatus",
+    "UsageDaily",
+    "UsageKind",
     "User",
     "UserGroupLink",
     "UserRole",

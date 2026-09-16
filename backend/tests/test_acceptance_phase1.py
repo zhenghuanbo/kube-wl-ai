@@ -476,6 +476,92 @@ async def test_group_admin_role_can_be_scoped_to_a_group(client: AsyncClient, wo
     assert scoped and scoped[0]["groupId"] == world.lab_b.id
 
 
+async def test_creating_a_group_admin_scopes_the_role_to_their_groups(
+    client: AsyncClient, world: World
+) -> None:
+    """Creating the user and granting the role must agree about the group.
+
+    They did not: ``POST /users`` wrote every role assignment global-scoped with
+    no group, so a group administrator created the normal way ended up with all
+    45 group-admin *permissions* and a data scope of ``self``. Every list they
+    opened came back empty — members, workspaces, quotas, usage — and nothing in
+    the response said why. The role exists to administer a lab; administering
+    nothing is not a narrower version of it, it is a different thing.
+
+    Asserted through ``/auth/permissions`` rather than the user record, because
+    the scope is what actually decides which rows they can read.
+    """
+    await act_as(client, "root")
+
+    created = await client.post(
+        "/api/v1/users",
+        json={
+            "username": "new-boss",
+            "password": PASSWORD,
+            "fullName": "新组管理员",
+            "roleCodes": ["group_admin"],
+            "groupIds": [world.lab_b.id],
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    scoped = [
+        assignment
+        for assignment in created.json()["roleAssignments"]
+        if assignment["scope"] == "group"
+    ]
+    assert scoped, created.text
+    assert scoped[0]["groupId"] == world.lab_b.id
+
+    await act_as(client, "new-boss")
+    permissions = (await client.get("/api/v1/auth/permissions")).json()
+
+    assert permissions["scope"]["kind"] == "group"
+    assert permissions["scope"]["groupIds"] == [world.lab_b.id]
+    assert "usage:read_group" in permissions["permissions"]
+
+
+async def test_a_group_admin_created_without_a_group_is_refused(
+    client: AsyncClient, world: World
+) -> None:
+    """A group administrator of nothing is a mistake, not a valid state."""
+    await act_as(client, "root")
+
+    response = await client.post(
+        "/api/v1/users",
+        json={
+            "username": "boss-of-none",
+            "password": PASSWORD,
+            "roleCodes": ["group_admin"],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "group_admin_requires_group"
+
+
+async def test_a_global_admin_is_never_group_scoped(client: AsyncClient, world: World) -> None:
+    """The mirror of the same bug: adding a group must not narrow a global admin."""
+    await act_as(client, "root")
+
+    created = await client.post(
+        "/api/v1/users",
+        json={
+            "username": "root2",
+            "password": PASSWORD,
+            "roleCodes": ["global_admin"],
+            "groupIds": [world.lab_a.id],
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert all(assignment["scope"] == "global" for assignment in created.json()["roleAssignments"])
+
+    await act_as(client, "root2")
+    permissions = (await client.get("/api/v1/auth/permissions")).json()
+    assert permissions["scope"]["kind"] == "all"
+    assert permissions["scope"]["groupIds"] == []
+
+
 async def test_group_scoped_role_requires_a_group(client: AsyncClient, world: World) -> None:
     await act_as(client, "root")
 

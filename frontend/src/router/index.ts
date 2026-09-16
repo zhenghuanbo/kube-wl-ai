@@ -81,8 +81,8 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'usage',
         name: 'usage',
-        component: () => import('@/views/PlaceholderView.vue'),
-        meta: { title: '用量中心', phase: 'Phase 6' },
+        component: () => import('@/views/UsageView.vue'),
+        meta: { title: '用量中心' },
       },
       {
         path: 'monitor',

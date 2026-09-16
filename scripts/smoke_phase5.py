@@ -16,9 +16,8 @@ from __future__ import annotations
 
 import json
 import os
-import sys
-import urllib.error
 import time
+import urllib.error
 import urllib.request
 
 BASE = os.environ.get("SMOKE_BASE", "http://127.0.0.1:8000/api/v1")
@@ -34,6 +33,8 @@ RUN = os.environ.get("SMOKE_RUN", "") or str(int(time.time()))
 
 def sname(base: str) -> str:
     return f"{base}-{RUN}"
+
+
 PASSWORD = "smoke-storage-password-123"
 
 passed = 0
@@ -84,6 +85,22 @@ def first_row(page: object) -> object:
         return page["items"][0] if page["items"] else None
     if isinstance(page, list):
         return page[0] if page else None
+
+
+def find_by_name(page: object, name: str) -> dict | None:
+    """The row whose ``name`` is exactly ``name``, or ``None``.
+
+    Looking a fixture back up with ``first_row`` is how this script once ran
+    against a CPU-only spec while its checks claimed to be testing storage:
+    when the server-side filter silently stopped applying, "the first row" became
+    "an unrelated object", and nothing failed.
+    """
+    rows = page.get("items", []) if isinstance(page, dict) else page
+    if not isinstance(rows, list):
+        return None
+    for row in rows:
+        if isinstance(row, dict) and row.get("name") == name:
+            return row
     return None
 
 
@@ -143,8 +160,9 @@ def main() -> int:
         body={"name": f"p5-lab-{SUFFIX}", "displayName": "P5 实验室", "kind": "lab"},
     )
     if status == 409:
-        _, page = call("GET", f"/groups?search=p5-lab-{SUFFIX}", token=admin)
-        lab = first_row(page)
+        lab = find_by_name(
+            call("GET", f"/groups?search=p5-lab-{SUFFIX}", token=admin)[1], f"p5-lab-{SUFFIX}"
+        )
         status = 200
     check("建用户组", status in (200, 201), str(lab))
     if not isinstance(lab, dict):
@@ -158,20 +176,23 @@ def main() -> int:
         body={"name": f"p5-pool-{SUFFIX}", "displayName": "P5 池", "kind": "public"},
     )
     if status == 409:
-        _, page = call("GET", f"/resource-groups?search=p5-pool-{SUFFIX}", token=admin)
-        pool = first_row(page)
+        pool = find_by_name(
+            call("GET", f"/resource-groups?search=p5-pool-{SUFFIX}", token=admin)[1],
+            f"p5-pool-{SUFFIX}",
+        )
         status = 200
     check("建资源组", status in (200, 201), str(pool))
     if not isinstance(pool, dict):
         return 1
     pool_id = int(pool["id"])
 
+    spec_name = f"p5-spec-{SUFFIX}"
     status, spec = call(
         "POST",
         "/resource-specs",
         token=admin,
         body={
-            "name": f"p5-spec-{SUFFIX}",
+            "name": spec_name,
             "displayName": "P5 规格",
             "cpuMilli": 1000,
             "memoryMb": 1024,
@@ -180,8 +201,9 @@ def main() -> int:
         },
     )
     if status == 409:
-        _, page = call("GET", f"/resource-specs?search=p5-spec-{SUFFIX}", token=admin)
-        spec = first_row(page)
+        spec = find_by_name(
+            call("GET", f"/resource-specs?search={spec_name}", token=admin)[1], spec_name
+        )
         status = 200
     check("建资源规格", status in (200, 201), str(spec))
     if not isinstance(spec, dict):
@@ -200,8 +222,9 @@ def main() -> int:
         },
     )
     if status == 409:
-        _, page = call("GET", f"/workspaces?search=p5-ws-{SUFFIX}", token=admin)
-        workspace = first_row(page)
+        workspace = find_by_name(
+            call("GET", f"/workspaces?search=p5-ws-{SUFFIX}", token=admin)[1], f"p5-ws-{SUFFIX}"
+        )
         status = 200
     check("建工作空间并授权资源组", status in (200, 201), str(workspace))
     if not isinstance(workspace, dict):
@@ -352,9 +375,7 @@ def main() -> int:
         f"{status} {body}",
     )
 
-    status, body = call(
-        "PATCH", f"/storages/{dataset_id}", token=admin, body={"isReadOnly": False}
-    )
+    status, body = call("PATCH", f"/storages/{dataset_id}", token=admin, body={"isReadOnly": False})
     check(
         "数据集不能改为可写",
         status == 400 and error_code(body) == "dataset_always_read_only",
@@ -370,8 +391,7 @@ def main() -> int:
     status, body = call("GET", "/storages", token=peer)
     check(
         "同事的列表中不含他人个人存储",
-        status == 200
-        and all(row["id"] != storage_id for row in body["items"]),  # type: ignore[index]
+        status == 200 and all(row["id"] != storage_id for row in body["items"]),  # type: ignore[index]
         str(status),
     )
 
@@ -647,9 +667,7 @@ def main() -> int:
     )
     check(
         "可以修改自己的镜像条目",
-        status == 200
-        and isinstance(body, dict)
-        and body.get("displayName") == "冒烟镜像",
+        status == 200 and isinstance(body, dict) and body.get("displayName") == "冒烟镜像",
         f"{status} {body}",
     )
 

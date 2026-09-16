@@ -341,6 +341,7 @@ async def list_resource_specs(
     *,
     gpu_only: bool = False,
     is_active: bool | None = None,
+    search: str | None = None,
 ) -> list[ResourceSpec]:
     stmt = select(ResourceSpec).order_by(ResourceSpec.cpu_milli, ResourceSpec.gpu_count)
     stmt = policy.scope_filter(stmt, ResourceSpec, actor)
@@ -348,6 +349,17 @@ async def list_resource_specs(
         stmt = stmt.where(ResourceSpec.gpu_count > 0)
     if is_active is not None:
         stmt = stmt.where(ResourceSpec.is_active == is_active)
+    if search:
+        # Matching `list_resource_groups` deliberately: this endpoint used to be
+        # the one list in the API that ignored `search`, and an unrecognised
+        # query parameter is dropped rather than rejected. The failure mode is a
+        # caller confidently reading the first row of an unfiltered list — which
+        # is exactly what two smoke scripts did, silently testing a CPU-only spec
+        # while believing they had selected the single-A100 one.
+        pattern = f"%{search}%"
+        stmt = stmt.where(
+            or_(ResourceSpec.name.ilike(pattern), ResourceSpec.display_name.ilike(pattern))
+        )
     return list((await session.scalars(stmt)).all())
 
 

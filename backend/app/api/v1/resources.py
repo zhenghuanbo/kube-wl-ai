@@ -188,9 +188,10 @@ async def list_resource_specs(
     _: Annotated[PermissionCheck, CanReadSpec],
     gpu_only: Annotated[bool, Query(alias="gpuOnly")] = False,
     is_active: Annotated[bool | None, Query(alias="isActive")] = None,
+    search: Annotated[str | None, Query(max_length=150)] = None,
 ) -> list[ResourceSpecRead]:
     specs = await resource_service.list_resource_specs(
-        session, actor, gpu_only=gpu_only, is_active=is_active
+        session, actor, gpu_only=gpu_only, is_active=is_active, search=search
     )
     return [resource_service.spec_to_read(spec) for spec in specs]
 

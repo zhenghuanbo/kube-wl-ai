@@ -34,7 +34,7 @@ celery_app.conf.update(
 # Importing the task modules registers them with this app. Without this the
 # worker starts with an empty registry and every scheduled message is rejected
 # as unknown — the failure looks like "beat is running but nothing happens".
-from app.workers.tasks import reconcile  # noqa: E402,F401  (registration import)
+from app.workers.tasks import reconcile, usage  # noqa: E402,F401  (registration imports)
 
 #: Every 30 seconds. Sweeping is a handful of reads per live workload, so the
 #: cost is dominated by the number of running things, not by the interval —
@@ -43,5 +43,12 @@ celery_app.conf.beat_schedule = {
     "reconcile-workloads": {
         "task": "app.workers.tasks.reconcile.reconcile_workloads",
         "schedule": 30.0,
+    },
+    # Every 20 minutes. The rollup window is three days and the work is a few
+    # seconds, so this is cheap; a daily run would leave today's numbers — the
+    # ones somebody is actually watching — hours stale.
+    "rollup-usage": {
+        "task": "app.workers.tasks.usage.rollup_usage",
+        "schedule": 1200.0,
     },
 }

@@ -60,6 +60,7 @@ ACTION_OVERRIDES: dict[tuple[str, str], str] = {
     ("POST", "groups/{}/members"): "group:add_member",
     ("DELETE", "groups/{}/members/{}"): "group:remove_member",
     ("POST", "groups/sync"): "group:sync_directory",
+    ("POST", "usage/rollup"): "usage:rollup",
 }
 
 #: URL segments are plural, the domain vocabulary is singular. Success paths are

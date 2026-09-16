@@ -110,6 +110,7 @@ PERMISSIONS: tuple[PermissionSpec, ...] = (
     PermissionSpec("usage:read_group", "usage", "查看本组用量"),
     PermissionSpec("usage:read_all", "usage", "查看全部用量"),
     PermissionSpec("usage:export", "usage", "导出用量数据"),
+    PermissionSpec("usage:manage", "usage", "重算用量聚合"),
     # Monitoring --------------------------------------------------------------
     PermissionSpec("monitor:read_self", "monitor", "查看本人监控"),
     PermissionSpec("monitor:read_group", "monitor", "查看本组监控"),
@@ -146,6 +147,13 @@ ROLE_DEFINITIONS: dict[RoleCode, tuple[str, str]] = {
 # the one workspace they belong to; the data-scope layer narrows the result to
 # exactly that. `quota:read` joins it for normal users so they can see their own
 # consumption.
+#
+# `usage:export` is a group-admin capability rather than a user one. Reading a
+# figure on a page and walking away with a file of every colleague's daily
+# consumption are different acts, and the export is the one that ends up
+# attached to a grant application. `usage:manage` is global-admin only: it
+# rewrites rows for every tenant at once and there is no group-scoped version of
+# that act.
 _OBSERVER = frozenset(
     _codes(
         """
@@ -184,7 +192,7 @@ _GROUP_ADMIN = _USER | frozenset(
         storage:manage
         resource_group:read resource_spec:read runtime_limit:read
         node:read quota:read
-        usage:read_group monitor:read_group audit:read
+        usage:read_group usage:export monitor:read_group audit:read
         role:read permission:read
         """
     )

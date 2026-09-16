@@ -259,6 +259,19 @@ class WorkloadEventType(StrEnum):
     UPDATED = "updated"
 
 
+class UsageKind(StrEnum):
+    """Which kind of workload consumed the resources.
+
+    Deliberately narrower than :class:`WorkloadKind`. That enum also covers
+    workspaces, applications, storages and images, none of which hold a
+    accelerator for any length of time — letting those values into a usage row
+    would invite summing a column that can never legitimately be non-zero.
+    """
+
+    INSTANCE = "instance"
+    TASK = "task"
+
+
 class StorageKind(StrEnum):
     """What a volume is *for*. The kind decides who may own it and how it mounts.
 

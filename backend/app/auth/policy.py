@@ -37,6 +37,7 @@ from app.models.resource import (
     RuntimeLimit,
 )
 from app.models.token import ApiToken, RefreshToken
+from app.models.usage import UsageDaily
 from app.models.user import User
 from app.models.workspace import Workspace, WorkspaceMember, WorkspaceResourceGrant
 
@@ -250,6 +251,20 @@ SCOPE_RULES: dict[type[Any], ScopeRule] = {
     Instance: ScopeRule(
         owner="owner_user_id", workspace="workspace_id", member_workspace="workspace_id"
     ),
+    # --- Phase 6 ---------------------------------------------------------
+    # Usage is narrower than the workloads it describes, and that is the point:
+    # ``member_workspace`` is deliberately absent, so a colleague in the same
+    # workspace does *not* see your consumption. Being in the same namespace is
+    # reason enough to see each other's containers; it is not reason enough to
+    # see each other's share of the cluster.
+    #
+    # With no administrative scope the result is ``user_id = me``, which is the
+    # ``usage:read_self`` case; a group administrator adds entire groups, which
+    # is ``usage:read_group``; and ``scope.all_access`` short-circuits for
+    # ``usage:read_all``. The permission codes and the row filter agree because
+    # both are derived from the same scope, not because two lists were kept in
+    # step by hand.
+    UsageDaily: ScopeRule(owner="user_id", group="group_id", workspace="workspace_id"),
 }
 
 #: Column names consulted when a model has no explicit rule.

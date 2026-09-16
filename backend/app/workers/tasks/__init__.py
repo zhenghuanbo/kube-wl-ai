@@ -6,6 +6,6 @@ are registered; ``app.workers.celery_app`` then schedules them by name.
 
 from __future__ import annotations
 
-from app.workers.tasks import reconcile
+from app.workers.tasks import reconcile, usage
 
-__all__ = ["reconcile"]
+__all__ = ["reconcile", "usage"]

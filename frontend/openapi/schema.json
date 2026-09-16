@@ -2354,6 +2354,23 @@
               ],
               "title": "Isactive"
             }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 150
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Search"
+            }
           }
         ],
         "responses": {
@@ -6540,6 +6557,735 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/usage/summary": {
+      "get": {
+        "tags": [
+          "usage"
+        ],
+        "summary": "Usage Summary",
+        "description": "Headline totals for the window, plus the caller's own share of them.",
+        "operationId": "usage_summary_api_v1_usage_summary_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "dayFrom",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Dayfrom"
+            }
+          },
+          {
+            "name": "dayTo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Dayto"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Userid"
+            }
+          },
+          {
+            "name": "groupId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Groupid"
+            }
+          },
+          {
+            "name": "workspaceId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Workspaceid"
+            }
+          },
+          {
+            "name": "workloadKind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/UsageKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Workloadkind"
+            }
+          },
+          {
+            "name": "gpuType",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 32
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Gputype"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageSummaryRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/usage/series": {
+      "get": {
+        "tags": [
+          "usage"
+        ],
+        "summary": "Usage Series",
+        "description": "One point per day, with empty days present as zeros.",
+        "operationId": "usage_series_api_v1_usage_series_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "dayFrom",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Dayfrom"
+            }
+          },
+          {
+            "name": "dayTo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Dayto"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Userid"
+            }
+          },
+          {
+            "name": "groupId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Groupid"
+            }
+          },
+          {
+            "name": "workspaceId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Workspaceid"
+            }
+          },
+          {
+            "name": "workloadKind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/UsageKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Workloadkind"
+            }
+          },
+          {
+            "name": "gpuType",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 32
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Gputype"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageSeriesRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/usage/breakdown": {
+      "get": {
+        "tags": [
+          "usage"
+        ],
+        "summary": "Usage Breakdown",
+        "description": "Totals grouped by user, group, workspace, accelerator or workload kind.",
+        "operationId": "usage_breakdown_api_v1_usage_breakdown_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "by",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "user",
+              "title": "By"
+            }
+          },
+          {
+            "name": "dayFrom",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Dayfrom"
+            }
+          },
+          {
+            "name": "dayTo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Dayto"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Userid"
+            }
+          },
+          {
+            "name": "groupId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Groupid"
+            }
+          },
+          {
+            "name": "workspaceId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Workspaceid"
+            }
+          },
+          {
+            "name": "workloadKind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/UsageKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Workloadkind"
+            }
+          },
+          {
+            "name": "gpuType",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 32
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Gputype"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageBreakdownRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/usage/meta": {
+      "get": {
+        "tags": [
+          "usage"
+        ],
+        "summary": "Usage Meta",
+        "description": "Filter vocabulary, so the client's controls cannot drift from the API.",
+        "operationId": "usage_meta_api_v1_usage_meta_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageMetaRead"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/usage/export": {
+      "get": {
+        "tags": [
+          "usage"
+        ],
+        "summary": "Usage Export",
+        "description": "Download the window as CSV, one row per day and workload bucket.",
+        "operationId": "usage_export_api_v1_usage_export_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "dayFrom",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Dayfrom"
+            }
+          },
+          {
+            "name": "dayTo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Dayto"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Userid"
+            }
+          },
+          {
+            "name": "groupId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Groupid"
+            }
+          },
+          {
+            "name": "workspaceId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Workspaceid"
+            }
+          },
+          {
+            "name": "workloadKind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/UsageKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Workloadkind"
+            }
+          },
+          {
+            "name": "gpuType",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 32
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Gputype"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/usage/rollup": {
+      "post": {
+        "tags": [
+          "usage"
+        ],
+        "summary": "Usage Rollup",
+        "description": "Recompute the daily rollup for a window.\n\nAlways available to a global administrator, and run on a schedule besides.\nBoth ranges are optional; omitting them recomputes the default lookback,\nwhich is what an operator wants after noticing today's number looks wrong.",
+        "operationId": "usage_rollup_api_v1_usage_rollup_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/UsageRollupRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageRollupResultRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
       }
     }
   },
@@ -13058,6 +13804,410 @@
         ],
         "title": "TokenResponse",
         "description": "Issued on login and on every refresh.\n\n``expires_in`` is what the frontend schedules its silent refresh against."
+      },
+      "UsageBreakdownDimensionRead": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "key",
+          "label"
+        ],
+        "title": "UsageBreakdownDimensionRead"
+      },
+      "UsageBreakdownRead": {
+        "properties": {
+          "by": {
+            "type": "string",
+            "title": "By"
+          },
+          "dayFrom": {
+            "type": "string",
+            "format": "date",
+            "title": "Dayfrom"
+          },
+          "dayTo": {
+            "type": "string",
+            "format": "date",
+            "title": "Dayto"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/UsageBreakdownRowRead"
+            },
+            "type": "array",
+            "title": "Rows"
+          },
+          "truncated": {
+            "type": "boolean",
+            "title": "Truncated",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "by",
+          "dayFrom",
+          "dayTo",
+          "rows"
+        ],
+        "title": "UsageBreakdownRead"
+      },
+      "UsageBreakdownRowRead": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "entityId": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entityid"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/UsageTotalsRead"
+          },
+          "kinds": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Kinds"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "key",
+          "label",
+          "totals"
+        ],
+        "title": "UsageBreakdownRowRead",
+        "description": "One bucket of a grouped report."
+      },
+      "UsageDayRead": {
+        "properties": {
+          "day": {
+            "type": "string",
+            "format": "date",
+            "title": "Day"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/UsageTotalsRead"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "day",
+          "totals"
+        ],
+        "title": "UsageDayRead",
+        "description": "One day of the time series. Days with no usage are present, with zeros."
+      },
+      "UsageKind": {
+        "type": "string",
+        "enum": [
+          "instance",
+          "task"
+        ],
+        "title": "UsageKind",
+        "description": "Which kind of workload consumed the resources.\n\nDeliberately narrower than :class:`WorkloadKind`. That enum also covers\nworkspaces, applications, storages and images, none of which hold a\naccelerator for any length of time — letting those values into a usage row\nwould invite summing a column that can never legitimately be non-zero."
+      },
+      "UsageKindRead": {
+        "properties": {
+          "value": {
+            "$ref": "#/components/schemas/UsageKind"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "value",
+          "label"
+        ],
+        "title": "UsageKindRead",
+        "description": "The workload kinds a usage row can carry, for the filter control."
+      },
+      "UsageMetaRead": {
+        "properties": {
+          "dimensions": {
+            "items": {
+              "$ref": "#/components/schemas/UsageBreakdownDimensionRead"
+            },
+            "type": "array",
+            "title": "Dimensions"
+          },
+          "kinds": {
+            "items": {
+              "$ref": "#/components/schemas/UsageKindRead"
+            },
+            "type": "array",
+            "title": "Kinds"
+          },
+          "maxRangeDays": {
+            "type": "integer",
+            "title": "Maxrangedays"
+          },
+          "defaultRollupLookbackDays": {
+            "type": "integer",
+            "title": "Defaultrolluplookbackdays"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "dimensions",
+          "kinds",
+          "maxRangeDays",
+          "defaultRollupLookbackDays"
+        ],
+        "title": "UsageMetaRead",
+        "description": "What the client needs in order to build the filter controls.\n\nSent rather than hard-coded in the frontend so the two cannot drift: adding a\nbreakdown dimension should light up in the UI without a second commit."
+      },
+      "UsageRollupRequest": {
+        "properties": {
+          "dayFrom": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dayfrom"
+          },
+          "dayTo": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dayto"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "UsageRollupRequest"
+      },
+      "UsageRollupResultRead": {
+        "properties": {
+          "dayFrom": {
+            "type": "string",
+            "format": "date",
+            "title": "Dayfrom"
+          },
+          "dayTo": {
+            "type": "string",
+            "format": "date",
+            "title": "Dayto"
+          },
+          "rowsWritten": {
+            "type": "integer",
+            "title": "Rowswritten"
+          },
+          "instancesScanned": {
+            "type": "integer",
+            "title": "Instancesscanned"
+          },
+          "tasksScanned": {
+            "type": "integer",
+            "title": "Tasksscanned"
+          },
+          "runtimeSeconds": {
+            "type": "integer",
+            "title": "Runtimeseconds"
+          },
+          "gpuSeconds": {
+            "type": "integer",
+            "title": "Gpuseconds"
+          },
+          "outsideWindow": {
+            "type": "integer",
+            "title": "Outsidewindow"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "dayFrom",
+          "dayTo",
+          "rowsWritten",
+          "instancesScanned",
+          "tasksScanned",
+          "runtimeSeconds",
+          "gpuSeconds",
+          "outsideWindow"
+        ],
+        "title": "UsageRollupResultRead"
+      },
+      "UsageSeriesRead": {
+        "properties": {
+          "dayFrom": {
+            "type": "string",
+            "format": "date",
+            "title": "Dayfrom"
+          },
+          "dayTo": {
+            "type": "string",
+            "format": "date",
+            "title": "Dayto"
+          },
+          "points": {
+            "items": {
+              "$ref": "#/components/schemas/UsageDayRead"
+            },
+            "type": "array",
+            "title": "Points"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "dayFrom",
+          "dayTo",
+          "points"
+        ],
+        "title": "UsageSeriesRead"
+      },
+      "UsageSummaryRead": {
+        "properties": {
+          "dayFrom": {
+            "type": "string",
+            "format": "date",
+            "title": "Dayfrom"
+          },
+          "dayTo": {
+            "type": "string",
+            "format": "date",
+            "title": "Dayto"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/UsageTotalsRead"
+          },
+          "selfTotals": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageTotalsRead"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "covered": {
+            "type": "boolean",
+            "title": "Covered"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "dayFrom",
+          "dayTo",
+          "totals",
+          "covered"
+        ],
+        "title": "UsageSummaryRead",
+        "description": "What the usage centre shows above the charts."
+      },
+      "UsageTotalsRead": {
+        "properties": {
+          "runtimeSeconds": {
+            "type": "integer",
+            "title": "Runtimeseconds",
+            "description": "负载处于运行状态的总秒数（不含副本数）"
+          },
+          "gpuSeconds": {
+            "type": "integer",
+            "title": "Gpuseconds",
+            "description": "GPU 秒：Σ 卡数 × 秒数"
+          },
+          "cpuMilliSeconds": {
+            "type": "integer",
+            "title": "Cpumilliseconds",
+            "description": "毫核秒：除以 1000 得核秒"
+          },
+          "memoryMbSeconds": {
+            "type": "integer",
+            "title": "Memorymbseconds",
+            "description": "MB 秒：除以 1024 得 GB 秒"
+          },
+          "workloadCount": {
+            "type": "integer",
+            "title": "Workloadcount",
+            "description": "贡献用量的负载数量"
+          },
+          "gpuHours": {
+            "type": "number",
+            "title": "Gpuhours",
+            "description": "GPU 卡时，由 gpuSeconds 折算"
+          },
+          "cpuCoreHours": {
+            "type": "number",
+            "title": "Cpucorehours",
+            "description": "CPU 核时，由 cpuMilliSeconds 折算"
+          },
+          "memoryGbHours": {
+            "type": "number",
+            "title": "Memorygbhours",
+            "description": "内存 GB 时，由 memoryMbSeconds 折算"
+          },
+          "userCount": {
+            "type": "integer",
+            "title": "Usercount",
+            "default": 0
+          },
+          "workspaceCount": {
+            "type": "integer",
+            "title": "Workspacecount",
+            "default": 0
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "runtimeSeconds",
+          "gpuSeconds",
+          "cpuMilliSeconds",
+          "memoryMbSeconds",
+          "workloadCount",
+          "gpuHours",
+          "cpuCoreHours",
+          "memoryGbHours"
+        ],
+        "title": "UsageTotalsRead",
+        "description": "Aggregated consumption over some window or bucket."
       },
       "UserCreate": {
         "properties": {

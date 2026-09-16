@@ -23,7 +23,7 @@ from app.core.errors import (
     PermissionDeniedError,
 )
 from app.core.logging import get_logger
-from app.models.enums import RoleScope, UserSource
+from app.models.enums import GroupRole, RoleCode, RoleScope, UserSource
 from app.models.group import Group, UserGroupLink
 from app.models.rbac import Role, UserRole
 from app.models.user import User
@@ -153,6 +153,46 @@ async def ensure_roles_grantable(
     return roles
 
 
+#: Roles whose authority is defined *by* a group, and which are therefore
+#: meaningless — not merely narrow — when granted without one. ``group_admin``
+#: is the only such role today: ``user`` and ``observer`` are global identities
+#: whose data scope happens to be "self", and ``global_admin`` is the opposite
+#: extreme.
+GROUP_SCOPED_ROLES = frozenset({RoleCode.GROUP_ADMIN.value})
+
+
+def plan_role_assignments(
+    roles: Sequence[Role], group_ids: Sequence[int]
+) -> list[tuple[Role, RoleScope, int | None]]:
+    """Decide the scope of each role assignment: ``(role, scope, group_id)``.
+
+    A group-scoped role is written **once per group**. It used to be written once
+    with ``scope=global`` and no group at all, which produced the worst possible
+    outcome rather than an error: the account held every group-admin permission
+    while its data scope collapsed to ``self``, so every list it opened was empty
+    and nothing explained why. Permission without data reads as a broken product,
+    not as a misconfigured one.
+
+    Granting without a group is refused rather than quietly widened to global: a
+    group administrator of nothing is not a role, it is a typo, and silently
+    promoting it would hand out access far beyond what was asked for.
+    """
+    assignments: list[tuple[Role, RoleScope, int | None]] = []
+    for role in roles:
+        if role.code in GROUP_SCOPED_ROLES:
+            if not group_ids:
+                raise BadRequestError(
+                    f"角色 {role.code} 必须指定至少一个用户组",
+                    code="group_admin_requires_group",
+                    detail={"role": role.code},
+                )
+            for group_id in group_ids:
+                assignments.append((role, RoleScope.GROUP, group_id))
+        else:
+            assignments.append((role, RoleScope.GLOBAL, None))
+    return assignments
+
+
 # ---------------------------------------------------------------------------
 # Mutations
 # ---------------------------------------------------------------------------
@@ -187,9 +227,15 @@ async def create_user(session: AsyncSession, actor: User, payload: UserCreate) -
     session.add(user)
     await session.flush()
 
-    for role in roles:
-        session.add(UserRole(user_id=user.id, role_id=role.id, scope=RoleScope.GLOBAL))
+    assignments = plan_role_assignments(roles, [group.id for group in groups])
+    for role, scope, group_id in assignments:
+        session.add(UserRole(user_id=user.id, role_id=role.id, scope=scope, group_id=group_id))
 
+    group_admin_ids = {
+        group_id
+        for _, scope, group_id in assignments
+        if scope == RoleScope.GROUP and group_id is not None
+    }
     for index, group in enumerate(groups):
         session.add(
             UserGroupLink(
@@ -197,6 +243,12 @@ async def create_user(session: AsyncSession, actor: User, payload: UserCreate) -
                 group_id=group.id,
                 is_primary=index == 0,
                 is_directory_managed=False,
+                # Kept in step with the role assignment: `resolve_scope` honours
+                # either, and the members list shows this one. Two records of the
+                # same fact that can disagree are worse than one.
+                role_in_group=(
+                    GroupRole.GROUP_ADMIN if group.id in group_admin_ids else GroupRole.MEMBER
+                ),
             )
         )
 

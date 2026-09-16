@@ -201,6 +201,46 @@ async def test_pool_in_use_cannot_be_deleted(
     assert removed.json()["error"]["code"] == "resource_group_in_use"
 
 
+async def test_specs_can_be_searched_by_name_and_display_name(
+    admin_client: AsyncClient, world: World
+) -> None:
+    """
+    Every list endpoint takes `search`, and this one used to be the exception.
+
+    An unknown query parameter is dropped rather than rejected, so `?search=`
+    returned the whole list with status 200. Two smoke scripts read the first row
+    of that list believing they had selected their own spec, and quietly ran
+    against a CPU-only one — the failure surfaced several assertions later, as a
+    GPU-accounting identity that did not hold.
+    """
+    for name, display in (("searchable-a100", "可搜索 A100"), ("searchable-cpu", "可搜索 CPU")):
+        created = await admin_client.post(
+            "/api/v1/resource-specs",
+            json={
+                "name": name,
+                "displayName": display,
+                "cpuMilli": 1000,
+                "memoryMb": 1024,
+                "gpuType": "a100" if "a100" in name else "none",
+                "gpuCount": 1 if "a100" in name else 0,
+            },
+        )
+        assert created.status_code == 201, created.text
+
+    by_name = await admin_client.get("/api/v1/resource-specs", params={"search": "searchable-a100"})
+    assert by_name.status_code == 200
+    assert [item["name"] for item in by_name.json()] == ["searchable-a100"]
+
+    # The display name is searched too, which is what a person would type.
+    by_display = await admin_client.get("/api/v1/resource-specs", params={"search": "可搜索 CPU"})
+    assert [item["name"] for item in by_display.json()] == ["searchable-cpu"]
+
+    unmatched = await admin_client.get(
+        "/api/v1/resource-specs", params={"search": "nothing-matches-this"}
+    )
+    assert unmatched.json() == []
+
+
 async def test_gpu_spec_requires_a_model(admin_client: AsyncClient, world: World) -> None:
     response = await admin_client.post(
         "/api/v1/resource-specs",

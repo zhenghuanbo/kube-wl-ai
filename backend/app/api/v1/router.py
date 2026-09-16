@@ -18,6 +18,7 @@ from app.api.v1 import (
     resources,
     storages,
     tasks,
+    usage,
     users,
     workspaces,
 )
@@ -35,3 +36,4 @@ api_router.include_router(applications.router)
 api_router.include_router(tasks.router)
 api_router.include_router(images.router)
 api_router.include_router(storages.router)
+api_router.include_router(usage.router)

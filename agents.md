@@ -31,8 +31,12 @@
 | --- | --- | --- |
 | `observer` 观察用户 | 全局 | 只读，**零写权限**，不能提交任务 |
 | `user` 普通用户 | 全局 | 管理自己的实例/任务/镜像/存储 |
-| `group_admin` 组管理员 | 本组 | 普通用户权限 + 建工作空间、分配用户、查本组 |
-| `global_admin` 全局管理员 | 全局 | 超级管理员，含用户管理 / 用户组管理 |
+| `group_admin` 组管理员 | 本组 | 普通用户权限 + 建工作空间、分配用户、查本组用量并导出 |
+| `global_admin` 全局管理员 | 全局 | 超级管理员，含用户管理 / 用户组管理 / 用量重算 |
+
+权限条目数（`app/auth/permissions.py`）：observer **10** / user **32** / group_admin **45** /
+global_admin **69**（目录共 **69** 条）。**这个数字在每期验收里都要跟着更新**，
+它同时也是"某个角色是不是误拿了新权限"最快的信号。
 
 ---
 
@@ -206,6 +210,19 @@ workspace_id, group_id, owner_user_id, created_by)`
 
 `app_templates` · `applications` · `instances` · `tasks` · `workload_events` · `usage_daily`
 
+`usage_daily(day, user_id, group_id, workspace_id, workload_kind=instance|task, gpu_type,
+runtime_seconds, gpu_seconds, cpu_milli_seconds, memory_mb_seconds, workload_count)`
+
+> 唯一约束 `(day, user_id, group_id, workspace_id, workload_kind, gpu_type)`。
+> **参与唯一键的列全部 NOT NULL** —— `gpu_type` 用 `"none"` 而不是 NULL，因为
+> NULL 在 SQLite 和 PostgreSQL 里都互不相等，带 NULL 的唯一约束等于没有约束，
+> 重算就会变成翻倍累加而不是幂等替换。
+>
+> `group_id` 是**快照**：工作空间改挂到别的组、用户离开组，都不应该改写上一季度的用量。
+> `resource_group_id` 刻意**不在**表里 —— 它可以为空（资源组删除时 `SET NULL`），
+> 拿它做唯一键的一部分就要引入哨兵值；而"用了哪种卡"由 `gpu_type` 回答，
+> "用了哪个池"是可从授权关系推出来的，不值得为它破坏幂等性。
+
 ### 5.7 从旧模型继承时的修正
 
 旧库（`legacy/backend/app/model/`）存在以下缺陷，**新模型必须避免**：
@@ -250,6 +267,26 @@ get_current_user                          # 解析 JWT → User
    以便将来替换为 Casbin / OPA 时不改调用方。
 5. **前端权限只做 UX，不是安全边界**。绕过前端的请求必须同样被后端拒绝。
 
+### 用量中心的权限（三层的一个特例，不是例外）
+
+`usage:read_self` / `usage:read_group` / `usage:read_all` / `usage:export` / `usage:manage`
+看起来像"功能权限里编码了数据范围"，实际上仍然走同一套三层：权限码决定**能不能进这个接口**，
+`scope_filter` 决定**能看到哪些行**。两者一致是因为它们都从 `resolve_scope` 派生，
+不是因为维护了两份对应的清单。
+
+| 角色 | 用量权限 | 数据范围 |
+| --- | --- | --- |
+| observer / user | `usage:read_self` | 仅本人 |
+| group_admin | `+ usage:read_group`、`usage:export` | 本组 + 本人 |
+| global_admin | `+ usage:read_all`、`usage:manage` | 全部 |
+
+两个刻意的选择：
+
+1. **用量比它所描述的负载更窄。** `UsageDaily` 的 `ScopeRule` **不含 `member_workspace`**：
+   同处一个命名空间足以让你看到同事的容器，但不足以让你看到同事占用了多少张卡。
+2. **`usage:manage` 只给全局管理员。** 重算会一次性重写所有租户的行，
+   这件事没有"只管本组"的版本。
+
 ### 与 K8s RBAC 的区别
 
 | 层面 | 主体 | 作用 |
@@ -282,7 +319,10 @@ get_current_user                          # 解析 JWT → User
 
 - **统一分页信封**（`app/schemas/common.py`）：`{"items": [...], "meta": {"page","page_size","total","pages"}}`
 - 业务错误一律抛 `AppError` 子类，**不要直接返回 `JSONResponse` 或裸 `HTTPException`**（后者会丢掉信封）。
-- 列表接口的查询参数遵循 `page` / `page_size`（≤200）。
+- 列表接口的分页参数是 `page` / `pageSize`（≤200）。
+- **多词查询参数一律 camelCase**，由 `Query(alias=...)` 声明。snake_case 拼写
+  **不会报错，会被静默忽略** —— 请求返回 200 与一个不受筛选影响的结果集，
+  看起来像"没有数据"。这条在 Phase 3/5/6 各踩过一次，`usage` 冒烟里有一条专门盯它。
 - 变更 OpenAPI 后必须重新运行 `./scripts/gen-openapi.sh` 并提交 `frontend/openapi/schema.json`。
 
 ---
@@ -444,6 +484,7 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 | 一人一空间 | `workspace_members.user_id` **单列唯一**，数据库层兜底；迁移需显式 `moveFromExisting` |
 | 资源可见性 | 目录（资源组/规格/时长/节点）对全体登录用户可读，**授权**才是边界 |
 | API | `/workspaces`（含 `/mine`、`/reconcile`、成员、资源授权）、`/resource-groups`、`/resource-specs`、`/runtime-limits`、`/nodes`、`/quotas` |
+| 列表搜索 | 所有列表接口都接受 `search`（按 `name` / `display_name`）。`/resource-specs` 原先漏了它，Phase 6 补上，见下方"静默忽略的参数" |
 | 测试 | 新增 61 项（36 项 API 验收 + 25 项命名/数量解析单测），全量 **183 项通过** |
 | 前端 | 我的工作空间（配额进度、网络档位、可用资源池）、工作空间管理（建/停/删、成员、资源授权、重新下发）、资源与配额（资源池/规格/时长/节点四个页签） |
 
@@ -777,6 +818,134 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 - 冒烟脚本原先不可重复执行（存储名唯一、个人主目录每用户唯一、镜像 reference 全局唯一）。
   现已改用每次运行的随机后缀 + 冲突时复用既有条目；删除后仍被占用的 reference 需要
   带 `includeInactive=true` 才能查到，再 PATCH 复活。
+
+---
+
+### ✅ Phase 6 — 用量中心（已完成）
+
+**交付（后端）**
+
+| 交付物 | 位置 |
+| --- | --- |
+| 枚举 | `app/models/enums.py`（`UsageKind`，刻意比 `WorkloadKind` 窄） |
+| 数据模型 | `app/models/usage.py`（`UsageDaily`） |
+| 迁移 | `alembic/versions/3f0dbd1b4617_*.py`（head 共 **31** 张表，`downgrade base` 可往返） |
+| 服务 | `app/services/usage.py`（跨日切分、幂等重算、汇总/时序/分组/CSV） |
+| Schema | `app/schemas/usage.py` |
+| API | `app/api/v1/usage.py`（6 个端点：`summary`、`series`、`breakdown`、`meta`、`export`、`rollup`） |
+| 权限 | 新增 `usage:manage`；`usage:export` 下发给组管理员（组管理员 **45** 项，普通用户 **32** 项，全局管理员 **69** 项） |
+| 定时任务 | `app/workers/tasks/usage.py` + beat `rollup-usage`（每 20 分钟，回看 3 天） |
+| 审计 | 中间件 `ACTION_OVERRIDES` 增加 `usage:rollup`；`usage:export` 由处理函数显式记录 |
+| 验收测试 | `tests/test_acceptance_phase6.py`（**39** 项）、Phase 2 新增 1 项 |
+| 冒烟脚本 | `scripts/smoke_phase6.py`（**61** 项，可重复执行） |
+
+**交付（前端）**
+
+| 交付物 | 位置 |
+| --- | --- |
+| 类型 | `src/types/usage.ts`（含 `USAGE_RANGES`、`rangeStart`/`todayUtc`、`formatGpuHours`、`formatRuntime`） |
+| API 客户端 | `src/api/usage.ts`（6 个函数，含 `downloadUsageCsv`） |
+| 图表宿主 | `src/components/common/EChart.vue`（生命周期 / resize / 降级） |
+| 页面 | `src/views/UsageView.vue`（已接入 `/usage` 路由，不再是占位页） |
+| 契约校验 | `scripts/check-frontend-types.py` 覆盖接口由 **51** 增至 **60** |
+| 视图冒烟 | `scripts/smoke_frontend_views.mjs`（**12/12**，新增 `EXPECTS_ABSENT` 与 canvas 桩） |
+
+**验收证据**：`ruff check` + `ruff format --check` + `mypy app`（strict）全绿；
+后端全量 **386** 项测试通过；Phase 1–6 冒烟（30/33/49/61/65/61）无回归，Phase 5/6 冒烟连续两次全通过；
+`kubectl get ns,pvc -l wl-managed=true` 为空。
+前端 `vue-tsc --noEmit` 与 `vite build` 通过；契约校验 **60** 个接口吻合
+（植入错误反向确认退出码 1）；视图冒烟 **12/12**（`UsageView` 的图表在 canvas 桩下
+真的走完了 `setOption`，以「降级提示不出现」断言）。
+
+**关键设计决策**
+
+1. **计量的是「被占用」的时间，不是「在算」的时间。** 一个实例占着 A100 八小时，
+   无论内核是否满载，这八小时里别人都拿不到这张卡 —— 这才是集群主人能用来规划的
+   数字，也才是调度器能精确记账的数字。卡用得多满由 Prometheus 回答，
+   那是监控集成的问题，不是这里的问题。
+2. **按 UTC 日切分，而不是把整段算给开始那天。** 22:00 到 02:00 的作业是两天各两小时。
+   这是这张表按天存在的**全部理由**：把整段算给开始日，会让「昨天用了多少」
+   每天早上都是错的；而本地时区的切分会在一年里多算或漏算两个小时，
+   出现在某一个月报表里，然后被归咎于数据。
+3. **所有计量都是精确整数。** 浮点会累积误差，而一个"与分项之和差一点"的合计
+   足以摧毁整份报告的可信度。所以列是 `gpu_seconds` / `cpu_milli_seconds` /
+   `memory_mb_seconds`，展示单位（GPU·h、核·h、GB·h）在 API 层折算，从不入库。
+4. **重算是替换，不是累加。** 删除窗口内的行再整体重写，没有增量计数器可以漂移。
+   这既是「今天的数据每 20 分钟重算一次」的前提（今天还在长），也是「修好 bug 之后
+   可以回填整个季度」的前提。`test_recomputing_a_day_does_not_double_it` 盯着它。
+5. **统计口径是平台自己的记录，不是指标系统。** 调度器发出去的东西是已知的、
+   不需要监控栈在线、也没法争辩；指标是个更好的**测量**，却是个更差的**记录**。
+   所以 Prometheus 记账是**后续叠加**，不是替换（见 Phase 7）。
+6. **进行中的负载按「到现在为止」计算。** 于是今天的行是临时的、会增长 ——
+   这是预期行为，不是 bug；也因此 `covered` 要区分「没算过」和「算了但是零」。
+7. **只有全局管理员能触发重算**（`usage:manage`）。它一次性重写所有租户的行，
+   没有"只管本组"的版本。
+8. **导出是独立权限，且单独审计。** 在页面上看到一个数字，和带着一份包含每位同事
+   每日消耗的文件离开，是两件事；而且导出是这里唯一会离开浏览器的响应，
+   中间件只记录变更类请求，所以由处理函数显式写审计。
+9. **`group_id` 是快照。** 工作空间改挂用户组，不该把上一季度的用量一起搬走。
+10. **空白天数补零返回。** 图表若把空闲的一周直接连成直线，读起来是「用量平稳」，
+    与事实正好相反。补零在服务端做，任何消费者都不必记得这件事。
+11. **删除的用户仍出现在报表里。** 已经发生的消耗不该因为账号注销而消失；
+    标签退化为用户名或 `用户 #id`。
+12. **导出 CSV 带 UTF-8 BOM。** Windows 上的 Excel 会把没有 BOM 的 UTF-8 CSV
+    按系统代码页读，然后一份满是乱码的报表会被当成「坏了」退回来。
+
+**前端设计决策**
+
+13. **图表宿主是通用组件，不是用量页的一部分。** `EChart.vue` 负责 dispose、
+    resize 与 option 变更三件事 —— 一个只 `echarts.init` 的封装会在每次路由切换时
+    漏掉一个 canvas、一个 observer 和一条全局注册项，症状是"用得越久越卡"，
+    而不是一个能指认的报错。
+14. **Canvas 不可用时降级，而不是让页面崩掉。** 老浏览器、加固配置、无头渲染都可能
+    拿不到 2D 上下文；图表画不出来时给出说明，而页面上其他位置的数值不受影响 ——
+    这同时也是用量页能在 `happy-dom` 里被挂载的原因。
+15. **`covered` 为假时在页面顶部明说。** 「没算过」和「算了但是零」在空图上长得一模一样，
+    而一条横穿整月却从未被测量过的直线，会被读成「用量平稳」。
+16. **管理员的「其中你自己」单独成卡。** 「这总量里有多少是我」是管理员看组报表的
+    第一个问题，而一旦行被聚合过，这个答案在客户端就再也算不出来了 ——
+    所以由服务端在 `selfTotals` 里单独返回；普通用户的 scope 本身就是自己，
+    接口返回 `null`，页面不重复画一遍相同的数字。
+17. **时间范围用固定档位（7/30/90 天），不用日期选择器。** 日期选择器会邀请出
+    两年的区间，而那是会在演示现场把数据库压垮的查询；这三档又恰好是所有人真正会问的，
+    所以这个约束不花任何代价。
+18. **明细表显式声明 `:headers`。** 这是 Phase 5 那个 bug 的直接后果：
+    不传 `headers` 时 `v-data-table` 会按第一行的每个字段自动建列，
+    内部字段全露出来、而自定义插槽因为没有对应列而永不触发。
+
+**本期踩到的坑**
+
+- **`POST /users` 给组管理员的角色是全局范围、且不带用户组**（**Phase 1 起就存在的缺陷**）。
+  结果是这个账号拿到了全部 **45** 项组管理员权限，而数据范围塌缩成 `self` ——
+  成员、工作空间、配额、用量，每一个列表都是空的，响应里没有任何东西解释为什么。
+  「有权限、没数据」读起来像产品坏了，而不是像配置错了。
+  已在 `plan_role_assignments()` 修正：组范围角色按用户组**逐组**写入，
+  并同步 `UserGroupLink.role_in_group`；不指定用户组则直接 400
+  （`group_admin_requires_group`）—— 静默放宽成全局会给出远超请求范围的权限。
+  **这个 bug 是被 `scripts/smoke_phase6.py` 抓到的，pytest 全绿也没发现它**：
+  测试夹具一直用工厂函数（同时写了两种记录），只有走 HTTP 建号的路径才暴露。
+- **`happy-dom` 的 `getContext('2d')` 返回 `null`**，ECharts 因此在 `init` 时抛错，
+  整个用量页挂不起来。已给 `HTMLCanvasElement.prototype` 加一层极薄的 2D 桩：
+  它的目的是让 `setOption` **跑起来**（这能抓出畸形 option），
+  它对像素一无所知，也不假装知道。
+- **`str.replace` 在已被格式化过的文件上会静默失配**。改 `smoke_phase6.py` 时
+  两次替换没生效（一次是工作空间名没带上 run token，一次是响应头大小写），
+  两次的表现都是"脚本行为不对但看不出哪一步没改"。**批量替换后必须 grep 确认**。
+- **`dict(urllib` 的响应头是小写的**：`dict(response.headers)` 归一化成
+  `content-type`，用 `headers["Content-Type"]` 取是取不到的 —— 与产品无关，
+  但与"检查到底在测什么"有关。
+- **24/7 运行的任务会让冒烟脚本第二次失败**：配额是按**用户跨工作空间**统计的，
+  上一轮提交的任务因为没有 reconciler 一直处于 running。夹具名一律带上 run token
+  （用户、工作空间、任务），只有用户组保持不变 —— 组不消耗配额。
+- **`task.group_id` 是 NOT NULL**（`instances` 没有这一列，它的组在重算时才推导）。
+  直接构造 `Task` 的测试必须显式给出。
+- **`GET /resource-specs` 曾静默忽略 `search`**。它是唯一一个不支持搜索的列表接口，
+  而**未知查询参数是被丢弃而不是被拒绝的** —— 请求返回 200 和一份未经过滤的完整列表。
+  冒烟脚本因此读到 `items[0]`，以为自己拿到了刚建的「单卡 A100」规格，
+  实际拿到的是一个 CPU-only 规格，然后在下游的 GPU 计量等式上失败。
+  已补上 `search`（按 `name` / `display_name`，与 `list_resource_groups` 一致）并加测试；
+  冒烟脚本也不再信任「第一行」，改为按名字**精确匹配**（`find_by_name`）。
+  **教训：一个静默忽略的参数，比一个会报错的参数危险得多。**
 - **模板表达式里不能写带类型标注的箭头函数**。`@click:row="(_e: unknown, row: {item: T}) => f(row.item)"`
   会被模板编译器当成语法错误（`TS1005`），vue-tsc 报的位置还落在属性行上，看不出是表达式的问题。
   改成脚本里的处理函数即可；顺带用 `unknown` + 收窄来兼容 `v-data-table` 各版本传参形状的差异。
@@ -790,11 +959,10 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
   并把 `RegistryStatus → RegistryStatusRead` 一并补上。
   **新增请求体类型后一定要看这一行计数有没有涨** —— 它不涨就说明映射没生效。
 
-### ⏳ Phase 6–8（待开始）
+### ⏳ Phase 7–8（待开始）
 
 | 阶段 | 内容 | 周期 |
 | --- | --- | --- |
-| Phase 6 | 用量中心 | 1.5 周 |
 | Phase 7 | Grafana 监控集成 | 1.5 周 |
 | Phase 8 | API 开放、审计与上线 | 2 周 |
 
@@ -804,7 +972,12 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 
 - **OIDC** 仅预留扩展点：`OidcProvider.exchange_code()` 明确抛错说明。大学的统一身份是
   FreeIPA，接入 OIDC 需要校方先提供客户端注册；在拿到之前不写不可验证的代码。
-- `app/workers/celery_app.py` 的 `beat_schedule` 为空，任务随各阶段接入。
+- `app/workers/celery_app.py` 的 `beat_schedule` 已接入 `reconcile-workloads`（30 秒）
+  与 `rollup-usage`（20 分钟）。
+- **Prometheus 记账尚未接入**：Phase 6 的用量来自平台自身的记录（见设计决策 5）。
+  接入需要在 Phase 7 与 Grafana 一起做，并且**前置问题是既有的 Prometheus 是否带
+  `namespace` / `pod` 标签** —— 没有这两个标签就无法把指标归到租户上，
+  而这必须先确认再写代码（见 14.4）。
 - `frontend/nginx.conf` 尚未包含 `/grafana/` 反代，Phase 7 添加。
 - `deploy/helm/` 与 `deploy/grafana/dashboards/` 分别属于 Phase 8 与 Phase 7。
 - `/auth/login` 的**登录限流**尚未实现，Phase 8 与审计告警一并落地。
@@ -887,6 +1060,18 @@ Vuex `namespace: true` 拼写错误、`Admin/User.vue` 为 0 字节、
 - **`tsconfig.node.json`**：`composite: true` 与 `noEmit: true` 互斥，
   当前用 `emitDeclarationOnly` + `outDir` 指向 `node_modules/.tmp`。
 
+### 14.4 待外部确认（阻塞后续阶段，不是缺陷）
+
+这三项都不是代码问题，但**都必须先有答案再写代码**，否则写出来的是不可验证的实现：
+
+1. **既有的 Prometheus 是否带 `namespace` / `pod` 标签？** 没有这两个标签就无法把指标
+   归到租户上，"用量按 Prometheus 记账"就无从谈起。这是 Phase 7 的前置问题（详见 §10）。
+2. **集群里是否存在 RWX 的 StorageClass？** `_default_access_mode()` 对
+   `dataset` / `group_share` 返回 `ReadWriteMany`。若不存在，这两类卷会一直 Pending，
+   而症状是"数据集创建成功但不能挂载"，排查起来离原因很远。
+3. **LDAP 服务账号凭据**：目录同步需要一个可绑定账号；没有它，`group:sync` 只能跑假实现。
+4. **kubeconfig token 轮换**：`legacy/` 里泄漏的那个（见 14.1）必须在集群侧吊销。
+
 ---
 
 ## 15. 快速定位索引
@@ -934,7 +1119,12 @@ Vuex `namespace: true` 拼写错误、`Admin/User.vue` 为 0 字节、
 | 存储与镜像前端 | `frontend/src/views/StorageView.vue`、`frontend/src/views/ImagesView.vue` |
 | 镜像选择器（实例/任务/应用表单复用） | `frontend/src/components/image/ImagePicker.vue` |
 | 存储与镜像类型 / API | `frontend/src/types/storage.ts`、`frontend/src/types/image.ts`、`frontend/src/api/storages.ts`、`frontend/src/api/images.ts` |
-| **部署冒烟验收** | `scripts/smoke-env.sh` + `scripts/smoke_phase1.py` … `scripts/smoke_phase5.py` |
+| **用量聚合与查询（后端）** | `backend/app/services/usage.py`、`backend/app/api/v1/usage.py` |
+| 用量日汇总表 | `backend/app/models/usage.py`（`UsageDaily`） |
+| 用量定时重算 | `backend/app/workers/tasks/usage.py`、`backend/app/workers/celery_app.py` |
+| 用量中心前端 | `frontend/src/views/UsageView.vue`、`frontend/src/api/usage.ts`、`frontend/src/types/usage.ts` |
+| 图表宿主（ECharts 生命周期/resize/降级） | `frontend/src/components/common/EChart.vue` |
+| **部署冒烟验收** | `scripts/smoke-env.sh` + `scripts/smoke_phase1.py` … `scripts/smoke_phase6.py` |
 | **前端契约校验** | `scripts/check-frontend-types.py`（新请求体类型记得同步 `PAYLOAD_ALIASES`） |
-| **前端视图冒烟** | `scripts/smoke_frontend_views.mjs`（`happy-dom` 里真实挂载 + 内容断言） |
+| **前端视图冒烟** | `scripts/smoke_frontend_views.mjs`（`happy-dom` 里真实挂载 + 内容断言 + `EXPECTS_ABSENT` 反向断言） |
 | 旧实现参考 | `legacy/README.md` |

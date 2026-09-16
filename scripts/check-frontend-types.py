@@ -73,6 +73,15 @@ PAYLOAD_ALIASES = {
     "Quota": "QuotaRead",
     "WorkspaceMember": "WorkspaceMemberRead",
     "WorkspaceResourceGrant": "WorkspaceResourceGrantRead",
+    "UsageTotals": "UsageTotalsRead",
+    "UsageDay": "UsageDayRead",
+    "UsageSeries": "UsageSeriesRead",
+    "UsageBreakdownRow": "UsageBreakdownRowRead",
+    "UsageBreakdown": "UsageBreakdownRead",
+    "UsageBreakdownDimension": "UsageBreakdownDimensionRead",
+    "UsageSummary": "UsageSummaryRead",
+    "UsageRollupResult": "UsageRollupResultRead",
+    "UsageMeta": "UsageMetaRead",
 }
 # A field line: `name?: type` or `name: type`. Indented, so object literal types
 # nested inside a field never match at the start of their own line.

@@ -70,14 +70,18 @@ check("管理员登录", status, 200)
 # --- 组与用户 ---------------------------------------------------------------
 print("== 用户组与用户 ==")
 status, group = call(
-    "POST", "/groups", admin,
+    "POST",
+    "/groups",
+    admin,
     {"name": "lab-b", "displayName": "机器人实验室", "kind": "lab"},
 )
 check("创建用户组", status, 201)
 gid = group["id"]
 
 status, alice = call(
-    "POST", "/users", admin,
+    "POST",
+    "/users",
+    admin,
     {
         "username": "carol",
         "password": "carol-password-123",
@@ -104,7 +108,9 @@ check("重复加成员被拒", status, 409)
 # --- 角色授予 ---------------------------------------------------------------
 print("== 角色与数据范围 ==")
 status, updated = call(
-    "POST", f"/users/{alice_id}/roles", admin,
+    "POST",
+    f"/users/{alice_id}/roles",
+    admin,
     {"roleCode": "group_admin", "scope": "group", "groupId": gid},
 )
 check("授予组管理员", status, 200)
@@ -117,10 +123,10 @@ check(
 _, token, _ = login("carol", "carol-password-123")
 status, payload = call("GET", "/auth/permissions", token)
 # Counts move whenever a permission is added; `application:update` landed in
-# Phase 4 (42 -> 43) and Phase 5 (43 -> 44, via `storage:manage` and
-# `image:share`). The number is asserted so that an accidental widening of a role
-# is caught, not so that it stays fixed.
-check("组管理员权限数", len(payload["permissions"]), 44)
+# Phase 4 (42 -> 43), Phase 5 (43 -> 44, via `storage:manage` and `image:share`)
+# and Phase 6 (44 -> 45, via `usage:export`). The number is asserted so that an
+# accidental widening of a role is caught, not so that it stays fixed.
+check("组管理员权限数", len(payload["permissions"]), 45)
 check("数据范围为组", payload["scope"]["kind"], "group")
 check("可见组", payload["scope"]["groupIds"], [gid])
 check("非全局管理员", payload["isGlobalAdmin"], False)

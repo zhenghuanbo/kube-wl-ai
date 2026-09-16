@@ -1,0 +1,64 @@
+// ---------------------------------------------------------------------------
+// Design tokens ported verbatim from flatlogic/material-vue
+// (legacy/frontend/src/styles/_variables.scss).
+// These values are the authoritative visual identity of the platform.
+// ---------------------------------------------------------------------------
+
+// --- Colors -----------------------------------------------------------------
+$primary: #536dfe;
+$secondary: #ff5c93;
+$error: #ff4081;
+$warning: #ffc260;
+$success: #3cd4a0;
+$info: #9013fe;
+
+$body-bg: #f6f7ff;
+$hover-bg: #f3f5ff;
+$surface: #ffffff;
+
+$text-color: #6e6e6e;
+$text-grey: #b9b9b9;
+$title-grey: #4a4a4a;
+
+// --- Elevation --------------------------------------------------------------
+$card-shadow: 0 3px 11px 0 #e8eafc, 0 3px 3px -2px #b2b2b21a, 0 1px 8px 0 #9a9a9a1a;
+
+// --- Layout metrics ---------------------------------------------------------
+$content-padding: 24px;
+$header-height: 64px;
+$sidebar-width: 240px;
+$sidebar-mini-width: 96px;
+
+// --- Typography -------------------------------------------------------------
+$h1-font-size: 3rem;
+$h2-font-size: 2rem;
+$h3-font-size: 1.64rem;
+$h4-font-size: 1.5rem;
+$h5-font-size: 1.285rem;
+$h6-font-size: 1.142rem;
+$page-title-size: 2.4rem;
+
+// --- CSS custom properties (consumed by plain CSS / runtime code) -----------
+:root {
+  --wl-primary: #{$primary};
+  --wl-secondary: #{$secondary};
+  --wl-error: #{$error};
+  --wl-warning: #{$warning};
+  --wl-success: #{$success};
+  --wl-info: #{$info};
+
+  --wl-body-bg: #{$body-bg};
+  --wl-hover-bg: #{$hover-bg};
+  --wl-surface: #{$surface};
+
+  --wl-text-color: #{$text-color};
+  --wl-text-grey: #{$text-grey};
+  --wl-title-grey: #{$title-grey};
+
+  --wl-card-shadow: #{$card-shadow};
+
+  --wl-content-padding: #{$content-padding};
+  --wl-header-height: #{$header-height};
+  --wl-sidebar-width: #{$sidebar-width};
+  --wl-sidebar-mini-width: #{$sidebar-mini-width};
+}

@@ -1,0 +1,87 @@
+# ---------------------------------------------------------------------------
+# Secrets & credentials  (NEVER commit these)
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+kubeconfig
+kubeconfig.yaml
+kubeconfig.yml
+**/kubeconfig/*.yaml
+!**/kubeconfig/*.example.yaml
+backend/app/common/k8s/config/config.yaml
+backend/app/common/k8s/config/dev.yaml
+**/secrets.yaml
+**/secrets.yml
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+env/
+ENV/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.hypothesis/
+
+# ---------------------------------------------------------------------------
+# Node / frontend
+# ---------------------------------------------------------------------------
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+.eslintcache
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+frontend/docs/
+
+# ---------------------------------------------------------------------------
+# Database & runtime data
+# ---------------------------------------------------------------------------
+*.db
+*.sqlite
+*.sqlite3
+backend/app.db
+tmp/
+backups/
+
+# ---------------------------------------------------------------------------
+# Editors / OS
+# ---------------------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.sublime*
+.DS_Store
+Thumbs.db

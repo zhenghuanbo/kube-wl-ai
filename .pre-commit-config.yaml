@@ -1,0 +1,36 @@
+# Pre-commit hooks.  Install once with:  pre-commit install
+# Run against everything with:           pre-commit run --all-files
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=2048"]
+      - id: check-merge-conflict
+      - id: check-yaml
+        args: ["--allow-multiple-documents"]
+      - id: check-json
+      - id: check-toml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: detect-private-key
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.9.6
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+        files: ^backend/
+      - id: ruff-format
+        files: ^backend/
+
+  - repo: local
+    hooks:
+      - id: frontend-typecheck
+        name: frontend typecheck (vue-tsc)
+        entry: bash -c 'cd frontend && npm run typecheck'
+        language: system
+        files: ^frontend/src/.*\.(ts|vue)$
+        pass_filenames: false

@@ -1,0 +1,108 @@
+// ---------------------------------------------------------------------------
+// Global overrides that recreate the material-vue look on top of Vuetify 4.
+// Vuetify 4 themes via CSS variables, so we style using plain selectors rather
+// than the Vuetify 2 SASS variable-override mechanism.
+// ---------------------------------------------------------------------------
+@use './tokens' as *;
+
+// --- Application shell ------------------------------------------------------
+.v-application {
+  background: $body-bg !important;
+  color: $text-color;
+
+  // Page titles ("Dashboard", "容器实例", ...)
+  .page-title {
+    font-size: $page-title-size;
+    color: $text-grey;
+    font-weight: 400;
+    line-height: 1;
+    margin: 0;
+  }
+
+  // Cards: soft lavender shadow, 20px/400 card titles
+  .v-card {
+    box-shadow: $card-shadow !important;
+    border-radius: 12px;
+
+    .v-card-title {
+      color: $text-color;
+      font-size: 20px;
+      font-weight: 400;
+      line-height: 1.33;
+    }
+  }
+
+  // Headings
+  h1 { font-size: $h1-font-size; font-weight: 400; margin-bottom: 16px; line-height: 1; }
+  h2 { font-size: $h2-font-size; font-weight: 400; margin-bottom: 16px; line-height: 1; }
+  h3 { font-size: $h3-font-size; font-weight: 400; margin-bottom: 16px; line-height: 1; }
+  h4 { font-size: $h4-font-size; font-weight: 400; margin-bottom: 16px; line-height: 1; }
+  h5 { font-size: $h5-font-size; font-weight: 400; margin-bottom: 16px; }
+  h6 { font-size: $h6-font-size; font-weight: 400; margin-bottom: 16px; }
+
+  // Text helpers carried over from the template
+  .card-dark-grey { color: $title-grey !important; }
+  .card-light-grey { color: $text-color !important; }
+}
+
+// --- Navigation drawer ------------------------------------------------------
+.v-navigation-drawer {
+  .v-list-item {
+    transition: background-color 300ms ease;
+
+    &:hover,
+    &.v-list-item--active {
+      background-color: $hover-bg;
+
+      &::before {
+        opacity: 0;
+      }
+    }
+  }
+
+  // Slim custom scrollbar
+  .v-navigation-drawer__content {
+    &::-webkit-scrollbar {
+      width: 6px;
+    }
+    &::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    &::-webkit-scrollbar-thumb {
+      background-color: $text-grey;
+      border-radius: 36px;
+      border: none;
+    }
+  }
+
+  .wl-nav-heading {
+    color: $text-grey;
+    font-size: 0.75rem;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+}
+
+// --- Data tables ------------------------------------------------------------
+.v-data-table {
+  .v-data-table__th {
+    background-color: #fbfbfe;
+    color: $title-grey !important;
+    font-weight: 500 !important;
+  }
+
+  tbody tr:hover:not(.v-data-table__tr--expanded) {
+    background-color: $hover-bg;
+  }
+}
+
+// --- Utility ----------------------------------------------------------------
+.wl-content {
+  padding: $content-padding;
+}
+
+.wl-page {
+  max-width: 1600px;
+  margin: 0 auto;
+}

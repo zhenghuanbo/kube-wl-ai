@@ -395,11 +395,30 @@ CI（`.github/workflows/ci.yml`）对以上全部内容做门禁，并额外验�
 OpenAPI 正常；`ruff` + `mypy --strict` + `pytest` 全绿；前端 `vue-tsc` 无错误、生产构建成功、
 dev server 各模块编译通过、设计令牌已进入产物 CSS。
 
-### ⏳ Phase 1–8（待开始）
+### ✅ Phase 1 — 身份、权限与用户/组管理（已完成）
+
+| 交付 | 说明 |
+| --- | --- |
+| 认证 | `AuthProvider` 可插拔；LDAP/FreeIPA 主认证、OIDC 预留、本地应急账户；JIT 开户、目录组映射、刷新令牌轮换与重放检测 |
+| 权限 | 三层模型（RBAC → Data Scope → 对象/配额），统一收口在 `app/auth/policy.py` |
+| API | `/auth`、`/users`、`/groups`、`/roles`、`/permissions`，共 28 个端点 |
+| 审计 | 纯 ASGI 中间件记录全部写操作、403 与 `/auth/*` 的 401/429，服务层可写领域级明细 |
+| 运维 | `python -m app.cli bootstrap-admin` / `sync-rbac`：首个账户与目录同步 |
+| 前端 | 真实登录、内存级 access token + 静默刷新（并发去重）、统一错误提示、用户管理页、用户组管理页 |
+| 测试 | 122 项通过，含角色 × 端点 × 数据范围验收矩阵与越权用例 |
+
+**Phase 1 验收结果**：
+- 质量门禁：`ruff` + `mypy --strict`（58 文件）+ `pytest`（122 项）全绿；前端 `vue-tsc` 无错误、生产构建成功。
+- 真实进程联调：`scripts/smoke_phase1.py` 对 uvicorn 实例执行 30 项检查全部通过
+  （登录、组与用户 CRUD、组角色作用域、越权拦截、自我保护、账户停用、审计落库）。
+- 权限模型实测：组管理员解析出 42 项权限、数据范围 `group`；跨租户读取返回 404 而非 403；
+  组管理员建用户 / 建组 / 自行提权均被拒；所有者撤销自己的 `global_admin` 被拒。
+- 刷新令牌链路：`wl_refresh` 为 httpOnly、path `/api/v1/auth`；刷新后 `/auth/me` 正常；令牌仅存哈希。
+
+### ⏳ Phase 2–8（待开始）
 
 | 阶段 | 内容 | 周期 |
 | --- | --- | --- |
-| Phase 1 | 身份、权限（RBAC + Data Scope）与用户/组管理 | 2.5 周 |
 | Phase 2 | 工作空间、资源与配额 | 3 周 |
 | Phase 3 | 容器实例端到端（SSH / 终端 / IDE） | 3 周 |
 | Phase 4 | 应用程序与自定义任务 | 2 周 |
@@ -410,13 +429,14 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 
 > 每期必须可运行并**通过验收**后才进入下一期。
 
-### Phase 0 遗留（有意推迟，非遗漏）
+### 有意推迟（非遗漏）
 
-- `frontend/src/stores/auth.ts` 中的 `useDevPlaceholder()` 是**开发占位身份**，
-  仅当 `import.meta.env.DEV` 时生效，Phase 1 接入真实 `/auth/me` 后删除。
+- **OIDC** 仅预留扩展点：`OidcProvider.exchange_code()` 明确抛错说明。大学的统一身份是
+  FreeIPA，接入 OIDC 需要校方先提供客户端注册；在拿到之前不写不可验证的代码。
 - `app/workers/celery_app.py` 的 `beat_schedule` 为空，任务随各阶段接入。
 - `frontend/nginx.conf` 尚未包含 `/grafana/` 反代，Phase 7 添加。
 - `deploy/helm/` 与 `deploy/grafana/dashboards/` 分别属于 Phase 8 与 Phase 7。
+- `/auth/login` 的**登录限流**尚未实现，Phase 8 与审计告警一并落地。
 
 ---
 
@@ -438,13 +458,28 @@ Vuex `namespace: true` 拼写错误、`Admin/User.vue` 为 0 字节、
 
 ### 14.3 新版注意点
 
+- **异步下访问未加载的属性会炸**：SQLAlchemy 在 UPDATE 后会过期服务端生成的列，
+  关系默认惰性加载——在 async session 里再读就是 `MissingGreenlet`，而不是像同步代码那样悄悄补一次查询。
+  已通过 `Base.__mapper_args__ = {"eager_defaults": True}`（INSERT/UPDATE 用 RETURNING 取回）
+  与 `UserGroupLink.group` / `.user` 的 `lazy="joined"` 解决。
+  **新增模型时：任何渲染时会读到的关系都要显式指定加载策略，任何 `flush()` 之后会读的字段都要确认已加载。**
+- **失败的请求不会回滚审计**：刷新令牌重放要吊销整个令牌族，若与导致 401 的事务共用 session，
+  回滚会把吊销一起撤销，等于没吊销。`auth/service._revoke_family()` 因此在**独立事务**中提交。
+- **审计动作名是稳定接口**：`action` 表示*尝试的操作*，`status` 表示结果。
+  服务层成功路径写 `user:create` 这类域名动作，中间件兜底路径经 `canonical_resource()` 归一化，
+  所以同一种操作无论成败都只有一个 action 字符串。不要把结果编进动作名（`*_failed` 已废弃）。
 - **Vite 8 / Rolldown**：`manualChunks` 只接受函数。
 - **Starlette ≥1.0** 重命名了 422 常量；`app/core/errors.py` 用 `getattr` 兼容两种命名，
   新增错误类型时请复用该常量，不要直接引用 `status.HTTP_422_UNPROCESSABLE_ENTITY`。
 - **structlog**：`add_logger_name` 必须搭配 `structlog.stdlib.LoggerFactory()`；
   与 `PrintLoggerFactory` 组合会抛 `AttributeError`。
+- **`ldap3` 2.9.1 会发 `pyasn1` 弃用告警**：在 `filterwarnings = ["error"]` 下直接 fatal。
+  已通过固定 `pyasn1>=0.5.1,<0.6` 解决（不要改成抑制告警）。
 - **pytest `filterwarnings = ["error"]`**：任何 DeprecationWarning 都会让测试失败，
   引入新依赖时注意其告警。
+- **测试夹具改动数据后必须 `commit()`**：HTTP 层走独立连接，未提交的改动它看不到。
+- **`/tmp` 在沙箱中跨进程不可靠**：冒烟测试的数据库放仓库内 `.smoke/`（已 gitignore），
+  用 `scripts/smoke-env.sh` 一键准备。
 - **`tsconfig.node.json`**：`composite: true` 与 `noEmit: true` 互斥，
   当前用 `emitDeclarationOnly` + `outDir` 指向 `node_modules/.tmp`。
 
@@ -459,18 +494,28 @@ Vuex `namespace: true` 拼写错误、`Admin/User.vue` 为 0 字节、
 | 错误信封与异常类型 | `backend/app/core/errors.py` |
 | 日志 | `backend/app/core/logging.py` |
 | DB 引擎 / 会话依赖 | `backend/app/db/session.py` |
+| ORM 基类与加载策略 | `backend/app/db/base.py` |
 | 迁移 | `backend/alembic/env.py`、`./scripts/migrate.sh` |
-| **权限判定（Phase 1）** | `backend/app/auth/policy.py` |
-| 认证 Provider（Phase 1） | `backend/app/auth/providers/` |
+| **权限判定 / 数据范围** | `backend/app/auth/policy.py` |
+| 权限码与角色目录 | `backend/app/auth/permissions.py` |
+| 认证服务（开户 / 令牌轮换） | `backend/app/auth/service.py` |
+| 认证 Provider | `backend/app/auth/providers/` |
+| 审计写入 | `backend/app/core/audit.py`、`backend/app/middleware/audit.py` |
+| 运维命令（首个账户） | `backend/app/cli.py` |
+| 业务服务层 | `backend/app/services/` |
 | K8s 编排（Phase 2+） | `backend/app/k8s/` |
 | Celery | `backend/app/workers/celery_app.py` |
 | 前端主题 | `frontend/src/plugins/vuetify.ts` |
 | 设计令牌 | `frontend/src/styles/tokens.scss` |
 | 全局样式覆盖 | `frontend/src/styles/overrides.scss` |
+| **HTTP 客户端（令牌 / 刷新 / 错误）** | `frontend/src/api/client.ts` |
+| API 模块 | `frontend/src/api/` |
 | 侧栏 / 角色菜单 | `frontend/src/config/navigation.ts` |
 | 路由与守卫 | `frontend/src/router/index.ts` |
 | 权限组合式函数 | `frontend/src/composables/usePermissions.ts` |
 | 身份状态 | `frontend/src/stores/auth.ts` |
+| 全局消息 | `frontend/src/stores/notifications.ts`、`frontend/src/components/AppSnackbar.vue` |
 | 通用组件 | `frontend/src/components/common/` |
 | API 契约 | `frontend/openapi/schema.json`（由 `./scripts/gen-openapi.sh` 生成） |
+| **部署冒烟验收** | `scripts/smoke-env.sh` + `scripts/smoke_phase1.py` |
 | 旧实现参考 | `legacy/README.md` |

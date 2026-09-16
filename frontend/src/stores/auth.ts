@@ -1,35 +1,44 @@
 /**
- * Authentication / identity store.
+ * Authentication and authorisation state.
  *
- * NOTE (Phase 0): this is a scaffold. The real implementation — `/auth/me`,
- * silent refresh via the httpOnly refresh cookie, and logout — lands in
- * Phase 1 together with the FastAPI auth endpoints. Until then the store
- * exposes a development placeholder identity so the role-driven UI can be
- * exercised. The placeholder is never used in production builds.
+ * The backend is the only enforcement point (plan §5.6); everything here exists
+ * so the UI can avoid offering actions that would fail. `can()` is therefore a
+ * UX helper, never a security control.
  */
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
-import type { CurrentUser, PermissionCode, Role } from '@/types/auth'
+import {
+  fetchCurrentUser,
+  fetchPermissions,
+  login as loginRequest,
+  logout as logoutRequest,
+  refresh as refreshRequest,
+} from '@/api/auth'
+import { ApiError, setAccessToken } from '@/api/client'
+import type { CurrentUser, DataScope, PermissionCode, Role } from '@/types/auth'
 
-const DEV_PLACEHOLDER_USER: CurrentUser = {
-  id: 0,
-  username: 'dev',
-  fullName: '开发占位用户',
-  email: 'dev@kube-wl-ai.local',
-  roles: ['global_admin'],
-  isSuperuser: true,
-  workspace: null,
-}
+/**
+ * `unknown` until bootstrap finishes, so the router can wait instead of
+ * flashing the login screen at an already-authenticated user.
+ */
+export type AuthStatus = 'unknown' | 'authenticated' | 'anonymous'
 
 export const useAuthStore = defineStore('auth', () => {
   const user = ref<CurrentUser | null>(null)
-  /** Effective permission codes issued by `/auth/permissions` (Phase 1). */
   const permissions = ref<Set<PermissionCode>>(new Set())
-  const loading = ref(false)
+  const scopeKind = ref<DataScope>('self')
+  const scopeGroupIds = ref<number[]>([])
+  const globalAdmin = ref(false)
+  const status = ref<AuthStatus>('unknown')
+  const busy = ref(false)
 
   const roles = computed<Role[]>(() => user.value?.roles ?? [])
-  const isAuthenticated = computed(() => user.value !== null)
+  const isAuthenticated = computed(() => status.value === 'authenticated' && user.value !== null)
+  const isReady = computed(() => status.value !== 'unknown')
+  const primaryGroup = computed(
+    () => user.value?.groups.find((group) => group.isPrimary) ?? user.value?.groups[0] ?? null,
+  )
 
   function hasRole(role: Role): boolean {
     return roles.value.includes(role)
@@ -39,51 +48,114 @@ export const useAuthStore = defineStore('auth', () => {
     return candidates.some((role) => roles.value.includes(role))
   }
 
-  /**
-   * Permission check.
-   *
-   * Phase 0 has no backend yet, so an empty permission set means "not
-   * restricted" — Phase 1 switches this to strict evaluation against
-   * `permissions`, which remains the single source of truth shared with the
-   * backend (plan §5.6).
-   */
+  /** Strict check against the permission set issued by `/auth/permissions`. */
   function can(code: PermissionCode): boolean {
-    if (permissions.value.size === 0) return true
     return permissions.value.has(code)
   }
 
-  function setUser(next: CurrentUser | null): void {
-    user.value = next
+  function canAny(codes: readonly PermissionCode[]): boolean {
+    return codes.some((code) => permissions.value.has(code))
   }
 
-  function setPermissions(codes: Iterable<PermissionCode>): void {
-    permissions.value = new Set(codes)
+  function applyIdentity(nextUser: CurrentUser): void {
+    user.value = nextUser
+    status.value = 'authenticated'
+  }
+
+  function applyPermissions(payload: {
+    permissions: string[]
+    roles: Role[]
+    scope: { kind: DataScope; allAccess: boolean; groupIds: number[] }
+    isGlobalAdmin: boolean
+  }): void {
+    permissions.value = new Set(payload.permissions)
+    scopeKind.value = payload.scope.kind
+    scopeGroupIds.value = payload.scope.groupIds
+    globalAdmin.value = payload.isGlobalAdmin
+    if (user.value) {
+      user.value.roles = payload.roles
+    }
   }
 
   function clear(): void {
     user.value = null
     permissions.value = new Set()
+    scopeKind.value = 'self'
+    scopeGroupIds.value = []
+    globalAdmin.value = false
+    status.value = 'anonymous'
+    setAccessToken(null)
   }
 
-  /** Phase 0 only: install the development placeholder identity. */
-  function useDevPlaceholder(): void {
-    if (import.meta.env.DEV) {
-      user.value = DEV_PLACEHOLDER_USER
+  /** Re-read identity and permissions from the server. */
+  async function loadIdentity(): Promise<void> {
+    const [identity, permissionPayload] = await Promise.all([
+      fetchCurrentUser(),
+      fetchPermissions(),
+    ])
+    applyIdentity(identity)
+    applyPermissions(permissionPayload)
+  }
+
+  async function loginWithPassword(username: string, password: string): Promise<void> {
+    busy.value = true
+    try {
+      // The login response already carries the user; permissions still need a
+      // separate call because they depend on role→permission expansion.
+      const result = await loginRequest({ username, password })
+      applyIdentity(result.user)
+      applyPermissions(await fetchPermissions())
+    } finally {
+      busy.value = false
+    }
+  }
+
+  /**
+   * Restore a session on page load.
+   *
+   * The access token is memory-only, so a reload always starts empty; the
+   * httpOnly refresh cookie is what makes the session survive. A failure here
+   * is the normal "not logged in" case, not an error worth reporting.
+   */
+  async function bootstrap(): Promise<void> {
+    if (status.value !== 'unknown') return
+    try {
+      await refreshRequest()
+      await loadIdentity()
+    } catch (error) {
+      if (!(error instanceof ApiError)) throw error
+      clear()
+    }
+  }
+
+  async function logout(): Promise<void> {
+    try {
+      await logoutRequest()
+    } finally {
+      clear()
     }
   }
 
   return {
     user,
     permissions,
-    loading,
+    scopeKind,
+    scopeGroupIds,
+    globalAdmin,
+    status,
+    busy,
     roles,
     isAuthenticated,
+    isReady,
+    primaryGroup,
     hasRole,
     hasAnyRole,
     can,
-    setUser,
-    setPermissions,
+    canAny,
+    loadIdentity,
+    loginWithPassword,
+    bootstrap,
+    logout,
     clear,
-    useDevPlaceholder,
   }
 })

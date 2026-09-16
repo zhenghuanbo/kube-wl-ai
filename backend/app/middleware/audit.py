@@ -62,6 +62,26 @@ ACTION_OVERRIDES: dict[tuple[str, str], str] = {
     ("POST", "groups/sync"): "group:sync_directory",
 }
 
+#: URL segments are plural, the domain vocabulary is singular. Success paths are
+#: audited by the service layer with names like ``user:create``; canonicalising
+#: here makes the middleware's fallback for failures use the same vocabulary, so
+#: one operation is always one action string regardless of its outcome. The
+#: outcome itself lives in :attr:`AuditLog.status`.
+RESOURCE_ALIASES: dict[str, str] = {
+    "users": "user",
+    "groups": "group",
+    "roles": "role",
+    "permissions": "permission",
+}
+
+
+def canonical_resource(resource: str | None) -> str:
+    """Map a URL segment onto the domain noun used in audit actions."""
+    if not resource:
+        return "api"
+    return RESOURCE_ALIASES.get(resource, resource)
+
+
 #: Query parameters that must never be written to the audit trail.
 _SENSITIVE_QUERY_KEYS = frozenset({"token", "password", "secret", "refresh_token", "code"})
 
@@ -165,13 +185,11 @@ class AuditMiddleware:
         if override is not None:
             action = override
         elif status_code == 403:
+            # A permission denial is not an attempted operation on a resource —
+            # it is the only case where the caller never got that far.
             action = "access:denied"
-        elif status_code >= 500:
-            action = f"{resource or 'api'}:error"
-        elif status_code >= 400:
-            action = f"{resource or 'api'}:{verb}_failed"
         else:
-            action = f"{resource or 'api'}:{verb}"
+            action = f"{canonical_resource(resource)}:{verb}"
 
         if status_code in REJECTED_STATUS:
             audit_status = "denied"

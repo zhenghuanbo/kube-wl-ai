@@ -86,3 +86,6 @@ backups/
 *.sublime*
 .DS_Store
 Thumbs.db
+
+# Local smoke-test scratch database
+.smoke/

@@ -10,6 +10,8 @@ declare module 'vue-router' {
     title?: string
     /** Roles allowed to open the route. Omitted means "any authenticated role". */
     roles?: readonly Role[]
+    /** Reachable without a session (login, 404). */
+    public?: boolean
     /** Owning delivery phase, shown by PlaceholderView for not-yet-built screens. */
     phase?: string
   }
@@ -85,14 +87,14 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'admin/users',
         name: 'admin-users',
-        component: () => import('@/views/PlaceholderView.vue'),
-        meta: { title: '用户管理', roles: ADMIN_ROLES, phase: 'Phase 1' },
+        component: () => import('@/views/admin/UsersView.vue'),
+        meta: { title: '用户管理', roles: ADMIN_ROLES },
       },
       {
         path: 'admin/groups',
         name: 'admin-groups',
-        component: () => import('@/views/PlaceholderView.vue'),
-        meta: { title: '用户组管理', roles: ADMIN_ROLES, phase: 'Phase 1' },
+        component: () => import('@/views/admin/GroupsView.vue'),
+        meta: { title: '用户组管理', roles: ADMIN_ROLES },
       },
       {
         path: 'admin/workspaces',
@@ -127,10 +129,16 @@ const routes: RouteRecordRaw[] = [
     ],
   },
   {
+    path: '/login',
+    name: 'login',
+    component: () => import('@/views/LoginView.vue'),
+    meta: { title: '登录', public: true },
+  },
+  {
     path: '/:pathMatch(.*)*',
     name: 'not-found',
     component: () => import('@/views/NotFoundView.vue'),
-    meta: { title: '页面不存在' },
+    meta: { title: '页面不存在', public: true },
   },
 ]
 
@@ -140,13 +148,25 @@ export const router = createRouter({
   scrollBehavior: () => ({ top: 0 }),
 })
 
-router.beforeEach((to) => {
+router.beforeEach(async (to) => {
   const auth = useAuthStore()
 
-  // Phase 0 scaffold: install the development identity so the role-driven
-  // navigation can be exercised. Phase 1 replaces this with a real session
-  // check against `/auth/me`.
-  if (!auth.isAuthenticated) auth.useDevPlaceholder()
+  // Restore the session once per page load before deciding anything. The access
+  // token lives in memory, so a reload always starts empty and the httpOnly
+  // refresh cookie is what makes the session survive.
+  if (!auth.isReady) {
+    await auth.bootstrap()
+  }
+
+  if (to.meta.public) {
+    // An authenticated user has no business on the login screen.
+    if (to.name === 'login' && auth.isAuthenticated) return { name: 'dashboard' }
+    return true
+  }
+
+  if (!auth.isAuthenticated) {
+    return { name: 'login', query: { redirect: to.fullPath } }
+  }
 
   const required = to.meta.roles
   if (required && !auth.hasAnyRole(required)) {

@@ -203,12 +203,12 @@ def decode_access_token(
             options={"require": ["exp", "iat", "sub", "jti"]},
         )
     except jwt.ExpiredSignatureError as exc:
-        raise UnauthorizedError("Token has expired", code="token_expired") from exc
+        raise UnauthorizedError("凭证已过期", code="token_expired") from exc
     except jwt.InvalidTokenError as exc:
-        raise UnauthorizedError("Invalid token", code="invalid_token") from exc
+        raise UnauthorizedError("凭证无效", code="invalid_token") from exc
 
     if payload.get("typ") != expected_type:
-        raise UnauthorizedError("Invalid token type", code="invalid_token_type")
+        raise UnauthorizedError("凭证类型不匹配", code="invalid_token_type")
 
     try:
         user_id = int(payload["sub"])

@@ -458,7 +458,7 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
    返回 502 `kubernetes_error` 并携带操作名。
 4. 默认列表未过滤 `is_active`：已删除的空间仍出现在列表中。现在默认只列 `is_active=true`。
 
-### 🔄 Phase 3 — 容器实例端到端（后端已完成，前端待做）
+### ✅ Phase 3 — 容器实例端到端（SSH / 终端 / IDE，已完成）
 
 | 交付 | 说明 |
 | --- | --- |
@@ -471,10 +471,18 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 | 配额 | 独立内核：实例数 / CPU / 内存 / 存储 / GPU(按型号) + 资源组公平上限（并发数、单实例卡数）。停止**不释放**配额——否则重启会因自己占用的容量而失败 |
 | 生命周期 | create / start / stop / delete / reconcile / logs（含 `previous=true` 看崩溃前日志）；`expire_overdue` 在服务端强制超时，UI 关掉也拦得住 |
 | API | `/instances`（9 个端点）+ `/ssh-keys`（3 个），OpenAPI 由 49 增至 **58** 个路径 |
-| 测试 | 新增 36 项，全量 **219 项通过** |
+| 前端 | 实例页（列表/筛选/创建，管理员多出工作空间与归属人列）、详情抽屉（概览/连接/终端）、xterm.js 终端组件、个人设置页（SSH 公钥自助管理）。终端按需加载，xterm 独立分包 |
+| 测试 | 新增 40 项，全量 **223 项通过** |
 
-**Phase 3 后端验收结果**：
-- 质量门禁：`ruff check` + `ruff format --check` + `mypy --strict`（77 文件）+ `pytest`（219 项）全绿。
+**Phase 3 验收结果**：
+- 质量门禁：`ruff check` + `ruff format --check` + `mypy --strict`（77 文件）+ `pytest`（223 项）全绿；
+  前端 `vue-tsc --noEmit` 无错误、`vite build` 成功（实例页 24.5 kB，xterm 独立 336 kB 分包按需加载）。
+- 真实进程联调：`scripts/smoke_phase3.py` 对 uvicorn 实例执行 **49 项检查全部通过**
+  （资源组授权、配额累加、SSH 公钥与指纹、实例 CRUD 与启停、重新下发、日志、IDE 票据、
+  跨工作空间隔离、未授权资源组拦截、删除后记录保留）。
+- 终端协议实测：对 `WS /ws/terminal/{id}` 做裸握手，未带 token 与非法 token 均先收到
+  `{"type":"error",...}` 文本帧、再以 **1008** 关闭，不会挂起也不会 500。
+- 前端联调：Vite dev server 下 5 个新模块均编译为 200，`/api` 代理登录 200。
 - 对象集实测（`FakeK8sGateway`）：一次创建产出 1 Deployment / 2 Service / 1 Ingress / 1 PVC；
   Jupyter 命令含 `--ServerApp.base_url=/x/{id}/`（否则经 Ingress 后所有静态资源 404）；
   SSH Service 端口名 `ssh`、IDE 为 `ide` 且类型分别为 `NodePort` / `ClusterIP`。
@@ -485,6 +493,7 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 - 失败可见性：集群拒绝 Deployment 时返回 502 `kubernetes_error`，且实例以 `error` 状态**持久化**，
   可在列表中看到 `statusMessage`，避免遗留无人认领的对象。
 - 迁移往返：`upgrade → downgrade base → upgrade` 通过，24 张表。
+- 集群零污染：全部测试与冒烟跑完后 `kubectl get ns -l wl-managed=true` 为空。
 
 **本轮修复的既有缺陷（含一次真实事故）**：
 
@@ -495,19 +504,34 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
      仅有 kubeconfig 一律回退 `FakeK8sGateway`。回归测试：`test_a_kubeconfig_alone_does_not_enable_a_real_cluster`。
    - `tests/conftest.py` 的 `gateway` fixture 改为 **autouse**：此前「忘记显式请求」的测试会走真实网关，
      失败是静默的、破坏是真实的，安全默认必须是自动的。
-2. 路由层直接调用 `get_settings()` 而非注入 `Depends(get_settings)`，会绕过依赖覆盖拿到进程级单例。
+2. **`Workspace.group` 是 `lazy="joined"`，新建对象永远没有这个属性** ——
+   查询加载时才会连表取回，而 `Workspace(...)` 刚构造出来时该属性是未加载状态。
+   于是「创建带资源授权的工作空间」在**真实进程**下必然 500 `MissingGreenlet`
+   （`to_summary` 渲染 `workspace.group`）。测试没发现，是因为测试路径里该对象恰好先被查询加载过。
+   修复：`apply_cluster_state` 已经把 Group 取出来了，顺手赋回 `workspace.group`。
+   经验：`lazy="joined"` 的关系**不能靠惰性加载兜底**，任何会读它的路径都必须显式准备好。
+3. **合法的 OpenSSH 公钥被当成非法** —— OpenSSH 会去掉 base64 的 `=` 填充，
+   `b64decode(validate=True)` 对未填充输入直接抛错，于是「能否登记」取决于密钥长度。
+   已按 `-len % 4` 补回填充，并对三种余数类各加一条回归测试。
+4. **停止实例后配额语义与文档自相矛盾** —— 代码里 `LIVE_STATUSES` 不含 `stopped`，
+   即停止即释放计算配额；而接口文档写的是「停止保留配额」。二者只能留一个：
+   保留配额才是对的 —— 命名空间的 `ResourceQuota` 只统计运行中的 Pod，
+   一旦释放，重启会被平台放行、然后卡在 Pending 且无从解释。现已把 `stopped` 计入占用，
+   并把测试改成「填满配额 → 停一个 → 仍拒绝第三个」以真正验证该语义。
+5. 路由层直接调用 `get_settings()` 而非注入 `Depends(get_settings)`，会绕过依赖覆盖拿到进程级单例。
    已全部改为 `AppSettings` 注入，否则测试与按请求配置都会被静默忽略。
-3. `WorkspaceUpdate` 缺 `status` 字段：管理员能建、能删，却无法**暂停**工作空间，
+6. `WorkspaceUpdate` 缺 `status` 字段：管理员能建、能删，却无法**暂停**工作空间，
    而暂停正是 `create_instance` 校验的状态。已补 `Literal["active","suspended"]`
    （其余状态由 provisioner 驱动，手写会让行与集群脱节）。
-4. `/reconcile` 对**已停止**实例会经 `apply_cluster_state` 将其翻回 `creating` —— 修复一个对象不该把它悄悄启动。
+7. `/reconcile` 对**已停止**实例会经 `apply_cluster_state` 将其翻回 `creating` —— 修复一个对象不该把它悄悄启动。
    现在按状态传入 `replicas`，停止态重建为 0 副本且状态保持 `stopped`。
+8. `decode_access_token` 的三条错误信息是英文（`Invalid token` 等），而全项目其余面向用户的文案都是中文。
+   由 WebSocket 拒绝路径暴露。已统一为中文。
 
 ### ⏳ Phase 4–8（待开始）
 
 | 阶段 | 内容 | 周期 |
 | --- | --- | --- |
-| Phase 3（前端） | 实例列表/详情页、xterm.js 终端组件、IDE 打开入口 | — |
 | Phase 4 | 应用程序与自定义任务 | 2 周 |
 | Phase 5 | 镜像与存储 | 2 周 |
 | Phase 6 | 用量中心 | 1.5 周 |
@@ -563,6 +587,10 @@ Vuex `namespace: true` 拼写错误、`Admin/User.vue` 为 0 字节、
   且是有意为之。
 - **异常类型决定对外状态码**：`K8sError` 曾继承 `RuntimeError`，导致集群故障对外是 500 traceback；
   现继承 `KubernetesError`（502 `kubernetes_error`）。**新增外部依赖的异常时，让它成为 `AppError` 的子类。**
+- **`lazy="joined"` 的关系不参与惰性加载**：它只在**查询加载**时连表取回，因此
+  `Model(...)` 刚构造出来的对象上该属性是未加载的，任何读它的地方都会 `MissingGreenlet`。
+  新增此类关系时，要么在服务层显式赋值（如 `workspace.group = group`），
+  要么在读取前用一次查询加载。**测试里「恰好先查询过」会掩盖这个问题，真实进程不会。**
 - **「存在 kubeconfig」≠「可以下发」**（真实事故）：本机 `~/.kube/config` 指向真实 `dev` 集群，
   早期 `get_gateway()` 见到 kubeconfig 就构造真实网关，于是**单元测试与冒烟脚本在真集群上建了 3 个命名空间**。
   现在只有 `K8S_IN_CLUSTER` / `K8S_ENABLED` 为真才连集群，且 `tests/conftest.py` 的 `gateway` fixture 是 autouse。

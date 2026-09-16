@@ -902,3 +902,33 @@ def test_a_kubeconfig_alone_does_not_enable_a_real_cluster(tmp_path, settings) -
         assert isinstance(get_gateway(guarded), FakeK8sGateway)
     finally:
         set_gateway(None)
+
+
+@pytest.mark.parametrize("remainder", [0, 1, 2])
+def test_unpadded_public_keys_are_accepted(remainder: int) -> None:
+    """OpenSSH strips base64 padding, so a key may arrive without it.
+
+    ``b64decode(validate=True)`` rejects unpadded input, which would refuse
+    perfectly valid keys depending only on their length. The fingerprint must
+    match ``ssh-keygen -lf`` for every remainder class.
+    """
+    import base64
+    import hashlib
+
+    from app.services.instances import ssh_fingerprint
+
+    blob = bytes(range(48 + remainder))
+    encoded = base64.b64encode(blob).decode().rstrip("=")
+
+    fingerprint = ssh_fingerprint(f"ssh-ed25519 {encoded} user@host")
+
+    expected = base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")
+    assert fingerprint == f"SHA256:{expected}"
+
+
+def test_a_public_key_without_a_blob_is_rejected() -> None:
+    from app.core.errors import BadRequestError
+    from app.services.instances import ssh_fingerprint
+
+    with pytest.raises(BadRequestError):
+        ssh_fingerprint("ssh-ed25519")

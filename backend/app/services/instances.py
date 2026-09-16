@@ -59,14 +59,20 @@ from app.services import resources as resource_service
 
 logger = get_logger(__name__)
 
-#: Statuses that still occupy quota. A stopped instance keeps its row, its
-#: volumes and its reservation, because restarting it must not fail for lack of
-#: capacity it already holds.
+#: Statuses that still occupy quota — which is every instance that has not been
+#: deleted, **including stopped ones**.
+#:
+#: Freeing compute quota on stop looks tidy but produces a worse failure: the
+#: namespace's own ResourceQuota still counts only running pods, so after a stop
+#: and a new create the restart would be accepted by the platform and then leave
+#: the pod Pending with no obvious cause. Reserving the capacity keeps restart
+#: guaranteed and keeps the platform's arithmetic identical to the cluster's.
 LIVE_STATUSES: tuple[InstanceStatus, ...] = (
     InstanceStatus.PENDING,
     InstanceStatus.CREATING,
     InstanceStatus.RUNNING,
     InstanceStatus.STOPPING,
+    InstanceStatus.STOPPED,
     InstanceStatus.ERROR,
 )
 
@@ -115,8 +121,14 @@ def ssh_fingerprint(public_key: str) -> str:
     parts = public_key.split()
     if len(parts) < 2:
         raise BadRequestError("公钥格式不正确", code="invalid_ssh_key")
+
+    # OpenSSH strips base64 padding from `authorized_keys`, and a key whose blob
+    # is not a multiple of three bytes therefore arrives unpadded. b64decode
+    # with validate=True rejects that, so the padding has to be restored before
+    # decoding — otherwise a perfectly valid key is refused as malformed.
+    encoded = parts[1] + "=" * (-len(parts[1]) % 4)
     try:
-        blob = base64.b64decode(parts[1], validate=True)
+        blob = base64.b64decode(encoded, validate=True)
     except (ValueError, TypeError) as exc:
         raise BadRequestError("公钥不是合法的 base64", code="invalid_ssh_key") from exc
 
@@ -286,8 +298,10 @@ async def _usage(session: AsyncSession, workspace_id: int) -> Usage:
     """Sum what the workspace currently reserves.
 
     Counted over live instances rather than running pods: a reservation exists
-    from the moment the row does, and releasing it only when the pod happens to
-    be up would let a workspace hold more than its quota during a restart.
+    from the moment the row does, and survives a stop. Releasing it only while
+    the pod happens to be up would let a workspace hold more than its quota
+    during a restart, and would make the platform's numbers disagree with the
+    namespace's ResourceQuota, which counts only running pods.
     """
     rows = (
         await session.execute(

@@ -39,8 +39,8 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'instances',
         name: 'instances',
-        component: () => import('@/views/PlaceholderView.vue'),
-        meta: { title: '开发实例', phase: 'Phase 3' },
+        component: () => import('@/views/InstancesView.vue'),
+        meta: { title: '开发实例' },
       },
       {
         path: 'applications',
@@ -129,8 +129,8 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'profile',
         name: 'profile',
-        component: () => import('@/views/PlaceholderView.vue'),
-        meta: { title: '个人设置', phase: 'Phase 1' },
+        component: () => import('@/views/ProfileView.vue'),
+        meta: { title: '个人设置' },
       },
     ],
   },

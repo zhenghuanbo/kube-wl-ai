@@ -320,6 +320,13 @@ async def apply_cluster_state(
     if group is None:
         raise BadRequestError("工作空间所属用户组不存在", code="unknown_group")
 
+    # `Workspace.group` is `lazy="joined"`: it is populated only when the row is
+    # read by a query, so a *newly constructed* workspace never has it. Assigning
+    # the group we just fetched both populates the relationship and saves the
+    # caller a second join. Without this, anything that renders the workspace
+    # (the create response, for one) raises MissingGreenlet instead of loading.
+    workspace.group = group
+
     namespace_spec = NamespaceSpec.for_workspace(
         workspace.k8s_namespace,
         group=group.name,

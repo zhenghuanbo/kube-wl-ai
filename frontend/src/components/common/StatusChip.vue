@@ -35,6 +35,21 @@ const STATUS_MAP: Record<string, StatusStyle> = {
   deleting: { label: '删除中', tone: 'warning', icon: 'mdi-delete-clock-outline' },
   error: { label: '异常', tone: 'error', icon: 'mdi-alert-outline' },
 
+  // Workspace lifecycle
+  provisioning: { label: '下发中', tone: 'info', icon: 'mdi-progress-clock' },
+  suspended: { label: '已停用', tone: 'neutral', icon: 'mdi-pause-circle-outline' },
+
+  // Node health
+  ready: { label: '就绪', tone: 'success', icon: 'mdi-check-circle-outline' },
+  not_ready: { label: '未就绪', tone: 'error', icon: 'mdi-alert-circle-outline' },
+  cordoned: { label: '已封锁', tone: 'warning', icon: 'mdi-cancel' },
+  unknown: { label: '未知', tone: 'neutral', icon: 'mdi-help-circle-outline' },
+
+  // Accelerator state
+  available: { label: '空闲', tone: 'success' },
+  allocated: { label: '已分配', tone: 'info' },
+  unhealthy: { label: '异常', tone: 'error' },
+
   // Entity states
   active: { label: '正常', tone: 'success' },
   inactive: { label: '停用', tone: 'neutral' },

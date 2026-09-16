@@ -1,0 +1,261 @@
+/**
+ * Workspace and compute-resource wire types.
+ *
+ * Mirrors `backend/app/schemas/workspace.py` and `resource.py`. Keys are exactly
+ * the camelCase the API emits — including `k8sNamespace`, which the backend
+ * generates deliberately (see `app/schemas/base.py`).
+ */
+
+export type WorkspaceStatus =
+  | 'pending'
+  | 'provisioning'
+  | 'active'
+  | 'suspended'
+  | 'deleting'
+  | 'error'
+
+export type WorkspaceRole = 'owner' | 'member'
+export type ResourceGroupKind = 'public' | 'private'
+export type NetworkType = 'isolated' | 'internal' | 'internet'
+export type NodeStatus = 'ready' | 'not_ready' | 'cordoned' | 'unknown'
+export type GpuDeviceStatus = 'available' | 'allocated' | 'unhealthy'
+export type QuotaScope = 'user' | 'group' | 'workspace'
+
+/** Known accelerator models. Kept in step with `GPU_MODELS` on the backend. */
+export const GPU_MODELS = [
+  'v100',
+  'a100',
+  'a800',
+  'h100',
+  'h800',
+  'a10',
+  'l40s',
+  'none',
+] as const
+export type GpuModel = (typeof GPU_MODELS)[number]
+
+export interface ResourceGroupSummary {
+  id: number
+  name: string
+  displayName: string
+  description: string | null
+  kind: ResourceGroupKind
+  groupId: number | null
+  groupName: string | null
+  networkType: NetworkType
+  maxRuntimeSeconds: number | null
+  storageClass: string | null
+  isActive: boolean
+  gpuModels: string[]
+  specCount: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ResourceGroupLimits {
+  id: number
+  maxConcurrentInstances: number
+  maxGpuPerInstance: number
+  maxGpuPerUser: number
+  maxCpuMilliPerUser: number
+  maxMemoryMbPerUser: number
+  maxStorageGbPerUser: number
+}
+
+export interface ResourceSpec {
+  id: number
+  name: string
+  displayName: string
+  cpuMilli: number
+  memoryMb: number
+  gpuType: string
+  gpuCount: number
+  isActive: boolean
+}
+
+export interface ResourceGroupDetail extends ResourceGroupSummary {
+  k8sLabelSelector: Record<string, string>
+  k8sTolerations: unknown[]
+  limits: ResourceGroupLimits | null
+  specs: ResourceSpec[]
+}
+
+export interface RuntimeLimit {
+  id: number
+  name: string
+  displayName: string
+  maxRuntimeSeconds: number | null
+  isDefault: boolean
+  isActive: boolean
+}
+
+export interface ComputeNode {
+  id: number
+  name: string
+  displayName: string
+  status: NodeStatus
+  schedulable: boolean
+  cpuTotalMilli: number
+  memoryTotalMb: number
+  cpuAllocatableMilli: number
+  memoryAllocatableMb: number
+  labels: Record<string, string>
+  isManaged: boolean
+  gpuCount: number
+  gpuModels: string[]
+  lastSeenAt: string | null
+}
+
+export interface GpuDevice {
+  id: number
+  index: number
+  model: string
+  memoryMb: number | null
+  status: GpuDeviceStatus
+  uuid: string | null
+}
+
+export interface NodeSyncResult {
+  nodesSeen: number
+  nodesCreated: number
+  nodesUpdated: number
+  devicesSeen: number
+}
+
+export interface Quota {
+  id: number
+  scopeType: QuotaScope
+  scopeId: number
+  resource: string
+  limitValue: number
+  usedValue: number
+  available: number
+  unit: string
+  isActive: boolean
+}
+
+export interface WorkspaceGroupRef {
+  id: number
+  name: string
+  displayName: string
+}
+
+export interface WorkspaceSummary {
+  id: number
+  name: string
+  displayName: string
+  description: string | null
+  groupId: number
+  groupName: string | null
+  groupDisplayName: string | null
+  k8sNamespace: string
+  status: WorkspaceStatus
+  statusMessage: string | null
+  isActive: boolean
+  memberCount: number
+  resourceGroupCount: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface WorkspaceMember {
+  userId: number
+  username: string
+  fullName: string
+  displayName: string
+  email: string | null
+  isActive: boolean
+  roleInWorkspace: WorkspaceRole
+  joinedAt: string
+}
+
+export interface WorkspaceResourceGrant {
+  resourceGroupId: number
+  name: string
+  displayName: string
+  kind: ResourceGroupKind
+  networkType: NetworkType
+  grantedAt: string
+  isActive: boolean
+}
+
+export interface WorkspaceDetail extends WorkspaceSummary {
+  members: WorkspaceMember[]
+  resourceGrants: WorkspaceResourceGrant[]
+}
+
+export interface WorkspaceQuotaLine {
+  resource: string
+  limitValue: number
+  usedValue: number
+  unit: string
+}
+
+export interface WorkspaceQuotaSync {
+  quotas: WorkspaceQuotaLine[]
+  applied: boolean
+}
+
+export interface WorkspaceCreatePayload {
+  name: string
+  displayName?: string
+  description?: string | null
+  groupId?: number | null
+  resourceGroupIds?: number[]
+  ownerUserId?: number | null
+}
+
+export interface WorkspaceUpdatePayload {
+  displayName?: string
+  description?: string | null
+  isActive?: boolean
+}
+
+export interface WorkspaceMemberAssignPayload {
+  userId: number
+  roleInWorkspace?: WorkspaceRole
+  /**
+   * Required to move a user who already belongs to another workspace. The
+   * backend refuses otherwise, because relocating a workspace moves their files
+   * and running workloads with it.
+   */
+  moveFromExisting?: boolean
+}
+
+/** Human-readable labels for the quota resource keys the API returns. */
+export const QUOTA_RESOURCE_LABELS: Record<string, string> = {
+  cpu: 'CPU',
+  memory: '内存',
+  storage: '存储',
+  instance: '实例数',
+  task: '任务数',
+}
+
+/** `gpu:a100` → `A100`, so GPU lines read like the rest. */
+export function quotaResourceLabel(resource: string): string {
+  if (resource.startsWith('gpu:')) return `GPU · ${resource.slice(4).toUpperCase()}`
+  return QUOTA_RESOURCE_LABELS[resource] ?? resource
+}
+
+/** Render a quota value with its unit (`8000` + `m` → `8000 m`). */
+export function formatQuota(value: number, unit: string): string {
+  if (!unit) return String(value)
+  return unit === 'm' ? `${value} 核·毫` : `${value} ${unit}`
+}
+
+export function formatCpu(milli: number): string {
+  return milli % 1000 === 0 ? `${milli / 1000} 核` : `${(milli / 1000).toFixed(1)} 核`
+}
+
+export function formatMemory(mb: number): string {
+  if (mb >= 1024) return `${Math.round(mb / 1024)} GB`
+  return `${mb} MB`
+}
+
+/** Seconds → a short Chinese duration (`86400` → `1 天`). */
+export function formatDuration(seconds: number | null): string {
+  if (seconds === null) return '不限时'
+  if (seconds % 86400 === 0) return `${seconds / 86400} 天`
+  if (seconds % 3600 === 0) return `${seconds / 3600} 小时`
+  return `${Math.round(seconds / 60)} 分钟`
+}

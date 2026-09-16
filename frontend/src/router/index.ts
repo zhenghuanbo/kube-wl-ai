@@ -18,11 +18,11 @@ declare module 'vue-router' {
 }
 
 /**
- * Phase 0 route table.
+ * Route table.
  *
  * Every navigation entry resolves to a real route so the sidebar can never
- * point at a missing page. Business screens are replaced phase by phase;
- * until then they render `PlaceholderView` describing the owning phase.
+ * point at a missing page. Screens not yet built render `PlaceholderView`
+ * describing the owning phase.
  */
 const routes: RouteRecordRaw[] = [
   {
@@ -59,6 +59,12 @@ const routes: RouteRecordRaw[] = [
         name: 'images',
         component: () => import('@/views/PlaceholderView.vue'),
         meta: { title: '镜像', phase: 'Phase 5' },
+      },
+      {
+        path: 'workspace',
+        name: 'my-workspace',
+        component: () => import('@/views/MyWorkspaceView.vue'),
+        meta: { title: '我的工作空间' },
       },
       {
         path: 'compute',
@@ -99,14 +105,14 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'admin/workspaces',
         name: 'admin-workspaces',
-        component: () => import('@/views/PlaceholderView.vue'),
-        meta: { title: '工作空间管理', roles: ADMIN_ROLES, phase: 'Phase 2' },
+        component: () => import('@/views/admin/WorkspacesView.vue'),
+        meta: { title: '工作空间管理', roles: ADMIN_ROLES },
       },
       {
         path: 'admin/resources',
         name: 'admin-resources',
-        component: () => import('@/views/PlaceholderView.vue'),
-        meta: { title: '资源与配额', roles: ADMIN_ROLES, phase: 'Phase 2' },
+        component: () => import('@/views/admin/ResourcesView.vue'),
+        meta: { title: '资源与配额', roles: ADMIN_ROLES },
       },
       {
         path: 'admin/settings',

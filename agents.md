@@ -415,7 +415,7 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
   组管理员建用户 / 建组 / 自行提权均被拒；所有者撤销自己的 `global_admin` 被拒。
 - 刷新令牌链路：`wl_refresh` 为 httpOnly、path `/api/v1/auth`；刷新后 `/auth/me` 正常；令牌仅存哈希。
 
-### ✅ Phase 2 — 工作空间、资源与配额（后端已完成，前端待做）
+### ✅ Phase 2 — 工作空间、资源与配额（已完成）
 
 | 交付 | 说明 |
 | --- | --- |
@@ -427,9 +427,16 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 | 资源可见性 | 目录（资源组/规格/时长/节点）对全体登录用户可读，**授权**才是边界 |
 | API | `/workspaces`（含 `/mine`、`/reconcile`、成员、资源授权）、`/resource-groups`、`/resource-specs`、`/runtime-limits`、`/nodes`、`/quotas` |
 | 测试 | 新增 61 项（36 项 API 验收 + 25 项命名/数量解析单测），全量 **183 项通过** |
+| 前端 | 我的工作空间（配额进度、网络档位、可用资源池）、工作空间管理（建/停/删、成员、资源授权、重新下发）、资源与配额（资源池/规格/时长/节点四个页签） |
 
 **Phase 2 验收结果**：
-- 质量门禁：`ruff check` + `ruff format --check` + `mypy --strict`（70 文件）+ `pytest`（183 项）全绿。
+- 质量门禁：`ruff check` + `ruff format --check` + `mypy --strict`（70 文件）+ `pytest`（183 项）全绿；
+  前端 `vue-tsc --noEmit` 无错误、`vite build` 成功。
+- 真实进程联调：`scripts/smoke_phase2.py` 对 uvicorn 实例执行 **33 项检查全部通过**
+  （资源池与规格 CRUD、命名空间生成、工作空间重名拦截、一人一空间需显式迁移、
+  普通用户越权返回 404、配额汇总、被占用资源池拒删、重新下发幂等、删除后从列表消失但记录保留）。
+  服务端未配置集群，K8s 网关自动回退到 `FakeK8sGateway` —— 这些检查在无 kubeconfig 的机器上必须能跑通。
+- 前端联调：Vite dev server 下三个新页面与三个新模块均编译为 200，`/api` 代理登录返回 200。
 - 下发实测（`FakeK8sGateway`）：建空间后命名空间标签含 `wl-managed=true` / `wl-group` / `wl-workspace`；
   ResourceQuota 为 `requests.cpu=8`、`requests.memory=16384Mi`、`count/deployments.apps=2`；
   LimitRange 默认 4 核；NetworkPolicy 取所授权池中**最严格**的网络档位。
@@ -450,11 +457,10 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
    返回 502 `kubernetes_error` 并携带操作名。
 4. 默认列表未过滤 `is_active`：已删除的空间仍出现在列表中。现在默认只列 `is_active=true`。
 
-### ⏳ Phase 2 前端 / Phase 3–8（待开始）
+### ⏳ Phase 3–8（待开始）
 
 | 阶段 | 内容 | 周期 |
 | --- | --- | --- |
-| Phase 2 | 工作空间与资源管理页（后端已完成） | — |
 | Phase 3 | 容器实例端到端（SSH / 终端 / IDE） | 3 周 |
 | Phase 4 | 应用程序与自定义任务 | 2 周 |
 | Phase 5 | 镜像与存储 | 2 周 |
@@ -568,5 +574,7 @@ Vuex `namespace: true` 拼写错误、`Admin/User.vue` 为 0 字节、
 | 全局消息 | `frontend/src/stores/notifications.ts`、`frontend/src/components/AppSnackbar.vue` |
 | 通用组件 | `frontend/src/components/common/` |
 | API 契约 | `frontend/openapi/schema.json`（由 `./scripts/gen-openapi.sh` 生成） |
-| **部署冒烟验收** | `scripts/smoke-env.sh` + `scripts/smoke_phase1.py` |
+| 工作空间与资源前端 | `frontend/src/views/MyWorkspaceView.vue`、`frontend/src/views/admin/WorkspacesView.vue`、`frontend/src/views/admin/ResourcesView.vue` |
+| 前端资源/工作空间类型与 API | `frontend/src/types/resource.ts`、`frontend/src/api/workspaces.ts`、`frontend/src/api/resources.ts` |
+| **部署冒烟验收** | `scripts/smoke-env.sh` + `scripts/smoke_phase1.py` + `scripts/smoke_phase2.py` |
 | 旧实现参考 | `legacy/README.md` |

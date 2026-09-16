@@ -82,6 +82,15 @@ class Settings(BaseSettings):
     # --- Kubernetes ----------------------------------------------------------
     k8s_in_cluster: bool = False
     kubeconfig: str = ""
+    #: Master switch for talking to a real cluster.
+    #:
+    #: Off by default, and that default is load-bearing. ``kubeconfig`` merely
+    #: *locates* credentials, so treating its presence as consent means that a
+    #: developer machine with an ambient ``~/.kube/config`` silently provisions
+    #: namespaces on whatever cluster that file points at — which is how a test
+    #: run ends up mutating production. Production sets this (or
+    #: ``K8S_IN_CLUSTER``) explicitly.
+    k8s_enabled: bool = False
     k8s_managed_label: str = "wl-managed"
     k8s_namespace_prefix: str = "wl-"
 
@@ -103,6 +112,22 @@ class Settings(BaseSettings):
     storage_class_home: str = ""
     storage_class_data: str = ""
     storage_class_share: str = ""
+
+    # --- Instances -----------------------------------------------------------
+    #: Host the per-instance IDE ingress rules are published under. Empty means
+    #: "match any host", which is what a single-ingress-controller lab wants.
+    instance_ingress_host: str = ""
+    #: Address users are told to SSH to. Defaults to the node's own hostname
+    #: when empty, which is only right for single-node clusters; production must
+    #: set it to the cluster's external address.
+    instance_ssh_host: str = ""
+    #: Default home directory size for an instance whose pool sets no storage
+    #: allowance of its own.
+    instance_default_storage_gb: int = 10
+    #: How long the short-lived ticket that protects an IDE URL stays valid.
+    #: Long enough for a websocket to be established, short enough that a
+    #: leaked URL is useless.
+    ide_ticket_seconds: int = 120
 
     # --- Validators ----------------------------------------------------------
     @field_validator("cors_origins", "auth_providers", mode="before")

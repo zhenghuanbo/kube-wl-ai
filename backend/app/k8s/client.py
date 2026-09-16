@@ -9,15 +9,33 @@ scattering it.
 
 from __future__ import annotations
 
+import contextlib
+import json
 import re
+from dataclasses import replace
 from typing import Any
 
 from kubernetes import client as k8s
 from kubernetes import config as k8s_config
 from kubernetes.client.exceptions import ApiException
+from kubernetes.stream import stream
 
 from app.core.logging import get_logger
-from app.k8s.gateway import K8sError, LimitSpec, NamespaceSpec, NodeInfo, QuotaSpec
+from app.k8s.gateway import (
+    ExecSession,
+    IngressSpec,
+    K8sError,
+    LimitSpec,
+    NamespaceSpec,
+    NodeInfo,
+    PodInfo,
+    PvcSpec,
+    QuotaSpec,
+    SecretSpec,
+    ServiceSpec,
+    WorkloadRefs,
+    WorkloadSpec,
+)
 from app.k8s.naming import MANAGED_LABEL, MANAGED_LABEL_VALUE, is_managed_namespace
 from app.models.enums import NetworkType
 
@@ -100,6 +118,101 @@ def gpu_model_from_labels(labels: dict[str, str]) -> str | None:
     return lowered
 
 
+#: Channel the Kubernetes websocket protocol uses for terminal resizes.
+_RESIZE_CHANNEL = 4
+
+
+class KubernetesExecSession:
+    """Thin wrapper over the Kubernetes websocket exec client.
+
+    The client's own API raises when the pod exits mid-stream rather than
+    signalling EOF, so every operation is translated into the small, total
+    :class:`~app.k8s.gateway.ExecSession` contract the terminal handler expects.
+    """
+
+    def __init__(self, ws: Any) -> None:
+        self._ws = ws
+
+    def recv(self, timeout: float) -> bytes | None:
+        try:
+            self._ws.update(timeout=timeout)
+        except Exception:
+            return None
+
+        for peek, read in (
+            (self._ws.peek_stdout, self._ws.read_stdout),
+            (self._ws.peek_stderr, self._ws.read_stderr),
+        ):
+            try:
+                if peek():
+                    chunk: str = read()
+                    return chunk.encode("utf-8", errors="replace")
+            except Exception:
+                return None
+
+        try:
+            return b"" if self._ws.is_open() else None
+        except Exception:
+            return None
+
+    def send(self, data: bytes) -> None:
+        try:
+            self._ws.write_stdin(data.decode("utf-8", errors="replace"))
+        except Exception as exc:
+            raise K8sError(f"write to terminal failed: {exc}") from exc
+
+    def resize(self, rows: int, cols: int) -> None:
+        try:
+            self._ws.write_channel(_RESIZE_CHANNEL, json.dumps({"Height": rows, "Width": cols}))
+        except Exception as exc:
+            # A failed resize is cosmetic — the shell keeps the old size — so it
+            # must never tear down a working session.
+            logger.warning("terminal_resize_failed", error=str(exc))
+
+    def close(self) -> None:
+        # Closing an already-closed socket is expected, not exceptional.
+        with contextlib.suppress(Exception):
+            self._ws.close()
+
+    @property
+    def closed(self) -> bool:
+        try:
+            open_: bool = self._ws.is_open()
+            return not open_
+        except Exception:
+            return True
+
+
+def _pod_info(pod: Any) -> PodInfo:
+    """Reduce a pod to the few facts the platform actually acts on."""
+    statuses = pod.status.container_statuses or []
+    ready = bool(statuses) and all(container.ready for container in statuses)
+    restarts = sum(container.restart_count or 0 for container in statuses)
+
+    message: str | None = None
+    for container in statuses:
+        waiting = container.state.waiting if container.state else None
+        if waiting and waiting.reason:
+            # `ImagePullBackOff` is the single most common reason an instance
+            # never starts, and it is invisible without this.
+            message = f"{waiting.reason}: {waiting.message}" if waiting.message else waiting.reason
+            break
+    if message is None:
+        for condition in pod.status.conditions or []:
+            if condition.type == "PodScheduled" and condition.status == "False":
+                message = condition.message or condition.reason
+                break
+
+    return PodInfo(
+        name=pod.metadata.name,
+        phase=pod.status.phase or "Unknown",
+        ready=ready,
+        node_name=pod.spec.node_name if pod.spec else None,
+        restart_count=restarts,
+        message=message,
+    )
+
+
 def build_load_config(*, kubeconfig: str | None = None, context: str | None = None) -> None:
     """Load cluster credentials, in-cluster first.
 
@@ -127,12 +240,18 @@ class RealK8sGateway:
         build_load_config(kubeconfig=kubeconfig, context=context)
         self._core = k8s.CoreV1Api()
         self._networking = k8s.NetworkingV1Api()
+        self._apps = k8s.AppsV1Api()
 
     # --- helpers ----------------------------------------------------------
     @staticmethod
     def _raise(action: str, exc: ApiException) -> K8sError:
         detail = getattr(exc, "body", None) or getattr(exc, "reason", str(exc))
         return K8sError(f"{action} failed: {detail}")
+
+    @staticmethod
+    def _is_not_found(exc: ApiException) -> bool:
+        not_found: bool = exc.status == 404
+        return not_found
 
     def _read_namespace(self, name: str) -> Any | None:
         try:
@@ -277,6 +396,388 @@ class RealK8sGateway:
         except ApiException as exc:
             if exc.status != 404:
                 raise self._raise(f"delete network policy in {namespace}", exc) from exc
+
+    # --- workloads --------------------------------------------------------
+    @staticmethod
+    def _container(spec: WorkloadSpec) -> Any:
+        resources = k8s.V1ResourceRequirements(
+            # Requests equal limits: a request below the limit lets the
+            # scheduler over-commit a node, and an instance that cannot get its
+            # memory back is worse than one that waits for room.
+            requests={
+                "cpu": f"{spec.cpu_milli}m",
+                "memory": f"{spec.memory_mb}Mi",
+            },
+            limits={
+                "cpu": f"{spec.cpu_milli}m",
+                "memory": f"{spec.memory_mb}Mi",
+            },
+        )
+        if spec.gpu_count > 0 and spec.gpu_type not in ("", "none"):
+            # Whole cards only. Fractional GPUs need MIG or time-slicing, which
+            # changes the accounting entirely; neither is configured here.
+            resources.limits["nvidia.com/gpu"] = str(spec.gpu_count)
+
+        mounts: list[Any] = []
+        if spec.pvc_name:
+            mounts.append(k8s.V1VolumeMount(name="home", mount_path=spec.mount_path))
+        if spec.ssh_secret_name:
+            mounts.append(
+                k8s.V1VolumeMount(
+                    name="ssh-keys",
+                    mount_path="/etc/ssh/authorized_keys.d",
+                    read_only=True,
+                )
+            )
+
+        # Tuple-typed argv, never a shell string: a user-supplied value can
+        # never become a command.
+        return k8s.V1Container(
+            name="main",
+            image=spec.image,
+            command=list(spec.command) if spec.command else None,
+            args=list(spec.args) if spec.args else None,
+            env=[k8s.V1EnvVar(name=key, value=value) for key, value in spec.env.items()] or None,
+            ports=[
+                k8s.V1ContainerPort(name=port.name, container_port=port.container_port)
+                for port in spec.ports
+            ]
+            or None,
+            resources=resources,
+            volume_mounts=mounts or None,
+        )
+
+    @staticmethod
+    def _volumes(spec: WorkloadSpec) -> list[Any] | None:
+        volumes: list[Any] = []
+        if spec.pvc_name:
+            volumes.append(
+                k8s.V1Volume(
+                    name="home",
+                    persistent_volume_claim=k8s.V1PersistentVolumeClaimVolumeSource(
+                        claim_name=spec.pvc_name
+                    ),
+                )
+            )
+        if spec.ssh_secret_name:
+            volumes.append(
+                k8s.V1Volume(
+                    name="ssh-keys",
+                    secret=k8s.V1SecretVolumeSource(
+                        secret_name=spec.ssh_secret_name,
+                        # 0444: readable, not writable, and owned by root so the
+                        # unprivileged user cannot alter their own keys from
+                        # inside the container.
+                        default_mode=0o444,
+                    ),
+                )
+            )
+        return volumes or None
+
+    def apply_deployment(self, spec: WorkloadSpec) -> None:
+        labels = dict(spec.labels)
+        body = k8s.V1Deployment(
+            metadata=k8s.V1ObjectMeta(name=spec.name, namespace=spec.namespace, labels=labels),
+            spec=k8s.V1DeploymentSpec(
+                replicas=spec.replicas,
+                # `Recreate` rather than `RollingUpdate`: two copies of a
+                # developer environment must never run at once, or they would
+                # race over the same home directory claim.
+                strategy=k8s.V1DeploymentStrategy(type="Recreate"),
+                selector=k8s.V1LabelSelector(match_labels=labels),
+                template=k8s.V1PodTemplateSpec(
+                    metadata=k8s.V1ObjectMeta(labels=labels),
+                    spec=k8s.V1PodSpec(
+                        containers=[self._container(spec)],
+                        volumes=self._volumes(spec),
+                        node_selector=spec.node_selector or None,
+                        tolerations=[
+                            k8s.V1Toleration(**toleration) for toleration in spec.tolerations
+                        ]
+                        or None,
+                        termination_grace_period_seconds=spec.termination_grace_seconds,
+                    ),
+                ),
+            ),
+        )
+        api = self._apps
+        try:
+            api.read_namespaced_deployment(spec.name, spec.namespace)
+            api.replace_namespaced_deployment(spec.name, spec.namespace, body)
+        except ApiException as exc:
+            if not self._is_not_found(exc):
+                raise self._raise(f"update deployment {spec.name}", exc) from exc
+            try:
+                api.create_namespaced_deployment(spec.namespace, body)
+            except ApiException as create_exc:
+                raise self._raise(f"create deployment {spec.name}", create_exc) from create_exc
+
+    def apply_service(self, spec: ServiceSpec) -> ServiceSpec:
+        body = k8s.V1Service(
+            metadata=k8s.V1ObjectMeta(
+                name=spec.name, namespace=spec.namespace, labels=spec.labels or None
+            ),
+            spec=k8s.V1ServiceSpec(
+                type=spec.service_type,
+                selector=spec.selector or None,
+                ports=[
+                    k8s.V1ServicePort(
+                        name=port.name,
+                        port=port.port,
+                        target_port=port.target_port,
+                        node_port=port.node_port,
+                        protocol=port.protocol,
+                    )
+                    for port in spec.ports
+                ],
+            ),
+        )
+        api = self._core
+        try:
+            existing = api.read_namespaced_service(spec.name, spec.namespace)
+            # A NodePort is immutable once allocated, so carry the current one
+            # forward instead of asking the cluster to re-pick it.
+            allocated = {
+                port.name: port.node_port for port in (existing.spec.ports or []) if port.node_port
+            }
+            for port in body.spec.ports:
+                if port.node_port is None and port.name in allocated:
+                    port.node_port = allocated[port.name]
+            api.replace_namespaced_service(spec.name, spec.namespace, body)
+            created = api.read_namespaced_service(spec.name, spec.namespace)
+        except ApiException as exc:
+            if not self._is_not_found(exc):
+                raise self._raise(f"update service {spec.name}", exc) from exc
+            try:
+                created = api.create_namespaced_service(spec.namespace, body)
+            except ApiException as create_exc:
+                raise self._raise(f"create service {spec.name}", create_exc) from create_exc
+
+        resolved = {port.name: port.node_port for port in (created.spec.ports or [])}
+        return replace(
+            spec,
+            ports=tuple(
+                replace(port, node_port=resolved.get(port.name, port.node_port))
+                for port in spec.ports
+            ),
+        )
+
+    def apply_ingress(self, spec: IngressSpec) -> None:
+        body = k8s.V1Ingress(
+            metadata=k8s.V1ObjectMeta(
+                name=spec.name,
+                namespace=spec.namespace,
+                labels=spec.labels or None,
+                annotations=spec.annotations or None,
+            ),
+            spec=k8s.V1IngressSpec(
+                rules=[
+                    k8s.V1IngressRule(
+                        host=spec.host,
+                        http=k8s.V1HTTPIngressRuleValue(
+                            paths=[
+                                k8s.V1HTTPIngressPath(
+                                    path=spec.path,
+                                    path_type="Prefix",
+                                    backend=k8s.V1IngressBackend(
+                                        service=k8s.V1IngressServiceBackend(
+                                            name=spec.service_name,
+                                            port=k8s.V1ServiceBackendPort(number=spec.service_port),
+                                        )
+                                    ),
+                                )
+                            ]
+                        ),
+                    )
+                ]
+            ),
+        )
+        api = self._networking
+        try:
+            api.read_namespaced_ingress(spec.name, spec.namespace)
+            api.replace_namespaced_ingress(spec.name, spec.namespace, body)
+        except ApiException as exc:
+            if not self._is_not_found(exc):
+                raise self._raise(f"update ingress {spec.name}", exc) from exc
+            try:
+                api.create_namespaced_ingress(spec.namespace, body)
+            except ApiException as create_exc:
+                raise self._raise(f"create ingress {spec.name}", create_exc) from create_exc
+
+    def apply_secret(self, spec: SecretSpec) -> None:
+        body = k8s.V1Secret(
+            metadata=k8s.V1ObjectMeta(
+                name=spec.name, namespace=spec.namespace, labels=spec.labels or None
+            ),
+            type="Opaque",
+            string_data=spec.data or None,
+        )
+        api = self._core
+        try:
+            api.read_namespaced_secret(spec.name, spec.namespace)
+            api.replace_namespaced_secret(spec.name, spec.namespace, body)
+        except ApiException as exc:
+            if not self._is_not_found(exc):
+                raise self._raise(f"update secret {spec.name}", exc) from exc
+            try:
+                api.create_namespaced_secret(spec.namespace, body)
+            except ApiException as create_exc:
+                raise self._raise(f"create secret {spec.name}", create_exc) from create_exc
+
+    def apply_pvc(self, spec: PvcSpec) -> None:
+        try:
+            existing = self._core.read_namespaced_persistent_volume_claim(spec.name, spec.namespace)
+        except ApiException as exc:
+            if not self._is_not_found(exc):
+                raise self._raise(f"read pvc {spec.name}", exc) from exc
+            existing = None
+
+        if existing is not None:
+            # Never shrink, and never rewrite the storage class: both are
+            # immutable in the cluster and a failed patch here would abort a
+            # reconcile that is otherwise fine.
+            return
+
+        body = k8s.V1PersistentVolumeClaim(
+            metadata=k8s.V1ObjectMeta(
+                name=spec.name, namespace=spec.namespace, labels=spec.labels or None
+            ),
+            spec=k8s.V1PersistentVolumeClaimSpec(
+                access_modes=list(spec.access_modes),
+                storage_class_name=spec.storage_class,
+                resources=k8s.V1VolumeResourceRequirements(
+                    requests={"storage": f"{spec.size_gb}Gi"}
+                ),
+            ),
+        )
+        try:
+            self._core.create_namespaced_persistent_volume_claim(spec.namespace, body)
+        except ApiException as exc:
+            raise self._raise(f"create pvc {spec.name}", exc) from exc
+
+    def scale_deployment(self, namespace: str, name: str, replicas: int) -> None:
+        try:
+            self._apps.patch_namespaced_deployment_scale(
+                name, namespace, {"spec": {"replicas": replicas}}
+            )
+        except ApiException as exc:
+            if self._is_not_found(exc):
+                raise K8sError(f"deployment {name} not found in {namespace}") from exc
+            raise self._raise(f"scale deployment {name}", exc) from exc
+
+    def read_pod(self, namespace: str, name: str) -> PodInfo | None:
+        try:
+            pod = self._core.read_namespaced_pod(name, namespace)
+        except ApiException as exc:
+            if self._is_not_found(exc):
+                return None
+            raise self._raise(f"read pod {name}", exc) from exc
+        return _pod_info(pod)
+
+    def list_pods(self, namespace: str, label_selector: str) -> list[PodInfo]:
+        try:
+            response = self._core.list_namespaced_pod(namespace, label_selector=label_selector)
+        except ApiException as exc:
+            raise self._raise(f"list pods in {namespace}", exc) from exc
+        # Newest first: when a deployment is being replaced, the observable pod
+        # is the most recently created one.
+        items = sorted(
+            response.items,
+            key=lambda pod: pod.metadata.creation_timestamp or 0,
+            reverse=True,
+        )
+        return [_pod_info(pod) for pod in items]
+
+    def read_pod_logs(
+        self,
+        namespace: str,
+        name: str,
+        *,
+        container: str = "main",
+        tail_lines: int = 500,
+        previous: bool = False,
+    ) -> str:
+        try:
+            output = self._core.read_namespaced_pod_log(
+                name,
+                namespace,
+                container=container,
+                tail_lines=tail_lines,
+                previous=previous,
+                # `_preload_content=False` returns the raw stream; the default
+                # buffers the entire log into memory before returning.
+                _preload_content=False,
+            )
+        except ApiException as exc:
+            if self._is_not_found(exc):
+                return ""
+            raise self._raise(f"read logs for pod {name}", exc) from exc
+        body: str = output.data.decode("utf-8", errors="replace")
+        return body
+
+    def open_exec(
+        self,
+        namespace: str,
+        pod: str,
+        *,
+        container: str = "main",
+        command: tuple[str, ...] = ("/bin/bash", "-l"),
+        rows: int = 24,
+        cols: int = 80,
+    ) -> ExecSession:
+
+        try:
+            ws = stream(
+                self._core.connect_get_namespaced_pod_exec,
+                pod,
+                namespace,
+                container=container,
+                # argv, never a shell string: the platform must not be able to
+                # turn user input into a command of its own.
+                command=list(command),
+                stderr=True,
+                stdin=True,
+                stdout=True,
+                tty=True,
+                _preload_content=False,
+            )
+        except ApiException as exc:
+            raise self._raise(f"open terminal on pod {pod}", exc) from exc
+
+        session = KubernetesExecSession(ws)
+        session.resize(rows, cols)
+        return session
+
+    def delete_workload(self, namespace: str, refs: WorkloadRefs) -> None:
+        """Delete in reverse dependency order, tolerating already-absent objects."""
+        steps: list[tuple[str, Any, str | None]] = [
+            # Ingress and Services first: stop routing traffic before the pod
+            # disappears, so users see a clean failure rather than a timeout.
+            ("ingress", self._networking.delete_namespaced_ingress, refs.ingress),
+            (
+                "deployment",
+                self._apps.delete_namespaced_deployment,
+                refs.deployment,
+            ),
+            ("secret", self._core.delete_namespaced_secret, refs.secret),
+            (
+                "pvc",
+                self._core.delete_namespaced_persistent_volume_claim,
+                refs.pvc,
+            ),
+        ]
+        steps.extend(
+            ("service", self._core.delete_namespaced_service, name) for name in refs.services
+        )
+        for kind, deleter, name in steps:
+            if not name:
+                continue
+            try:
+                deleter(name, namespace)
+            except ApiException as exc:
+                if self._is_not_found(exc):
+                    continue
+                raise self._raise(f"delete {kind} {name}", exc) from exc
 
     # --- nodes ------------------------------------------------------------
     def list_nodes(self) -> list[NodeInfo]:

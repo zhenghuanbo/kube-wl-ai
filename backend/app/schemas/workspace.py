@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field, field_validator
 
@@ -115,6 +115,10 @@ class WorkspaceUpdate(ApiModel):
     display_name: str | None = Field(default=None, max_length=128)
     description: str | None = None
     is_active: bool | None = None
+    #: Only ``active`` and ``suspended`` may be set by hand. The other states
+    #: describe what the provisioner is currently doing, and letting an operator
+    #: write them would desynchronise the row from the cluster.
+    status: Literal["active", "suspended"] | None = None
 
 
 class WorkspaceMemberRead(ApiModel):

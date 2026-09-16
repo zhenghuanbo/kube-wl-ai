@@ -31,6 +31,8 @@ from app.core.errors import UnauthorizedError
 
 ACCESS_TOKEN_TYPE = "access"
 GRAFANA_TOKEN_TYPE = "grafana"
+#: Short-lived ticket authorising one web-IDE session on one instance.
+IDE_TOKEN_TYPE = "ide"
 
 #: Length of the opaque refresh token before base64 expansion.
 REFRESH_TOKEN_BYTES = 48
@@ -118,6 +120,66 @@ def create_access_token(
     # PyJWT >= 2 returns str; older versions returned bytes.
     token = encoded.decode("utf-8") if isinstance(encoded, bytes) else encoded
     return token, expires_at
+
+
+def create_ide_ticket(
+    *,
+    user_id: int,
+    username: str,
+    instance_id: int,
+    namespace: str,
+    settings: Settings,
+) -> tuple[str, datetime]:
+    """Mint the ticket that lets a browser open an instance's web IDE.
+
+    Deliberately a separate token *type* rather than a reuse of the access
+    token. The ingress validates these on a path that carries no other
+    authentication, so the ticket must be useless as an API credential, and an
+    access token must be useless here — ``decode_access_token`` enforces the
+    type, which is what keeps the two from being interchangeable.
+
+    It also pins ``namespace`` and ``instance``: a ticket for one workspace
+    cannot be replayed against another, which is the plan's requirement that the
+    backend lock the Grafana/IDE variables rather than trusting the URL.
+    """
+    return create_access_token(
+        user_id=user_id,
+        username=username,
+        settings=settings,
+        token_type=IDE_TOKEN_TYPE,
+        expires_in=timedelta(seconds=settings.ide_ticket_seconds),
+        extra_claims={"instance": instance_id, "namespace": namespace},
+    )
+
+
+def decode_ide_ticket(token: str, settings: Settings) -> dict[str, Any]:
+    """Verify an IDE ticket and return its claims."""
+    return decode_token_claims(token, settings, expected_type=IDE_TOKEN_TYPE)
+
+
+def decode_token_claims(token: str, settings: Settings, *, expected_type: str) -> dict[str, Any]:
+    """Verify a token and return the raw claims.
+
+    Unlike :func:`decode_access_token` this keeps the extra claims, which is
+    what the IDE and Grafana integrations need to read back.
+    """
+    algorithm, key = _verification_key(settings)
+    try:
+        payload: dict[str, Any] = jwt.decode(
+            token,
+            key,
+            algorithms=[algorithm],
+            issuer=settings.jwt_issuer,
+            options={"require": ["exp", "iat", "sub"]},
+        )
+    except jwt.ExpiredSignatureError as exc:
+        raise UnauthorizedError("凭证已过期", code="token_expired") from exc
+    except jwt.InvalidTokenError as exc:
+        raise UnauthorizedError("凭证无效", code="invalid_token") from exc
+
+    if payload.get("typ") != expected_type:
+        raise UnauthorizedError("凭证类型不匹配", code="invalid_token_type")
+    return payload
 
 
 def decode_access_token(

@@ -62,6 +62,45 @@ def namespace_for(group_name: str, workspace_name: str) -> str:
     return f"{raw[:budget].rstrip('-')}-{digest}"
 
 
+#: Labels on every workload object, so a pod can be traced back to its instance.
+INSTANCE_LABEL = "wl-instance"
+INSTANCE_ID_LABEL = "wl-instance-id"
+OWNER_LABEL = "wl-owner"
+
+#: Namespaces this platform creates are prefixed, and so are its workloads.
+WORKLOAD_PREFIX = "wl"
+
+
+def truncate_name(value: str, *, limit: int = MAX_LABEL_LENGTH) -> str:
+    """Fit a name into a DNS-1123 label without making it ambiguous.
+
+    Truncating alone would map two different long names onto the same object,
+    so an overflowing name keeps a digest of the *full* value.
+    """
+    cleaned = _LEADING_TRAILING.sub("", slug(value))
+    if len(cleaned) <= limit:
+        return cleaned
+
+    digest = hashlib.sha256(cleaned.encode()).hexdigest()[:8]
+    budget = limit - len(digest) - 1
+    return f"{cleaned[:budget].rstrip('-')}-{digest}"
+
+
+def workload_name(instance_id: int, instance_name: str) -> str:
+    """The base Kubernetes name for an instance's objects.
+
+    Prefixed so ``kubectl get deploy -A`` shows which objects the platform owns,
+    and suffixed with the id so two instances in different namespaces that share
+    a name still produce distinguishable objects in a merged listing.
+    """
+    return truncate_name(f"{WORKLOAD_PREFIX}-{instance_name}-{instance_id}")
+
+
+def is_managed_workload(name: str) -> bool:
+    """Whether a workload object belongs to this platform."""
+    return name.startswith(f"{WORKLOAD_PREFIX}-")
+
+
 def is_managed_namespace(name: str) -> bool:
     """Whether a namespace belongs to this platform.
 

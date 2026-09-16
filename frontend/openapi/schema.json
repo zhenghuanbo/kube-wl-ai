@@ -3690,6 +3690,765 @@
           }
         }
       }
+    },
+    "/api/v1/ssh-keys": {
+      "get": {
+        "tags": [
+          "instances"
+        ],
+        "summary": "List Ssh Keys",
+        "operationId": "list_ssh_keys_api_v1_ssh_keys_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SshKeyRead"
+                  },
+                  "type": "array",
+                  "title": "Response List Ssh Keys Api V1 Ssh Keys Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "instances"
+        ],
+        "summary": "Add Ssh Key",
+        "description": "Register a public key.\n\nOnly the public half ever reaches the platform; it is mounted into instances\nas ``authorized_keys``. The fingerprint is computed from the key material,\nso the same key cannot be registered twice under different names.",
+        "operationId": "add_ssh_key_api_v1_ssh_keys_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SshKeyCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SshKeyRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ssh-keys/{key_id}": {
+      "delete": {
+        "tags": [
+          "instances"
+        ],
+        "summary": "Delete Ssh Key",
+        "operationId": "delete_ssh_key_api_v1_ssh_keys__key_id__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "key_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Key Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiMessage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/instances": {
+      "get": {
+        "tags": [
+          "instances"
+        ],
+        "summary": "List Instances",
+        "description": "A user sees their own instances; an administrator sees their scope's.",
+        "operationId": "list_instances_api_v1_instances_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 20,
+              "title": "Pagesize"
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 150
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Search"
+            }
+          },
+          {
+            "name": "workspaceId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Workspaceid"
+            }
+          },
+          {
+            "name": "ownerUserId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Owneruserid"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/InstanceStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "ideType",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/IdeType"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idetype"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_InstanceSummary_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "instances"
+        ],
+        "summary": "Create Instance",
+        "description": "Create an instance and apply its Kubernetes objects.\n\nValidation (ownership, pool grant, quota) happens before anything reaches\nthe cluster, so a rejected request never leaves a partial workload behind.",
+        "operationId": "create_instance_api_v1_instances_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstanceCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstanceDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/instances/{instance_id}": {
+      "get": {
+        "tags": [
+          "instances"
+        ],
+        "summary": "Get Instance",
+        "operationId": "get_instance_api_v1_instances__instance_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "instance_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Instance Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstanceDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "instances"
+        ],
+        "summary": "Update Instance",
+        "description": "Rename or re-describe. The resource shape is immutable by design.",
+        "operationId": "update_instance_api_v1_instances__instance_id__patch",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "instance_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Instance Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstanceUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstanceDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "instances"
+        ],
+        "summary": "Delete Instance",
+        "description": "Delete the workload. The home volume is deleted with it.",
+        "operationId": "delete_instance_api_v1_instances__instance_id__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "instance_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Instance Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiMessage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/instances/{instance_id}/start": {
+      "post": {
+        "tags": [
+          "instances"
+        ],
+        "summary": "Start Instance",
+        "description": "Scale the deployment back to one replica.\n\nThe home volume is untouched, so work resumes where it stopped.",
+        "operationId": "start_instance_api_v1_instances__instance_id__start_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "instance_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Instance Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/InstanceAction"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstanceDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/instances/{instance_id}/stop": {
+      "post": {
+        "tags": [
+          "instances"
+        ],
+        "summary": "Stop Instance",
+        "description": "Scale the deployment to zero.\n\nQuota stays reserved: restarting must not fail for lack of capacity the\ninstance already held.",
+        "operationId": "stop_instance_api_v1_instances__instance_id__stop_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "instance_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Instance Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/InstanceAction"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstanceDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/instances/{instance_id}/reconcile": {
+      "post": {
+        "tags": [
+          "instances"
+        ],
+        "summary": "Reconcile Instance",
+        "description": "Re-apply the objects and refresh the observed status.",
+        "operationId": "reconcile_instance_api_v1_instances__instance_id__reconcile_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "instance_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Instance Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstanceDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/instances/{instance_id}/logs": {
+      "get": {
+        "tags": [
+          "instances"
+        ],
+        "summary": "Instance Logs",
+        "description": "Container logs.\n\n``previous=true`` reads the terminated container's output, which is the only\nway to see why a container that is now crash-looping actually died.",
+        "operationId": "instance_logs_api_v1_instances__instance_id__logs_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "instance_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Instance Id"
+            }
+          },
+          {
+            "name": "tailLines",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 5000,
+              "minimum": 1,
+              "default": 500,
+              "title": "Taillines"
+            }
+          },
+          {
+            "name": "previous",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Previous"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Instance Logs Api V1 Instances  Instance Id  Logs Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/instances/{instance_id}/ide-access": {
+      "get": {
+        "tags": [
+          "instances"
+        ],
+        "summary": "Ide Access",
+        "description": "Mint the short-lived ticket that opens the instance's web IDE.\n\nThe ticket is scoped to this instance and namespace and expires in minutes,\nso a URL pasted into a chat becomes useless almost immediately. It is a\ndistinct token *type*, so it can never be used as an API credential.",
+        "operationId": "ide_access_api_v1_instances__instance_id__ide_access_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "instance_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Instance Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdeAccess"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -4420,6 +5179,748 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
+      "IdeAccess": {
+        "properties": {
+          "url": {
+            "type": "string",
+            "title": "Url"
+          },
+          "expiresIn": {
+            "type": "integer",
+            "title": "Expiresin"
+          }
+        },
+        "type": "object",
+        "required": [
+          "url",
+          "expiresIn"
+        ],
+        "title": "IdeAccess",
+        "description": "A short-lived, signed URL for an instance's web IDE."
+      },
+      "IdeType": {
+        "type": "string",
+        "enum": [
+          "none",
+          "jupyter",
+          "vscode",
+          "webssh"
+        ],
+        "title": "IdeType",
+        "description": "Which web IDE an instance exposes through the ingress, if any."
+      },
+      "InstanceAction": {
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "title": "InstanceAction",
+        "description": "Optional body for start/stop, so the reason lands in the audit trail."
+      },
+      "InstanceCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9-]*$",
+            "title": "Name"
+          },
+          "displayName": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Displayname",
+            "default": ""
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "workspaceId": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspaceid"
+          },
+          "ownerUserId": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owneruserid"
+          },
+          "resourceGroupId": {
+            "type": "integer",
+            "title": "Resourcegroupid"
+          },
+          "resourceSpecId": {
+            "type": "integer",
+            "title": "Resourcespecid"
+          },
+          "image": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Image"
+          },
+          "ideType": {
+            "$ref": "#/components/schemas/IdeType",
+            "default": "none"
+          },
+          "storageGb": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 10240.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Storagegb"
+          },
+          "sshEnabled": {
+            "type": "boolean",
+            "title": "Sshenabled",
+            "default": true
+          },
+          "maxRuntimeSeconds": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 60.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Maxruntimeseconds"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "resourceGroupId",
+          "resourceSpecId",
+          "image"
+        ],
+        "title": "InstanceCreate"
+      },
+      "InstanceDetail": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "displayName": {
+            "type": "string",
+            "title": "Displayname"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "workspaceId": {
+            "type": "integer",
+            "title": "Workspaceid"
+          },
+          "workspaceName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspacename"
+          },
+          "ownerUserId": {
+            "type": "integer",
+            "title": "Owneruserid"
+          },
+          "ownerUsername": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ownerusername"
+          },
+          "ownerDisplayName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ownerdisplayname"
+          },
+          "resourceGroupId": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resourcegroupid"
+          },
+          "resourceGroupName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resourcegroupname"
+          },
+          "image": {
+            "type": "string",
+            "title": "Image"
+          },
+          "ideType": {
+            "$ref": "#/components/schemas/IdeType"
+          },
+          "status": {
+            "$ref": "#/components/schemas/InstanceStatus"
+          },
+          "statusMessage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Statusmessage"
+          },
+          "cpuMilli": {
+            "type": "integer",
+            "title": "Cpumilli"
+          },
+          "memoryMb": {
+            "type": "integer",
+            "title": "Memorymb"
+          },
+          "gpuType": {
+            "type": "string",
+            "title": "Gputype"
+          },
+          "gpuCount": {
+            "type": "integer",
+            "title": "Gpucount"
+          },
+          "storageGb": {
+            "type": "integer",
+            "title": "Storagegb"
+          },
+          "sshEnabled": {
+            "type": "boolean",
+            "title": "Sshenabled"
+          },
+          "sshNodePort": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sshnodeport"
+          },
+          "nodeName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nodename"
+          },
+          "startedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Startedat"
+          },
+          "expiresAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiresat"
+          },
+          "isExpired": {
+            "type": "boolean",
+            "title": "Isexpired",
+            "default": false
+          },
+          "isActive": {
+            "type": "boolean",
+            "title": "Isactive"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Createdat"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updatedat"
+          },
+          "k8sDeployment": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "K8Sdeployment"
+          },
+          "k8sSshService": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "K8Ssshservice"
+          },
+          "k8sIdeService": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "K8Sideservice"
+          },
+          "k8sIngress": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "K8Singress"
+          },
+          "k8sPvc": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "K8Spvc"
+          },
+          "podName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Podname"
+          },
+          "sshCommand": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sshcommand"
+          },
+          "idePath": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idepath"
+          },
+          "maxRuntimeSeconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Maxruntimeseconds"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "displayName",
+          "workspaceId",
+          "ownerUserId",
+          "image",
+          "ideType",
+          "status",
+          "cpuMilli",
+          "memoryMb",
+          "gpuType",
+          "gpuCount",
+          "storageGb",
+          "sshEnabled",
+          "isActive",
+          "createdAt",
+          "updatedAt"
+        ],
+        "title": "InstanceDetail",
+        "description": "Adds everything needed to actually connect to the instance."
+      },
+      "InstanceStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "creating",
+          "running",
+          "stopping",
+          "stopped",
+          "failed",
+          "deleting",
+          "error"
+        ],
+        "title": "InstanceStatus",
+        "description": "Lifecycle of a container instance.\n\nMirrors what the UI shows, not the Kubernetes phase: ``PENDING`` is \"accepted\nbut nothing applied yet\", ``CREATING`` is \"objects applied, waiting for the\npod\", and ``RUNNING`` is \"the pod is up\". Collapsing those would leave a user\nstaring at a spinner with no idea which half is stuck."
+      },
+      "InstanceSummary": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "displayName": {
+            "type": "string",
+            "title": "Displayname"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "workspaceId": {
+            "type": "integer",
+            "title": "Workspaceid"
+          },
+          "workspaceName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspacename"
+          },
+          "ownerUserId": {
+            "type": "integer",
+            "title": "Owneruserid"
+          },
+          "ownerUsername": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ownerusername"
+          },
+          "ownerDisplayName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ownerdisplayname"
+          },
+          "resourceGroupId": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resourcegroupid"
+          },
+          "resourceGroupName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resourcegroupname"
+          },
+          "image": {
+            "type": "string",
+            "title": "Image"
+          },
+          "ideType": {
+            "$ref": "#/components/schemas/IdeType"
+          },
+          "status": {
+            "$ref": "#/components/schemas/InstanceStatus"
+          },
+          "statusMessage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Statusmessage"
+          },
+          "cpuMilli": {
+            "type": "integer",
+            "title": "Cpumilli"
+          },
+          "memoryMb": {
+            "type": "integer",
+            "title": "Memorymb"
+          },
+          "gpuType": {
+            "type": "string",
+            "title": "Gputype"
+          },
+          "gpuCount": {
+            "type": "integer",
+            "title": "Gpucount"
+          },
+          "storageGb": {
+            "type": "integer",
+            "title": "Storagegb"
+          },
+          "sshEnabled": {
+            "type": "boolean",
+            "title": "Sshenabled"
+          },
+          "sshNodePort": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sshnodeport"
+          },
+          "nodeName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nodename"
+          },
+          "startedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Startedat"
+          },
+          "expiresAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiresat"
+          },
+          "isExpired": {
+            "type": "boolean",
+            "title": "Isexpired",
+            "default": false
+          },
+          "isActive": {
+            "type": "boolean",
+            "title": "Isactive"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Createdat"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updatedat"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "displayName",
+          "workspaceId",
+          "ownerUserId",
+          "image",
+          "ideType",
+          "status",
+          "cpuMilli",
+          "memoryMb",
+          "gpuType",
+          "gpuCount",
+          "storageGb",
+          "sshEnabled",
+          "isActive",
+          "createdAt",
+          "updatedAt"
+        ],
+        "title": "InstanceSummary",
+        "description": "One row of the instance list."
+      },
+      "InstanceUpdate": {
+        "properties": {
+          "displayName": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Displayname"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          }
+        },
+        "type": "object",
+        "title": "InstanceUpdate"
+      },
       "LoginOptionsResponse": {
         "properties": {
           "providers": {
@@ -4577,6 +6078,26 @@
           "meta"
         ],
         "title": "Page[GroupSummary]"
+      },
+      "Page_InstanceSummary_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/InstanceSummary"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/PageMeta"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "meta"
+        ],
+        "title": "Page[InstanceSummary]"
       },
       "Page_ResourceGroupSummary_": {
         "properties": {
@@ -5875,6 +7396,62 @@
         "type": "object",
         "title": "RuntimeLimitUpdate"
       },
+      "SshKeyCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "publicKey": {
+            "type": "string",
+            "maxLength": 4096,
+            "minLength": 16,
+            "title": "Publickey"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "publicKey"
+        ],
+        "title": "SshKeyCreate"
+      },
+      "SshKeyRead": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "publicKey": {
+            "type": "string",
+            "title": "Publickey"
+          },
+          "fingerprint": {
+            "type": "string",
+            "title": "Fingerprint"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Createdat"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "publicKey",
+          "fingerprint",
+          "createdAt"
+        ],
+        "title": "SshKeyRead"
+      },
       "TokenResponse": {
         "properties": {
           "accessToken": {
@@ -7045,6 +8622,21 @@
               }
             ],
             "title": "Isactive"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "active",
+                  "suspended"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
           }
         },
         "type": "object",

@@ -11,6 +11,8 @@ from app.models.enums import (
     GpuDeviceStatus,
     GroupKind,
     GroupRole,
+    IdeType,
+    InstanceStatus,
     NetworkType,
     NodeStatus,
     QuotaResource,
@@ -23,6 +25,7 @@ from app.models.enums import (
     WorkspaceStatus,
 )
 from app.models.group import Group, UserGroupLink
+from app.models.instance import Instance
 from app.models.rbac import Permission, Role, RolePermission, UserRole
 from app.models.resource import (
     GPU_MODELS,
@@ -51,6 +54,9 @@ __all__ = [
     "Group",
     "GroupKind",
     "GroupRole",
+    "IdeType",
+    "Instance",
+    "InstanceStatus",
     "NetworkType",
     "NodeStatus",
     "Permission",

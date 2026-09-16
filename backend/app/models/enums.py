@@ -142,3 +142,31 @@ class QuotaResource(StrEnum):
     STORAGE = "storage"
     INSTANCE = "instance"
     TASK = "task"
+
+
+class InstanceStatus(StrEnum):
+    """Lifecycle of a container instance.
+
+    Mirrors what the UI shows, not the Kubernetes phase: ``PENDING`` is "accepted
+    but nothing applied yet", ``CREATING`` is "objects applied, waiting for the
+    pod", and ``RUNNING`` is "the pod is up". Collapsing those would leave a user
+    staring at a spinner with no idea which half is stuck.
+    """
+
+    PENDING = "pending"
+    CREATING = "creating"
+    RUNNING = "running"
+    STOPPING = "stopping"
+    STOPPED = "stopped"
+    FAILED = "failed"
+    DELETING = "deleting"
+    ERROR = "error"
+
+
+class IdeType(StrEnum):
+    """Which web IDE an instance exposes through the ingress, if any."""
+
+    NONE = "none"
+    JUPYTER = "jupyter"
+    VSCODE = "vscode"
+    WEBSSH = "webssh"

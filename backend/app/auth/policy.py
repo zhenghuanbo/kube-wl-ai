@@ -27,6 +27,7 @@ from app.core.errors import NotFoundError, PermissionDeniedError
 from app.core.logging import get_logger
 from app.models.enums import RoleCode, RoleScope
 from app.models.group import Group, UserGroupLink
+from app.models.instance import Instance
 from app.models.rbac import UserRole
 from app.models.resource import (
     ComputeNode,
@@ -243,6 +244,12 @@ SCOPE_RULES: dict[type[Any], ScopeRule] = {
     RuntimeLimit: ScopeRule(public=True),
     ComputeNode: ScopeRule(public=True),
     GpuDevice: ScopeRule(public=True),
+    # --- Phase 3 ---------------------------------------------------------
+    # An instance is visible to its owner, to their group's administrators, and
+    # to fellow members of the same workspace.
+    Instance: ScopeRule(
+        owner="owner_user_id", workspace="workspace_id", member_workspace="workspace_id"
+    ),
 }
 
 #: Column names consulted when a model has no explicit rule.

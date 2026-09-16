@@ -183,12 +183,18 @@ def reload_from_db(session_factory: async_sessionmaker[AsyncSession]):
     return _load
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def gateway() -> Generator[FakeK8sGateway]:
-    """Install an in-memory Kubernetes gateway for the duration of a test.
+    """Install an in-memory Kubernetes gateway for the duration of *every* test.
 
     No test in this suite may touch a real cluster: correctness here is about
     *what would be applied*, which the fake records exactly.
+
+    This is deliberately autouse. Requesting it explicitly is not enough — a
+    test that forgets calls ``get_gateway()``, which builds a real client
+    whenever a kubeconfig is present, and then a unit test creates namespaces
+    and PVCs on a live cluster. That failure is silent and the damage is real,
+    so the safe choice has to be the automatic one.
     """
     from app.k8s import set_gateway
 

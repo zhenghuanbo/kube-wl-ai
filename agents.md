@@ -435,7 +435,8 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 - 真实进程联调：`scripts/smoke_phase2.py` 对 uvicorn 实例执行 **33 项检查全部通过**
   （资源池与规格 CRUD、命名空间生成、工作空间重名拦截、一人一空间需显式迁移、
   普通用户越权返回 404、配额汇总、被占用资源池拒删、重新下发幂等、删除后从列表消失但记录保留）。
-  服务端未配置集群，K8s 网关自动回退到 `FakeK8sGateway` —— 这些检查在无 kubeconfig 的机器上必须能跑通。
+  服务端未开启集群（`K8S_ENABLED` 未设），K8s 网关回退到 `FakeK8sGateway` —— 这些检查必须在无集群的机器上跑通。
+  （注意：回退条件在 Phase 3 已收紧，见 §13「本轮修复的既有缺陷」第 1 条。）
 - 前端联调：Vite dev server 下三个新页面与三个新模块均编译为 200，`/api` 代理登录返回 200。
 - 下发实测（`FakeK8sGateway`）：建空间后命名空间标签含 `wl-managed=true` / `wl-group` / `wl-workspace`；
   ResourceQuota 为 `requests.cpu=8`、`requests.memory=16384Mi`、`count/deployments.apps=2`；
@@ -457,11 +458,56 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
    返回 502 `kubernetes_error` 并携带操作名。
 4. 默认列表未过滤 `is_active`：已删除的空间仍出现在列表中。现在默认只列 `is_active=true`。
 
-### ⏳ Phase 3–8（待开始）
+### 🔄 Phase 3 — 容器实例端到端（后端已完成，前端待做）
+
+| 交付 | 说明 |
+| --- | --- |
+| 数据模型 | `instances`，迁移 `64a763f3755e`。资源形态**快照**在行上（改规格不影响已建实例）；`gpu_type` 为 `VARCHAR(32)`；`expires_at` 可空表示「无期限」；`UNIQUE(workspace_id, name)` |
+| 命名 | 实例对象名 `wl-{name}-{id}`，超长截断并附哈希；`k8s_ssh_service` 与 `k8s_ide_service` **分列**——哪个是 NodePort 是安全事实，且逗号拼接会撑爆 `VARCHAR(63)` |
+| 对象集 | Deployment（`Recreate` 策略，避免两份开发环境争抢同一个 home 卷）+ **两个 Service**（仅 SSH 为 NodePort，IDE 恒为 ClusterIP）+ Ingress `/x/{id}/` + PVC + `authorized_keys` Secret |
+| SSH | 用户自助登记公钥，指纹按 OpenSSH 格式（`SHA256:` + SHA-256(blob)）本地计算，不依赖 `ssh-keygen`；未登记则**不建 Secret 也不挂卷**，容器内 sshd 不接受任何密钥 |
+| 终端 | `WS /ws/terminal/{id}`：二进制帧＝按键，文本帧＝控制（`resize`）。按类型而非内容分帧——嗅探 JSON 会在用户粘贴 JSON 时误判。容器侧阻塞套接字由工作线程驱动 |
+| IDE 票据 | `GET /instances/{id}/ide-access` 签发 `typ=ide` 的短时 JWT，锁定 `instance` 与 `namespace`；与访问令牌**类型互斥**，无法互相冒用 |
+| 配额 | 独立内核：实例数 / CPU / 内存 / 存储 / GPU(按型号) + 资源组公平上限（并发数、单实例卡数）。停止**不释放**配额——否则重启会因自己占用的容量而失败 |
+| 生命周期 | create / start / stop / delete / reconcile / logs（含 `previous=true` 看崩溃前日志）；`expire_overdue` 在服务端强制超时，UI 关掉也拦得住 |
+| API | `/instances`（9 个端点）+ `/ssh-keys`（3 个），OpenAPI 由 49 增至 **58** 个路径 |
+| 测试 | 新增 36 项，全量 **219 项通过** |
+
+**Phase 3 后端验收结果**：
+- 质量门禁：`ruff check` + `ruff format --check` + `mypy --strict`（77 文件）+ `pytest`（219 项）全绿。
+- 对象集实测（`FakeK8sGateway`）：一次创建产出 1 Deployment / 2 Service / 1 Ingress / 1 PVC；
+  Jupyter 命令含 `--ServerApp.base_url=/x/{id}/`（否则经 Ingress 后所有静态资源 404）；
+  SSH Service 端口名 `ssh`、IDE 为 `ide` 且类型分别为 `NodePort` / `ClusterIP`。
+- 配额实测：4 核配额下第 3 个 2 核实例返回 409 且 `detail.resource=cpu`；
+  资源组公平上限单独生效（并发数满时即使 CPU 有余也 409）；停止一个实例**不**腾出配额。
+- 越权实测：跨工作空间读取/停止均 404（而非 403，避免泄漏存在性）；组管理员仅见本组；
+  全局管理员全见；观察者可见不可建（403）。
+- 失败可见性：集群拒绝 Deployment 时返回 502 `kubernetes_error`，且实例以 `error` 状态**持久化**，
+  可在列表中看到 `statusMessage`，避免遗留无人认领的对象。
+- 迁移往返：`upgrade → downgrade base → upgrade` 通过，24 张表。
+
+**本轮修复的既有缺陷（含一次真实事故）**：
+
+1. **`get_gateway()` 把「存在 kubeconfig」当成「可以下发」** —— 本机 `~/.kube/config` 指向真实
+   `dev` 集群，导致 Phase 2 冒烟与 Phase 3 测试在真集群上创建了 3 个命名空间
+   （`wl-lab-a-alpha` / `wl-lab-b-beta` / `wl-smoke-lab-smoke-ws-2`）。已全部删除，并加装两道闸：
+   - 新增 `K8S_ENABLED`（默认 `false`），只有 `K8S_IN_CLUSTER` 或 `K8S_ENABLED` 为真才构造真实网关；
+     仅有 kubeconfig 一律回退 `FakeK8sGateway`。回归测试：`test_a_kubeconfig_alone_does_not_enable_a_real_cluster`。
+   - `tests/conftest.py` 的 `gateway` fixture 改为 **autouse**：此前「忘记显式请求」的测试会走真实网关，
+     失败是静默的、破坏是真实的，安全默认必须是自动的。
+2. 路由层直接调用 `get_settings()` 而非注入 `Depends(get_settings)`，会绕过依赖覆盖拿到进程级单例。
+   已全部改为 `AppSettings` 注入，否则测试与按请求配置都会被静默忽略。
+3. `WorkspaceUpdate` 缺 `status` 字段：管理员能建、能删，却无法**暂停**工作空间，
+   而暂停正是 `create_instance` 校验的状态。已补 `Literal["active","suspended"]`
+   （其余状态由 provisioner 驱动，手写会让行与集群脱节）。
+4. `/reconcile` 对**已停止**实例会经 `apply_cluster_state` 将其翻回 `creating` —— 修复一个对象不该把它悄悄启动。
+   现在按状态传入 `replicas`，停止态重建为 0 副本且状态保持 `stopped`。
+
+### ⏳ Phase 4–8（待开始）
 
 | 阶段 | 内容 | 周期 |
 | --- | --- | --- |
-| Phase 3 | 容器实例端到端（SSH / 终端 / IDE） | 3 周 |
+| Phase 3（前端） | 实例列表/详情页、xterm.js 终端组件、IDE 打开入口 | — |
 | Phase 4 | 应用程序与自定义任务 | 2 周 |
 | Phase 5 | 镜像与存储 | 2 周 |
 | Phase 6 | 用量中心 | 1.5 周 |
@@ -517,6 +563,15 @@ Vuex `namespace: true` 拼写错误、`Admin/User.vue` 为 0 字节、
   且是有意为之。
 - **异常类型决定对外状态码**：`K8sError` 曾继承 `RuntimeError`，导致集群故障对外是 500 traceback；
   现继承 `KubernetesError`（502 `kubernetes_error`）。**新增外部依赖的异常时，让它成为 `AppError` 的子类。**
+- **「存在 kubeconfig」≠「可以下发」**（真实事故）：本机 `~/.kube/config` 指向真实 `dev` 集群，
+  早期 `get_gateway()` 见到 kubeconfig 就构造真实网关，于是**单元测试与冒烟脚本在真集群上建了 3 个命名空间**。
+  现在只有 `K8S_IN_CLUSTER` / `K8S_ENABLED` 为真才连集群，且 `tests/conftest.py` 的 `gateway` fixture 是 autouse。
+  **写任何会访问外部系统的网关时，默认必须是「不访问」，配置只能收窄而不能放大。**
+  同理：测试里 `get_settings()` 必须走 `Depends` 注入，直接调用会绕过依赖覆盖拿到进程级单例。
+- **实例停止后重建对象不得把它启动**：`apply_cluster_state` 既是创建路径也是 `/reconcile` 修复路径，
+  若不带 `replicas` 就会把用户刻意停止的实例翻回 `creating`。**幂等的「修复」必须保留被修复对象的既有意图状态。**
+- **一个实例不止一个 Service**：SSH 是 `NodePort`、IDE 是 `ClusterIP`（只经后端鉴权的 Ingress 进入）。
+  把两个端口放进同一个 NodePort Service，等于在校内每个节点地址上发布一个**免鉴权的 IDE**。
 - **审计动作名是稳定接口**：`action` 表示*尝试的操作*，`status` 表示结果。
   服务层成功路径写 `user:create` 这类域名动作，中间件兜底路径经 `canonical_resource()` 归一化，
   所以同一种操作无论成败都只有一个 action 字符串。不要把结果编进动作名（`*_failed` 已废弃）。

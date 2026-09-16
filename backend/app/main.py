@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1 import health
 from app.api.v1.router import api_router
 from app.api.wellknown import router as wellknown_router
+from app.api.ws import terminal_router
 from app.core.config import Settings, get_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
@@ -85,6 +86,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Infra probes and well-known documents live at the root, outside the
     # versioned API surface.
     app.include_router(health.router)
+    # Websockets live outside the versioned prefix: they speak a terminal
+    # protocol, not the REST envelope.
+    app.include_router(terminal_router)
     app.include_router(wellknown_router)
     app.include_router(api_router, prefix=settings.api_v1_prefix)
 

@@ -8,7 +8,15 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.v1 import auth, groups, rbac, resources, users, workspaces
+from app.api.v1 import (
+    auth,
+    groups,
+    instances,
+    rbac,
+    resources,
+    users,
+    workspaces,
+)
 
 api_router = APIRouter()
 
@@ -18,3 +26,4 @@ api_router.include_router(groups.router)
 api_router.include_router(rbac.router)
 api_router.include_router(resources.router)
 api_router.include_router(workspaces.router)
+api_router.include_router(instances.router)

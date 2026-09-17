@@ -1,6 +1,6 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
-import { ADMIN_ROLES, WRITE_ROLES } from '@/config/navigation'
+import { ADMIN_ROLES } from '@/config/navigation'
 import { useAuthStore } from '@/stores/auth'
 import type { Role } from '@/types/auth'
 
@@ -12,8 +12,6 @@ declare module 'vue-router' {
     roles?: readonly Role[]
     /** Reachable without a session (login, 404). */
     public?: boolean
-    /** Owning delivery phase, shown by PlaceholderView for not-yet-built screens. */
-    phase?: string
   }
 }
 
@@ -21,8 +19,8 @@ declare module 'vue-router' {
  * Route table.
  *
  * Every navigation entry resolves to a real route so the sidebar can never
- * point at a missing page. Screens not yet built render `PlaceholderView`
- * describing the owning phase.
+ * point at a missing page. As of Phase 8 there are no placeholders left: every
+ * entry in `config/navigation.ts` opens a working screen.
  */
 const routes: RouteRecordRaw[] = [
   {
@@ -58,7 +56,7 @@ const routes: RouteRecordRaw[] = [
         path: 'images',
         name: 'images',
         component: () => import('@/views/ImagesView.vue'),
-        meta: { title: '镜像', phase: 'Phase 5' },
+        meta: { title: '镜像' },
       },
       {
         path: 'workspace',
@@ -69,14 +67,17 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'compute',
         name: 'compute',
-        component: () => import('@/views/PlaceholderView.vue'),
-        meta: { title: '计算资源', roles: WRITE_ROLES, phase: 'Phase 2' },
+        component: () => import('@/views/ComputeView.vue'),
+        // No role gate: the page shows resource pools to everyone and the node
+        // inventory only to callers holding `node:read`. Gating the whole route
+        // would hide the pools, which every role may see.
+        meta: { title: '计算资源' },
       },
       {
         path: 'storage',
         name: 'storage',
         component: () => import('@/views/StorageView.vue'),
-        meta: { title: '存储资源', phase: 'Phase 5' },
+        meta: { title: '存储资源' },
       },
       {
         path: 'usage',
@@ -117,8 +118,8 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'admin/settings',
         name: 'admin-settings',
-        component: () => import('@/views/PlaceholderView.vue'),
-        meta: { title: '系统设置', roles: ['global_admin'], phase: 'Phase 8' },
+        component: () => import('@/views/admin/SystemView.vue'),
+        meta: { title: '系统设置', roles: ['global_admin'] },
       },
       {
         path: 'admin/audit',

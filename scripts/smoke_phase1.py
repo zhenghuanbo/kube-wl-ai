@@ -122,14 +122,63 @@ check(
 
 _, token, _ = login("carol", "carol-password-123")
 status, payload = call("GET", "/auth/permissions", token)
-# Counts move whenever a permission is added; `application:update` landed in
-# Phase 4 (42 -> 43), Phase 5 (43 -> 44, via `storage:manage` and `image:share`)
-# and Phase 6 (44 -> 45, via `usage:export`). The number is asserted so that an
-# accidental widening of a role is caught, not so that it stays fixed.
-check("组管理员权限数", len(payload["permissions"]), 45)
 check("数据范围为组", payload["scope"]["kind"], "group")
 check("可见组", payload["scope"]["groupIds"], [gid])
 check("非全局管理员", payload["isGlobalAdmin"], False)
+
+# What a group administrator may do, stated as structure rather than as a count.
+#
+# This used to be `len(permissions) == 45`, and the number had to be bumped in
+# Phase 4, 5, 6 and 8. A magic number that every phase edits teaches the wrong
+# reflex: the fastest way to green is to update the expectation, which is exactly
+# the habit that lets an accidental widening through. These assertions say what
+# has to stay true instead, and none of them needs touching when a permission is
+# added on purpose.
+group_perms = set(payload["permissions"])
+
+_, root_token, _ = login(ADMIN_USERNAME, ADMIN_PASSWORD)
+_, root_payload = call("GET", "/auth/permissions", root_token)
+root_perms = set(root_payload["permissions"])
+
+# The plain-user baseline comes from the role catalogue rather than from a
+# second account. Creating a throwaway user to read a static mapping would add
+# state to prove something the server already publishes.
+_, user_role = call("GET", "/roles/user", root_token)
+plain_perms = set(user_role["permissions"])
+
+# Strictly between the two: a group admin can do more than a plain user...
+# ...and strictly less than a global administrator. `subset` is checked with
+# `<=` first so a failure names which direction broke.
+check("组管理员 ⊋ 普通用户", group_perms > plain_perms, True)
+check("组管理员 ⊆ 全局管理员", group_perms <= root_perms, True)
+check("组管理员 ⊊ 全局管理员（不是等同）", group_perms < root_perms, True)
+
+# The specific codes a group administrator must never hold: the global-only
+# administration surface. `user:create` and `node:sync` are the two that would
+# turn a lab administrator into a platform administrator.
+#
+# `audit:read` is deliberately **not** here. A group administrator holds it, and
+# that is a design decision rather than an oversight: they may read the trail of
+# their own group's members, which is what `DataScope` narrows to. Excluding it
+# is the global administrator's ability to see *other* groups and unattributed
+# rows, and that is what the Phase 8 tests pin down. Listing it as forbidden here
+# would assert the opposite of the design.
+FORBIDDEN_FOR_GROUP_ADMIN = {
+    "user:create",
+    "user:delete",
+    "user:grant_role",
+    "group:create",
+    "group:delete",
+    "node:sync",
+    "resource_group:create",
+    "resource_group:delete",
+    "system:config",
+}
+check(
+    "组管理员不含全局专属权限",
+    sorted(group_perms & FORBIDDEN_FOR_GROUP_ADMIN),
+    [],
+)
 
 status, visible = call("GET", "/users", token)
 # carol 是 lab-b 唯一成员，看不到不在本组的 admin。

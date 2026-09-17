@@ -196,20 +196,44 @@ const GROUP = {
   updatedAt: '2025-01-01T00:00:00Z',
 }
 
+/**
+ * A resource pool, in the shape `ResourceGroupDetail` actually declares.
+ *
+ * This fixture used to carry `nodeSelector` and a `limits` block with invented
+ * field names (`maxGpuCountPerUser`, `maxInstancesPerUser`). Nothing failed,
+ * because no view's assertions reached those fields — which is exactly the
+ * problem: a fixture that does not match the API is a stub that cannot catch a
+ * view reading a field the server never sends. It is reconstructed from
+ * `frontend/src/types/resource.ts`, and `check-frontend-types.py` is what keeps
+ * the two honest.
+ */
 const RESOURCE_GROUP = {
   id: 1,
   name: 'gpu-a100',
   displayName: 'A100 资源组',
   description: null,
+  kind: 'public',
+  groupId: null,
+  groupName: null,
+  networkType: 'default',
+  maxRuntimeSeconds: 86400,
+  storageClass: 'ceph-rbd',
   isActive: true,
-  nodeSelector: { 'gpu-type': 'a100' },
+  gpuModels: ['A100'],
+  specCount: 1,
+  createdAt: '2025-01-01T00:00:00Z',
+  updatedAt: '2025-01-01T00:00:00Z',
+  // Detail-only fields.
+  k8sLabelSelector: { 'gpu-type': 'a100' },
+  k8sTolerations: [],
   limits: {
+    id: 1,
+    maxConcurrentInstances: 4,
+    maxGpuPerInstance: 1,
+    maxGpuPerUser: 2,
     maxCpuMilliPerUser: 32000,
     maxMemoryMbPerUser: 131072,
-    maxGpuCountPerUser: 2,
     maxStorageGbPerUser: 500,
-    maxInstancesPerUser: 4,
-    maxRuntimeSeconds: 86400,
   },
   specs: [
     {
@@ -223,8 +247,6 @@ const RESOURCE_GROUP = {
       isActive: true,
     },
   ],
-  createdAt: '2025-01-01T00:00:00Z',
-  updatedAt: '2025-01-01T00:00:00Z',
 }
 
 const APPLICATION = {
@@ -327,7 +349,89 @@ const RETURNS = {
   listWorkspaces: page([WORKSPACE]),
   listResourceGroups: page([RESOURCE_GROUP]),
   listResourceSpecs: page([RESOURCE_GROUP.specs[0]]),
-  listNodes: [],
+  getResourceGroup: RESOURCE_GROUP,
+  // One node, so `ComputeView`'s node table renders a row rather than an empty
+  // state. The view only shows this section to a caller holding `node:read`, and
+  // the fixture role below is `global_admin`, so it is reached.
+  listNodes: [
+    {
+      id: 1,
+      name: 'gpu-node-01',
+      displayName: 'gpu-node-01',
+      status: 'ready',
+      schedulable: true,
+      cpuTotalMilli: 128000,
+      memoryTotalMb: 524288,
+      cpuAllocatableMilli: 126000,
+      memoryAllocatableMb: 500000,
+      labels: { 'gpu-type': 'a100' },
+      isManaged: true,
+      gpuCount: 8,
+      gpuModels: ['A100'],
+      lastSeenAt: '2025-01-01T00:00:00Z',
+    },
+  ],
+  // The system page is the one screen whose whole payload is a single object with
+  // no list inside it; a missing fixture would leave it rendering against
+  // `undefined` fields, so every field the template touches is present here.
+  getSystemInfo: {
+    appName: 'kube-wl-ai',
+    appVersion: '0.8.0',
+    environment: 'production',
+    debug: false,
+    authProviders: ['ldap', 'local'],
+    features: [
+      {
+        key: 'ldap',
+        title: 'LDAP / FreeIPA 目录',
+        enabled: true,
+        detail: '绑定 ldaps://ipa.example.edu，基准 DN dc=example,dc=edu',
+        configKey: 'LDAP_URI',
+      },
+      {
+        key: 'grafana',
+        title: 'Grafana 监控',
+        enabled: false,
+        detail: '未配置，监控中心只显示平台自身统计',
+        configKey: 'GRAFANA_PUBLIC_URL',
+      },
+    ],
+    warnings: [
+      {
+        code: 'storage_class_missing',
+        severity: 'warning',
+        title: '有存储类型没有配置 StorageClass',
+        detail: '对应的「创建数据盘」会在运行时才失败。',
+        remedy: 'STORAGE_CLASS_DATA',
+      },
+      {
+        code: 'debug_in_production',
+        severity: 'critical',
+        title: '生产环境开启了 DEBUG',
+        detail: '调试模式会输出更详细的错误信息。',
+        remedy: 'DEBUG=false',
+      },
+    ],
+    accessTokenMinutes: 60,
+    refreshTokenDays: 14,
+    loginRateLimitEnabled: true,
+    loginRateLimitWindowSeconds: 900,
+    loginRateLimitAttemptsPerIp: 30,
+    loginRateLimitAttemptsPerUsername: 8,
+    counts: {
+      users: 128,
+      activeUsers: 120,
+      groups: 6,
+      workspaces: 9,
+      nodes: 12,
+      gpus: 96,
+      instances: 41,
+      runningInstances: 23,
+    },
+    sshMode: 'nodeport',
+    sshHost: 'ssh.example.edu',
+    storageClasses: { home: 'ceph-rbd', data: null, share: 'cephfs' },
+  },
   listQuotas: [],
   listRuntimeLimits: [],
   listRoles: [{ id: 1, code: 'user', name: '普通用户', description: null, permissions: [] }],
@@ -736,6 +840,26 @@ const EXPECTS = {
     'A100',
     'V100',
   ],
+  // Pools plus the node inventory. `A100` and `gpu-node-01` are the two values
+  // that prove the conditional node section actually rendered — a role-gated
+  // section that silently disappears is the failure this is here to catch.
+  ComputeView: ['计算资源', '资源池', 'A100 资源组', 'gpu-a100', 'A100', '集群节点', 'gpu-node-01'],
+  // The warning list is the page. `STORAGE_CLASS_DATA` proves the remedy renders,
+  // and the critical one must sort above the warning despite arriving second.
+  SystemView: [
+    '系统设置',
+    '配置体检',
+    '生产环境开启了 DEBUG',
+    'STORAGE_CLASS_DATA',
+    '集成状态',
+    'LDAP / FreeIPA 目录',
+    '已接入',
+    '未接入',
+    '运行时',
+    '0.8.0',
+    '存储类',
+    'ceph-rbd',
+  ],
   UsageView: [
     '用量中心',
     '255',
@@ -782,6 +906,27 @@ const EXPECTS_ABSENT = {
     '没有登记的加速卡',
     '没有同步到节点',
   ],
+}
+
+/**
+ * Extra permission codes granted for one view only.
+ *
+ * The mount seeds `auth.permissions` from a single baseline, so every screen
+ * renders as the same caller. That is fine for layout, but it makes a
+ * role-gated branch untestable: `ComputeView` hides its node inventory unless
+ * the caller holds `node:read`, and with no way to say "mount this one as a
+ * group administrator" the section could break entirely and the check would
+ * still pass — which is precisely the silent narrowing this harness exists to
+ * catch.
+ *
+ * Codes here are *added* to the baseline, and the view's `EXPECTS_ABSENT`
+ * entries still have to hold, so a grant cannot be used to paper over a branch
+ * that should not have rendered.
+ */
+const VIEW_PERMISSIONS = {
+  // The one code `ComputeView` gates on. A group administrator holds it; a plain
+  // user does not, and the API refuses the call either way.
+  ComputeView: ['node:read'],
 }
 
 // ---------------------------------------------------------------------------
@@ -1124,7 +1269,10 @@ try {
       // tested.
       const auth = bundle.useAuthStore()
       auth.user = USER
-      auth.permissions = new Set(RETURNS.fetchPermissions.permissions)
+      auth.permissions = new Set([
+        ...RETURNS.fetchPermissions.permissions,
+        ...(VIEW_PERMISSIONS[label] ?? []),
+      ])
       auth.scopeKind = 'group'
       auth.scopeGroupIds = [1]
       auth.scopeWorkspaceIds = [1]

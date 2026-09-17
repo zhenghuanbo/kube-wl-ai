@@ -20,6 +20,7 @@ from app.api.v1 import (
     rbac,
     resources,
     storages,
+    system,
     tasks,
     usage,
     users,
@@ -43,3 +44,4 @@ api_router.include_router(usage.router)
 api_router.include_router(api_tokens.router)
 api_router.include_router(audit.router)
 api_router.include_router(monitor.router)
+api_router.include_router(system.router)

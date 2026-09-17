@@ -15,13 +15,12 @@ from app.api.ws import terminal_router
 from app.core.config import Settings, get_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
+from app.core.version import APP_NAME, VERSION
 from app.db.session import dispose_engine, init_engine
 from app.middleware.audit import AuditMiddleware
 from app.middleware.request_context import REQUEST_ID_HEADER, RequestContextMiddleware
 
 logger = get_logger(__name__)
-
-VERSION = "0.1.0"
 
 _DEV_CORS_ORIGINS = [
     "http://localhost:5173",
@@ -53,7 +52,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         logger.info("shutdown")
 
     app = FastAPI(
-        title="kube-wl-ai API",
+        title=f"{APP_NAME} API",
         description="Kubernetes GPU resource scheduling and management system",
         version=VERSION,
         docs_url="/docs",

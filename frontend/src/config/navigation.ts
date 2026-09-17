@@ -7,7 +7,6 @@
  */
 import type { Role } from '@/types/auth'
 
-export const WRITE_ROLES: readonly Role[] = ['user', 'group_admin', 'global_admin']
 export const ADMIN_ROLES: readonly Role[] = ['group_admin', 'global_admin']
 
 export interface NavHeading {
@@ -36,7 +35,9 @@ export const NAV_ENTRIES: readonly NavEntry[] = [
 
   { kind: 'heading', title: '资源中心' },
   { kind: 'item', title: '镜像', icon: 'mdi-docker', to: '/images' },
-  { kind: 'item', title: '计算资源', icon: 'mdi-expansion-card', to: '/compute', roles: WRITE_ROLES },
+  // No role gate: the page shows pools to everyone and the node inventory only
+  // to callers the API will answer for. See `views/ComputeView.vue`.
+  { kind: 'item', title: '计算资源', icon: 'mdi-expansion-card', to: '/compute' },
   { kind: 'item', title: '资源与配额', icon: 'mdi-tune-variant', to: '/admin/resources', roles: ADMIN_ROLES },
   { kind: 'item', title: '存储资源', icon: 'mdi-database-outline', to: '/storage' },
   { kind: 'item', title: '用量中心', icon: 'mdi-chart-timeline-variant', to: '/usage' },

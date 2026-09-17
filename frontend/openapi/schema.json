@@ -3,7 +3,7 @@
   "info": {
     "title": "kube-wl-ai API",
     "description": "Kubernetes GPU resource scheduling and management system",
-    "version": "0.1.0"
+    "version": "0.8.0"
   },
   "paths": {
     "/healthz": {
@@ -7913,6 +7913,33 @@
           }
         }
       }
+    },
+    "/api/v1/system/info": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "系统信息与配置体检（全局管理员）",
+        "description": "Runtime state, integration status, and concrete misconfiguration warnings.",
+        "operationId": "info_api_v1_system_info_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemInfo"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -14253,6 +14280,245 @@
         ],
         "title": "StorageUsage",
         "description": "Totals for the page header."
+      },
+      "SystemCounts": {
+        "properties": {
+          "users": {
+            "type": "integer",
+            "title": "Users"
+          },
+          "activeUsers": {
+            "type": "integer",
+            "title": "Activeusers"
+          },
+          "groups": {
+            "type": "integer",
+            "title": "Groups"
+          },
+          "workspaces": {
+            "type": "integer",
+            "title": "Workspaces"
+          },
+          "nodes": {
+            "type": "integer",
+            "title": "Nodes"
+          },
+          "gpus": {
+            "type": "integer",
+            "title": "Gpus"
+          },
+          "instances": {
+            "type": "integer",
+            "title": "Instances"
+          },
+          "runningInstances": {
+            "type": "integer",
+            "title": "Runninginstances"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "users",
+          "activeUsers",
+          "groups",
+          "workspaces",
+          "nodes",
+          "gpus",
+          "instances",
+          "runningInstances"
+        ],
+        "title": "SystemCounts"
+      },
+      "SystemFeature": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail"
+          },
+          "configKey": {
+            "type": "string",
+            "title": "Configkey"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "key",
+          "title",
+          "enabled",
+          "detail",
+          "configKey"
+        ],
+        "title": "SystemFeature",
+        "description": "One integration, and whether it is actually usable."
+      },
+      "SystemInfo": {
+        "properties": {
+          "appName": {
+            "type": "string",
+            "title": "Appname"
+          },
+          "appVersion": {
+            "type": "string",
+            "title": "Appversion"
+          },
+          "environment": {
+            "type": "string",
+            "title": "Environment"
+          },
+          "debug": {
+            "type": "boolean",
+            "title": "Debug"
+          },
+          "authProviders": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Authproviders"
+          },
+          "features": {
+            "items": {
+              "$ref": "#/components/schemas/SystemFeature"
+            },
+            "type": "array",
+            "title": "Features"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/SystemWarning"
+            },
+            "type": "array",
+            "title": "Warnings"
+          },
+          "accessTokenMinutes": {
+            "type": "integer",
+            "title": "Accesstokenminutes"
+          },
+          "refreshTokenDays": {
+            "type": "integer",
+            "title": "Refreshtokendays"
+          },
+          "loginRateLimitEnabled": {
+            "type": "boolean",
+            "title": "Loginratelimitenabled"
+          },
+          "loginRateLimitWindowSeconds": {
+            "type": "integer",
+            "title": "Loginratelimitwindowseconds"
+          },
+          "loginRateLimitAttemptsPerIp": {
+            "type": "integer",
+            "title": "Loginratelimitattemptsperip"
+          },
+          "loginRateLimitAttemptsPerUsername": {
+            "type": "integer",
+            "title": "Loginratelimitattemptsperusername"
+          },
+          "counts": {
+            "$ref": "#/components/schemas/SystemCounts"
+          },
+          "sshMode": {
+            "type": "string",
+            "title": "Sshmode"
+          },
+          "sshHost": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sshhost"
+          },
+          "storageClasses": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": "object",
+            "title": "Storageclasses"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "appName",
+          "appVersion",
+          "environment",
+          "debug",
+          "accessTokenMinutes",
+          "refreshTokenDays",
+          "loginRateLimitEnabled",
+          "loginRateLimitWindowSeconds",
+          "loginRateLimitAttemptsPerIp",
+          "loginRateLimitAttemptsPerUsername",
+          "counts",
+          "sshMode"
+        ],
+        "title": "SystemInfo",
+        "description": "Runtime state an administrator needs in order to diagnose a deployment.\n\nEvery field is a boolean, a count, a duration, or a string an operator could\nread from the ConfigMap. Credentials are absent by construction — see the\nmodule docstring on the service."
+      },
+      "SystemWarning": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "critical",
+              "warning",
+              "info"
+            ],
+            "title": "Severity"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail"
+          },
+          "remedy": {
+            "type": "string",
+            "title": "Remedy"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "code",
+          "severity",
+          "title",
+          "detail",
+          "remedy"
+        ],
+        "title": "SystemWarning",
+        "description": "A concrete misconfiguration.\n\nThree fields beyond the code, because a warning that only names a setting\nmakes the reader go and discover whether it matters: `detail` says what it\ncauses, `remedy` says what to change."
       },
       "TaskCreate": {
         "properties": {

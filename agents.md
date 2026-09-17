@@ -83,7 +83,7 @@ kube-wl-ai/
 ├── .github/workflows/ci.yml
 ├── design/                       # 原型截图（功能/字段基线，非视觉基线）
 ├── docs/                         # 设计与运维文档
-├── legacy/                       # 重写前旧代码，只读留档，Phase 8 删除
+├── legacy/                       # 重写前旧代码，只读留档（未删除，见 14.4）
 ├── scripts/
 │   ├── gen-openapi.sh            # 导出 OpenAPI → frontend/openapi/schema.json
 │   ├── migrate.sh                # Alembic 包装脚本
@@ -102,6 +102,7 @@ kube-wl-ai/
 │   ├── app/
 │   │   ├── main.py               # create_app()，应用工厂
 │   │   ├── core/                 # config / logging / errors / deps
+│   │   │                         # + version.py（版本单一来源，Phase 9）
 │   │   ├── db/                   # base(DeclarativeBase) / session(engine)
 │   │   ├── models/               # ORM 模型（Phase 1 起）
 │   │   ├── schemas/              # Pydantic 出入参
@@ -126,7 +127,8 @@ kube-wl-ai/
         ├── composables/          # usePermissions()
         ├── api/                  # axios 实例（Phase 1 起）
         ├── types/                # 由 OpenAPI 生成的类型
-        ├── layouts/  components/  views/
+        ├── layouts/  components/  views/   # 全部为真实页面，已无占位页
+        └── (Phase 9 删除 PlaceholderView.vue)
 ```
 
 ---
@@ -1245,6 +1247,108 @@ ValidatingAdmissionPolicy——它**不自动安装**，因为它是集群级生
 
 > 每期必须可运行并**通过验收**后才进入下一期。
 
+### ✅ Phase 9 — 收尾：最后两块占位页面（已完成）
+
+Phase 8 结束时，`config/navigation.ts` 里还有两个入口指向 `PlaceholderView`。
+它们不是「尚未排期」，而是**已经排期但会出错**，所以必须处理掉：
+
+- **`/compute`（计算资源）** 被 `roles: WRITE_ROLES` 挡住，但页面的内容
+  （节点清单）需要 `node:read`，而 `user` 没有这个权限——普通用户点进去只会看到占位符，
+  一旦接上真实接口就是 403。同时它和 `/admin/resources` 的「集群节点」页签完全重复。
+- **`/admin/settings`（系统设置）** 在后端**根本没有对应接口**，却挂在一个真实权限码
+  `system:config` 下面。
+
+**交付（后端）**
+
+| 交付物 | 位置 |
+| --- | --- |
+| 版本单一来源 | `app/core/version.py`（`VERSION` / `APP_NAME` / `build_info()`） |
+| 系统信息服务 | `app/services/system.py`（`_features` / `_warnings` / `build_info`） |
+| 系统信息读模型 | `app/schemas/system.py`（`SystemInfo` / `SystemFeature` / `SystemWarning` / `SystemCounts`） |
+| 系统信息接口 | `app/api/v1/system.py`：`GET /system/info`（**只有读，没有写**，见「关键设计决策」） |
+| 验收测试 | `tests/test_acceptance_phase9.py`（**20 项**） |
+| 冒烟脚本 | `scripts/smoke_phase9.py`（**23 项**，可重复） |
+
+**交付（前端）**
+
+| 交付物 | 位置 |
+| --- | --- |
+| 计算资源页面 | `frontend/src/views/ComputeView.vue`（`/compute`，不再有角色门槛） |
+| 系统设置页面 | `frontend/src/views/admin/SystemView.vue`（`/admin/settings`，`global_admin`） |
+| 系统信息类型与 API | `frontend/src/types/system.ts`、`frontend/src/api/system.ts` |
+| 占位页删除 | `frontend/src/views/PlaceholderView.vue` **已删除**（不再有任何路由引用） |
+| 死代码清理 | `WRITE_ROLES`、`RouteMeta.phase` 一并移除（全站已无占位页） |
+
+**验收证据**
+
+| 项目 | 结果 |
+| --- | --- |
+| `pytest`（全量） | **481 passed**（Phase 9 新增 20） |
+| `scripts/smoke_phase1..9.py` | 干净库上按序 **9/9 全绿**，共 428 项 |
+| `ruff check` / `ruff format --check` / `mypy app` | 通过 / 通过 / 125 文件无问题 |
+| `check-frontend-types.py` | **78** 个接口比对 schema（Phase 9 新增 4） |
+| `smoke_frontend_views.mjs` | **19/19** 视图，已无占位页 |
+| `vue-tsc --noEmit` | 通过 |
+
+**关键设计决策**
+
+1. **系统设置页只读，且这是设计而不是没做完。** 运行时配置来自环境变量，在启动时读一次。
+   一个能编辑它的表单只有两种可能：改了一个进程已经缓存的值（页面在说谎），
+   或者需要一个它没有能力触发的重启。真正的接口是 ConfigMap 和 chart，
+   这个页面的职责是告诉管理员该往里写什么——所以每条告警都带 `remedy` 字段。
+2. **settings 对象绝不整体序列化。** `app/services/system.py` 逐字段拷贝，
+   于是「新增一个 Secret 配置项」不会自动出现在页面上——它要出现必须有人写一行代码，
+   而那是一个决定。验收测试用**金丝雀值**（`CANARIES`）扫描整个响应体，
+   而不是逐个字段断言：真正的泄漏往往发生在没人想到的地方（比如某个 feature 的
+   `detail` 里），逐字段检查只覆盖写测试的人当时想到的那些。
+3. **告警列表才是这个页面存在的理由。** 打印配置的页面没人看；说「
+   `AUTH_PROVIDERS=ldap` 但 `LDAP_URI` 为空，于是所有目录账号都会登录失败，
+   而错误看起来像密码错误」的页面回答了管理员真正带着的那个问题。
+   因此每条告警三个字段：`detail` 说后果，`remedy` 说改哪里。
+4. **不写「生产环境 SECRET_KEY 过短」这条告警。** `Settings._guard_production_secrets`
+   已经让进程在生产环境用弱密钥时**直接启动失败**。为一个进程根本无法处于的状态写告警，
+   是读起来像活控件、实际上是死代码的东西。
+5. **`/compute` 不加权限，而是分两段渲染。** 资源池所有人都看得到（`resource_group:read`
+   在 user 基线里），节点清单只对持有 `node:read` 的人渲染。给普通用户补 `node:read`
+   也能让页面「看起来正常」，但那是在为一个导航项扩大权限面。页面明说自己展示了什么、
+   为什么——而不是让读者猜某个页签是不是加载失败了。
+6. **规格用展开行懒加载，而不是链到管理页。** 列表接口只带 `specCount`，
+   展开时再取详情——每行都预取就是每次进页面都为没人展开的东西发一轮请求。
+   这里原本写的是「查看规格 →」指向 `/admin/resources`，而那是个**管理员页面**：
+   普通用户点进去会被拦住，正是本次要修的那类 bug。
+
+**本期踩到的坑**
+
+- **Phase 1 冒烟用 `len(permissions) == 45` 断言组管理员权限数**，
+  Phase 4/5/6/8 各让它失败一次，每次的修法都是把数字改大。
+  **一个每期都要改的魔数在教错误的反射**：让测试变绿最快的方法就是改期望值，
+  而这恰好是放行一次意外扩权的习惯。改成结构性断言：`组管理员 ⊋ 普通用户`、
+  `⊆ 全局管理员`、`⊊ 全局管理员`，外加一份**全局专属权限黑名单**。
+  普通用户基线从 `GET /roles/user` 读，而不是新建一个一次性账号——
+  为了读一份服务器已经公布的静态映射而制造状态，是自找麻烦。
+- **`audit:read` 一度被写进那份黑名单**，而组管理员**本来就该有**它
+  （只能看本组的审计行，由 DataScope 收窄）。断言差点反过来把设计钉死。
+  黑名单现在只列真正的全局专属权限，并在注释里写明为什么 `audit:read` 不在里面。
+- **`smoke_frontend_views.mjs` 的 `RESOURCE_GROUP` 夹具是过期的**：
+  它带着 `nodeSelector` 和一套编造的 `limits` 字段名（`maxGpuCountPerUser` 等），
+  与 `ResourceGroupSummary` 完全不符。没有报错，因为没有任何视图的断言碰到那些字段
+  ——**这正是问题所在**：夹具与 API 不一致，就是一个抓不到「视图读了服务器从不发送的字段」
+  的桩。已按 `types/resource.ts` 重建。
+- **夹具会掩盖「角色门槛」这类缺陷。** 挂载时只从一份基线播种权限，
+  于是每个页面都以同一个身份渲染，`node:read` 分支根本测不到。
+  给 `smoke_frontend_views.mjs` 加了 `VIEW_PERMISSIONS`（按视图追加权限码），
+  这项检查才第一次能覆盖角色分支。
+- **`SecretStr` 在赋值时不校验。** 把 `settings.jwt_private_key` 直接赋成 `str`，
+  要到第一次 `.get_secret_value()` 才炸，而那时堆栈在令牌签名里，与测试毫无关系。
+  另外**不要为了造金丝雀去改 `secret_key`**：它给访问令牌签名，
+  改掉之后 `admin_client` 手上的令牌立刻失效，测试会以一个和泄漏无关的 401 失败。
+  改成断言**真实的**签名密钥不出现在响应里——这本来就是更强的检查。
+- **同一份夹具里不要改 `database_url`。** `engine` fixture 用它建测试库，
+  改成 Postgres DSN 会让整套测试指向一个真实数据库。
+- **`test_the_version_matches_the_health_probe` 顺手抓到一个真实重复**：
+  `VERSION = "0.1.0"` 同时写在 `app/main.py` 和 `app/api/v1/health.py` 里。
+  已收敛到 `app/core/version.py`——一个能和自己不一致的版本号比没有版本号更糟。
+
 ### 有意推迟（非遗漏）
 
 - **OIDC** 仅预留扩展点：`OidcProvider.exchange_code()` 明确抛错说明。大学的统一身份是
@@ -1261,6 +1365,8 @@ ValidatingAdmissionPolicy——它**不自动安装**，因为它是集群级生
 - ~~审计日志的读取接口~~ 已随 Phase 8 交付（`app/api/v1/audit.py` + `/admin/audit`）。
   仍然没有的是**审计的实时告警**：写入完整、可查询、可导出，但没人盯着，所以
   「有人正在爆破」这件事只有事后翻日志才知道。
+- ~~`/compute` 与 `/admin/settings` 两块占位页~~ 已随 Phase 9 交付；
+  前端**已无任何 `PlaceholderView`**，`config/navigation.ts` 的每个入口都通向真实页面。
 - **未在真实集群上部署验证。** Helm chart 过了 `helm lint`、两条版本分支的渲染，
   以及针对真实 1.28 API Server 的 `kubectl apply --dry-run=server`，
   但**从未真正 `helm install` 过**。镜像仓库地址、StorageClass 名称、
@@ -1415,7 +1521,12 @@ Vuex `namespace: true` 拼写错误、`Admin/User.vue` 为 0 字节、
 | Grafana 面板编目与签名令牌 | `backend/app/monitoring/grafana.py` |
 | Grafana 部署（生成器/面板/provisioning/说明） | `deploy/grafana/`（`build_dashboards.py` 带越权自检） |
 | 监控中心前端 | `frontend/src/views/MonitorView.vue`、`frontend/src/api/monitor.ts`、`frontend/src/types/monitor.ts` |
-| **部署冒烟验收** | `scripts/smoke-env.sh` + `scripts/smoke_phase1.py` … `scripts/smoke_phase7.py` |
+| 版本单一来源 | `backend/app/core/version.py`（`VERSION` / `APP_NAME` / `build_info()`） |
+| **系统信息与配置体检（后端）** | `backend/app/services/system.py`、`backend/app/api/v1/system.py` |
+| 系统信息读模型 | `backend/app/schemas/system.py`（金丝雀测试见 `tests/test_acceptance_phase9.py`） |
+| 系统设置前端 | `frontend/src/views/admin/SystemView.vue`、`frontend/src/api/system.ts`、`frontend/src/types/system.ts` |
+| 计算资源前端（全员可读） | `frontend/src/views/ComputeView.vue`（节点段按 `node:read` 条件渲染） |
+| **部署冒烟验收** | `scripts/smoke-env.sh` + `scripts/smoke_phase1.py` … `scripts/smoke_phase9.py` |
 | **前端契约校验** | `scripts/check-frontend-types.py`（新请求体类型记得同步 `PAYLOAD_ALIASES`） |
-| **前端视图冒烟** | `scripts/smoke_frontend_views.mjs`（`happy-dom` 里真实挂载 + 内容断言 + `EXPECTS_ABSENT` 反向断言） |
+| **前端视图冒烟** | `scripts/smoke_frontend_views.mjs`（`happy-dom` 里真实挂载 + 内容断言 + `EXPECTS_ABSENT` 反向断言 + `VIEW_PERMISSIONS` 按视图改角色） |
 | 旧实现参考 | `legacy/README.md` |

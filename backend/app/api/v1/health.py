@@ -8,11 +8,10 @@ from fastapi import APIRouter, Response
 from sqlalchemy import text
 
 from app.core.config import get_settings
+from app.core.version import VERSION
 from app.db.session import get_engine
 
 router = APIRouter(tags=["health"])
-
-VERSION = "0.1.0"
 
 
 @router.get("/healthz", summary="Liveness probe")

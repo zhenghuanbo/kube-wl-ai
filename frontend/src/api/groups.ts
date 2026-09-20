@@ -56,7 +56,6 @@ export interface GroupSyncResult {
   membershipsAdded: number
   membershipsRemoved: number
   membershipsUpdated: number
-  usersCreated: number
   errors: string[]
   dryRun: boolean
 }

@@ -337,6 +337,40 @@ async def test_ldap_enabled_without_a_uri_is_critical(
     assert codes["ldap_without_uri"]["severity"] == "critical"
 
 
+async def test_ldap_without_a_service_account_is_reported(
+    admin_client: AsyncClient, settings: Settings
+) -> None:
+    """
+    The more insidious half of the same misconfiguration.
+
+    A reachable directory with no ``LDAP_BIND_DN`` still lets people log in,
+    because ldap3 quietly binds anonymously. What they lose is everything else —
+    email, real name and group membership — so they land on the default role with
+    no explanation, while the deployment looks healthy from the outside.
+    """
+    settings.auth_providers = ["ldap", "local"]
+    settings.ldap_uri = "ldaps://ipa.example.edu"
+    settings.ldap_base_dn = "dc=example,dc=edu"
+    settings.ldap_bind_dn = ""
+
+    codes = {w["code"]: w for w in (await admin_client.get(SYSTEM)).json()["warnings"]}
+    assert codes["ldap_without_service_account"]["severity"] == "warning"
+    assert "LDAP_BIND_DN" in codes["ldap_without_service_account"]["remedy"]
+
+
+async def test_ldap_with_a_service_account_is_not_reported(
+    admin_client: AsyncClient, settings: Settings
+) -> None:
+    settings.auth_providers = ["ldap", "local"]
+    settings.ldap_uri = "ldaps://ipa.example.edu"
+    settings.ldap_base_dn = "dc=example,dc=edu"
+    settings.ldap_bind_dn = "uid=svc,cn=users,cn=accounts,dc=example,dc=edu"
+    settings.ldap_bind_password = SecretStr("service-secret")
+
+    codes = {w["code"] for w in (await admin_client.get(SYSTEM)).json()["warnings"]}
+    assert "ldap_without_service_account" not in codes
+
+
 async def test_a_disabled_rate_limiter_is_reported(
     admin_client: AsyncClient, settings: Settings
 ) -> None:

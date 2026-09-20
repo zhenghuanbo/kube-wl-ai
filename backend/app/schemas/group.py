@@ -112,6 +112,9 @@ class GroupSyncResult(ApiModel):
     memberships_added: int = 0
     memberships_removed: int = 0
     memberships_updated: int = 0
-    users_created: int = 0
+    #: ``users_created`` used to live here and was always 0. The reconcile
+    #: deliberately never creates accounts — directory users are provisioned on
+    #: first login, and members it cannot find are reported in ``errors`` — so
+    #: the field only invited the question "why is this never non-zero".
     errors: list[str] = Field(default_factory=list)
     dry_run: bool = False

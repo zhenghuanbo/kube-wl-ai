@@ -23,6 +23,7 @@ from app.schemas.group import (
     GroupSyncResult,
     GroupUpdate,
 )
+from app.services import group_admin
 
 logger = get_logger(__name__)
 
@@ -220,8 +221,16 @@ async def add_member(
     session.add(link)
     await session.flush()
 
+    if payload.role_in_group == GroupRole.GROUP_ADMIN:
+        # Adding someone as the group's administrator has to confer the role too,
+        # or they can see the group and do nothing in it.
+        await group_admin.set_group_scoped_role(
+            session, user_id=user.id, group_id=group.id, is_admin=True
+        )
+
     await ensure_primary_group(session, user)
     await session.refresh(link, ["group", "user"])
+    await session.refresh(user, ["role_links"])
     logger.info(
         "group_member_added", group=group.name, username=user.username, actor=actor.username
     )
@@ -244,9 +253,23 @@ async def update_member(
         setattr(link, key, value)
 
     await session.flush()
+
+    if "role_in_group" in fields:
+        # Both directions. A promotion that only set the flag would leave the
+        # member list showing an administrator whose every action is refused;
+        # a demotion that only cleared the flag would leave the permissions
+        # behind.
+        await group_admin.set_group_scoped_role(
+            session,
+            user_id=user_id,
+            group_id=group.id,
+            is_admin=link.role_in_group == GroupRole.GROUP_ADMIN,
+        )
+
     user = await session.get(User, user_id)
     if user is not None:
         await ensure_primary_group(session, user)
+        await session.refresh(user, ["role_links"])
     await session.refresh(link, ["group", "user"])
     return link
 
@@ -305,9 +328,16 @@ async def sync_directory(
     )
     state = _SyncState()
 
-    for name in matched:
-        members = await provider.directory_group_members(name) or []
-        await _reconcile_group(session, local_groups[name], members, state, dry_run=dry_run)
+    if matched:
+        # One pass where the provider supports it. Falling back to per-group
+        # calls is correct but costs a connection handshake each.
+        bulk = await provider.directory_group_members_many(matched)
+        for name in matched:
+            if bulk is not None:
+                members = bulk.get(name, [])
+            else:
+                members = await provider.directory_group_members(name) or []
+            await _reconcile_group(session, local_groups[name], members, state, dry_run=dry_run)
 
     if not dry_run:
         await session.flush()
@@ -389,6 +419,15 @@ async def _reconcile_group(
         if link.is_directory_managed and user_id not in target_user_ids:
             state.removed += 1
             if not dry_run:
+                if link.role_in_group == GroupRole.GROUP_ADMIN:
+                    # Leaving the directory group has to take the group-admin
+                    # role with it. Dropping only the membership would leave the
+                    # account holding group-admin authority over a group it is
+                    # no longer in — the dangerous direction of the drift, since
+                    # nothing in the member list would show it.
+                    await group_admin.set_group_scoped_role(
+                        session, user_id=user_id, group_id=group.id, is_admin=False
+                    )
                 await session.delete(link)
 
     if not dry_run and (state.added or state.removed):

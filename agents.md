@@ -930,6 +930,19 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
   （`group_admin_requires_group`）—— 静默放宽成全局会给出远超请求范围的权限。
   **这个 bug 是被 `scripts/smoke_phase6.py` 抓到的，pytest 全绿也没发现它**：
   测试夹具一直用工厂函数（同时写了两种记录），只有走 HTTP 建号的路径才暴露。
+- **同一条不变量当时只覆盖了「建号」一条路径**，其余四条改 `role_in_group` 或组范围
+  角色的路径各自只动一种记录，于是它以镜像形式残留，而且两个方向都出现过：
+  - 成员管理页 `PATCH /groups/{id}/members/{uid}` 设 `role_in_group=group_admin`
+    只写了标记、没写角色 —— **看得到、做不了**，正是上一个缺陷的镜像。
+  - 目录同步（`sync_directory` 与每次登录的 `sync_directory_groups`）删除成员时
+    只删成员、留下组范围角色 —— 账号对**已经退出的组**继续持有组管理员权限，
+    而成员列表里已经查不到这个人，属于更危险的方向。
+  现收拢到 `app/services/group_admin.py` 一处，由四条路径共同调用：
+  `role_in_group` 与组范围 `group_admin` 角色同增同减。只有 `group_admin`
+  这一个角色会碰这个标记 —— 在组范围授予别的角色与「谁管理这个组」无关。
+  两个调用端点（`user:assign_role`、`group:manage_member`）都只有 `global_admin`
+  持有，所以双向同步不会被用来取得调用者本来没有的权限。
+  回归测试在 `tests/test_group_admin_sync.py`。
 - **`happy-dom` 的 `getContext('2d')` 返回 `null`**，ECharts 因此在 `init` 时抛错，
   整个用量页挂不起来。已给 `HTMLCanvasElement.prototype` 加一层极薄的 2D 桩：
   它的目的是让 `setOption` **跑起来**（这能抓出畸形 option），

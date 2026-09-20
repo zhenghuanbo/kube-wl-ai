@@ -220,6 +220,23 @@ class Settings(BaseSettings):
         if not self.cors_origins:
             problems.append("CORS_ORIGINS must list the allowed web origins in production")
 
+        if "ldap" in self.auth_providers:
+            # Without a service account the attribute read falls back to an
+            # anonymous bind, which usually *succeeds* and then returns nothing:
+            # every directory user logs in with no email, no full name and no
+            # groups, holding only the default role. Nothing raises, so the only
+            # symptom is people mysteriously missing their lab access. Refuse to
+            # start instead of degrading quietly.
+            if not self.ldap_uri or not self.ldap_base_dn:
+                problems.append(
+                    "LDAP_URI and LDAP_BASE_DN are required when 'ldap' is in AUTH_PROVIDERS"
+                )
+            if not self.ldap_bind_dn or not self.ldap_bind_password.get_secret_value():
+                problems.append(
+                    "LDAP_BIND_DN and LDAP_BIND_PASSWORD are required when 'ldap' is in "
+                    "AUTH_PROVIDERS; without them group membership cannot be read"
+                )
+
         if problems:
             raise ValueError("invalid production configuration: " + "; ".join(problems))
 

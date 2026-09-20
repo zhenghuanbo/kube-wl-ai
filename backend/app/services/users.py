@@ -28,6 +28,7 @@ from app.models.group import Group, UserGroupLink
 from app.models.rbac import Role, UserRole
 from app.models.user import User
 from app.schemas.user import UserCreate, UserRoleGrant, UserUpdate
+from app.services import group_admin
 
 logger = get_logger(__name__)
 
@@ -417,6 +418,24 @@ async def grant_role(
         )
     )
     await session.flush()
+
+    if (
+        payload.scope == RoleScope.GROUP
+        and payload.group_id is not None
+        and role.code == RoleCode.GROUP_ADMIN.value
+    ):
+        # Granting the group-admin role has to raise the membership's flag, or
+        # the member list hides an administrator whose permissions are real. Only
+        # this role touches the flag: granting some other role at group scope
+        # says nothing about who administers the group. See
+        # `app.services.group_admin` for what disagreeing costs.
+        await group_admin.set_membership_flag(
+            session,
+            user_id=user.id,
+            group_id=payload.group_id,
+            is_admin=True,
+        )
+
     await session.refresh(user, ["role_links", "group_links"])
     logger.info(
         "role_granted",
@@ -464,6 +483,15 @@ async def revoke_role(
 
     await session.delete(link)
     await session.flush()
+
+    if group_id is not None and role_code == RoleCode.GROUP_ADMIN.value:
+        # Mirror the grant path: dropping the group-admin role also clears the
+        # membership flag, so the member list stops advertising an administrator
+        # whose permissions are gone.
+        await group_admin.set_membership_flag(
+            session, user_id=user.id, group_id=group_id, is_admin=False
+        )
+
     await session.refresh(user, ["role_links", "group_links"])
     logger.info("role_revoked", username=user.username, role=role_code, actor=actor.username)
     return user

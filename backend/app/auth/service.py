@@ -35,6 +35,7 @@ from app.models.group import Group, UserGroupLink
 from app.models.rbac import Role, UserRole
 from app.models.token import RefreshToken
 from app.models.user import User
+from app.services import group_admin
 
 logger = get_logger(__name__)
 
@@ -264,6 +265,13 @@ async def sync_directory_groups(
 
     for group_id, link in by_group_id.items():
         if link.is_directory_managed and group_id not in target_group_ids:
+            if link.role_in_group == GroupRole.GROUP_ADMIN:
+                # Mirror the bulk reconcile: losing the directory membership also
+                # has to lose the group-admin role, or the account keeps
+                # group-admin authority over a group it no longer belongs to.
+                await group_admin.set_group_scoped_role(
+                    session, user_id=user.id, group_id=group_id, is_admin=False
+                )
             await session.delete(link)
 
     await session.flush()

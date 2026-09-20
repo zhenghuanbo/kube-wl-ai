@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from typing import Any
 
 import ldap3
@@ -44,7 +46,14 @@ _SAFE_USERNAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,149}$")
 _DN_UID = re.compile(r"^(?:uid|cn)=([^,]+)", re.IGNORECASE)
 
 #: Attributes read from the user entry after a successful bind.
-_USER_ATTRIBUTES = ["uid", "cn", "displayName", "givenName", "sn", "mail", "memberOf"]
+#:
+#: ``memberOf`` is deliberately absent. It looks like the obvious way to read
+#: groups, but it is an overlay-maintained attribute that a bare directory need
+#: not provide, and it is not scoped to the group subtree we configured. Groups
+#: come from :meth:`LDAPProvider._read_groups` instead, which searches for
+#: ``(member=<user dn>)`` under ``ldap_group_base_dn``. Requesting an attribute
+#: nothing reads is an extra round-trip's worth of data for no benefit.
+_USER_ATTRIBUTES = ["uid", "cn", "displayName", "givenName", "sn", "mail"]
 
 
 class LDAPProvider(AuthProvider):
@@ -82,6 +91,75 @@ class LDAPProvider(AuthProvider):
             tls=tls,
         )
 
+    # --- service-account connection ------------------------------------------
+    @contextmanager
+    def _service_connection(self) -> Iterator[ldap3.Connection]:
+        """Bound connection for reading directory data.
+
+        Every read goes through here so that the failure mode is uniform. Callers
+        previously built their own connections, and the one that read user
+        attributes forgot to guard its search: an ACL rejection surfaced as an
+        unhandled ``ldap3`` error and a 500, when every other directory failure
+        on this path correctly becomes a 503. Consolidating means the conversion
+        cannot be forgotten at a new call site.
+        """
+        bind_dn = self._settings.ldap_bind_dn or None
+        bind_password = self._settings.ldap_bind_password.get_secret_value() or None
+
+        if not bind_dn:
+            # ldap3 binds anonymously when both are None, and that usually
+            # *succeeds* — so the symptom is not a failed login but a user who
+            # arrives with no email, no full name and no groups, holding only the
+            # default role. Naming the cause here is the difference between a
+            # five-minute fix and an afternoon.
+            logger.warning(
+                "ldap_service_account_not_configured",
+                detail=(
+                    "LDAP_BIND_DN is empty; reading attributes and groups "
+                    "anonymously. Set LDAP_BIND_DN and LDAP_BIND_PASSWORD so group "
+                    "membership sync can work."
+                ),
+            )
+
+        server = self._server()
+        try:
+            connection = ldap3.Connection(
+                server,
+                user=bind_dn,
+                password=bind_password,
+                auto_bind=True,
+                receive_timeout=self._timeout,
+                raise_exceptions=True,
+            )
+        except LDAPExceptionError as exc:
+            raise AuthProviderError(f"LDAP service bind failed: {exc}") from exc
+
+        try:
+            yield connection
+        finally:
+            connection.unbind()
+
+    @staticmethod
+    def _search_on(
+        connection: ldap3.Connection,
+        search_base: str,
+        search_filter: str,
+        attributes: list[str],
+        *,
+        size_limit: int = 1000,
+    ) -> list[Any]:
+        """Run one search on an already-bound connection."""
+        try:
+            connection.search(
+                search_base=search_base,
+                search_filter=search_filter,
+                attributes=attributes,
+                size_limit=size_limit,
+            )
+        except LDAPExceptionError as exc:
+            raise AuthProviderError(f"LDAP search failed: {exc}") from exc
+        return list(connection.entries or [])
+
     # --- blocking helpers (run in a thread) ----------------------------------
     def _verify_password(self, username: str, password: str) -> bool:
         """Bind as the user. Returns False only for rejected credentials."""
@@ -113,30 +191,15 @@ class LDAPProvider(AuthProvider):
 
     def _read_identity(self, username: str, user_dn: str) -> ExternalIdentity:
         """Read attributes and groups using the service account."""
-        server = self._server()
-        bind_dn = self._settings.ldap_bind_dn or None
-        bind_password = self._settings.ldap_bind_password.get_secret_value() or None
-
-        try:
-            connection = ldap3.Connection(
-                server,
-                user=bind_dn,
-                password=bind_password,
-                auto_bind=True,
-                receive_timeout=self._timeout,
-                raise_exceptions=True,
-            )
-        except LDAPExceptionError as exc:
-            raise AuthProviderError(f"LDAP service bind failed: {exc}") from exc
-
-        try:
-            connection.search(
-                search_base=self._settings.ldap_base_dn,
-                search_filter=f"(uid={escape_filter_chars(username)})",
-                attributes=_USER_ATTRIBUTES,
+        with self._service_connection() as connection:
+            entries = self._search_on(
+                connection,
+                self._settings.ldap_base_dn,
+                f"(uid={escape_filter_chars(username)})",
+                _USER_ATTRIBUTES,
                 size_limit=2,
             )
-            entry = self._first_entry(connection)
+            entry = entries[0] if entries else None
 
             email = self._attr(entry, "mail")
             full_name = (
@@ -151,8 +214,6 @@ class LDAPProvider(AuthProvider):
             )
 
             groups = self._read_groups(connection, user_dn)
-        finally:
-            connection.unbind()
 
         return ExternalIdentity(
             username=username,
@@ -209,38 +270,29 @@ class LDAPProvider(AuthProvider):
         *,
         size_limit: int = 1000,
     ) -> list[Any]:
-        """Run a paged search with the service account."""
-        server = self._server()
-        bind_dn = self._settings.ldap_bind_dn or None
-        bind_password = self._settings.ldap_bind_password.get_secret_value() or None
-        try:
-            connection = ldap3.Connection(
-                server,
-                user=bind_dn,
-                password=bind_password,
-                auto_bind=True,
-                receive_timeout=self._timeout,
-                raise_exceptions=True,
+        """Run a search with the service account, on its own connection."""
+        with self._service_connection() as connection:
+            return self._search_on(
+                connection, search_base, search_filter, attributes, size_limit=size_limit
             )
-        except LDAPExceptionError as exc:
-            raise AuthProviderError(f"LDAP service bind failed: {exc}") from exc
-
-        try:
-            connection.search(
-                search_base=search_base,
-                search_filter=search_filter,
-                attributes=attributes,
-                size_limit=size_limit,
-            )
-            return list(connection.entries or [])
-        except LDAPExceptionError as exc:
-            raise AuthProviderError(f"LDAP search failed: {exc}") from exc
-        finally:
-            connection.unbind()
 
     def _list_groups(self) -> list[str]:
         entries = self._search(self._group_base_dn(), "(objectClass=posixgroup)", ["cn"])
         return sorted({name for entry in entries if (name := self._attr(entry, "cn"))})
+
+    @staticmethod
+    def _members_from_entry(entry: Any) -> list[str]:
+        """Login names listed by one group entry.
+
+        Both spellings are read because directories differ: ``member`` holds DNs
+        (OpenLDAP, AD) while ``memberUid`` holds bare login names (posixGroup).
+        """
+        members = set(LDAPProvider._attr_list(entry, "memberUid"))
+        for dn in LDAPProvider._attr_list(entry, "member"):
+            uid = LDAPProvider.uid_from_dn(dn)
+            if uid:
+                members.add(uid)
+        return sorted(members)
 
     def _group_members(self, group_name: str) -> list[str]:
         entries = self._search(
@@ -251,21 +303,32 @@ class LDAPProvider(AuthProvider):
         )
         if not entries:
             return []
+        return self._members_from_entry(entries[0])
 
-        entry = entries[0]
-        members = set(self._attr_list(entry, "memberUid"))
-        for dn in self._attr_list(entry, "member"):
-            uid = self.uid_from_dn(dn)
-            if uid:
-                members.add(uid)
-        return sorted(members)
+    def _group_members_many(self, group_names: Sequence[str]) -> dict[str, list[str]]:
+        """Members of many groups over **one** connection.
 
-    @staticmethod
-    def _first_entry(connection: ldap3.Connection) -> Any | None:
-        entries = connection.entries
-        if not entries:
-            return None
-        return entries[0]
+        The reconcile walks every matched group, and opening a connection per
+        group meant a full sync cost one TCP+TLS handshake per group — 50 groups,
+        51 handshakes, almost all of it connection setup rather than directory
+        work. Searches still run one per group, which keeps the filters simple
+        and lets a single unreadable group fail on its own.
+        """
+        if not group_names:
+            return {}
+
+        result: dict[str, list[str]] = {}
+        with self._service_connection() as connection:
+            for name in group_names:
+                entries = self._search_on(
+                    connection,
+                    self._group_base_dn(),
+                    f"(cn={escape_filter_chars(name)})",
+                    ["member", "memberUid"],
+                    size_limit=2,
+                )
+                result[name] = self._members_from_entry(entries[0]) if entries else []
+        return result
 
     @staticmethod
     def _attr(entry: Any | None, name: str) -> str | None:
@@ -313,3 +376,15 @@ class LDAPProvider(AuthProvider):
         if not self.is_configured():
             return None
         return await asyncio.to_thread(self._group_members, group_name)
+
+    async def directory_group_members_many(
+        self, group_names: Sequence[str]
+    ) -> dict[str, list[str]] | None:
+        """Members of many groups in one pass, or ``None`` if unsupported.
+
+        Used by the reconcile, which otherwise pays a connection handshake per
+        group. ``None`` means "call the single-group method instead".
+        """
+        if not self.is_configured():
+            return None
+        return await asyncio.to_thread(self._group_members_many, list(group_names))

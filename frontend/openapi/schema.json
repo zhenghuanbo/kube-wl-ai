@@ -9825,11 +9825,6 @@
             "title": "Membershipsupdated",
             "default": 0
           },
-          "usersCreated": {
-            "type": "integer",
-            "title": "Userscreated",
-            "default": 0
-          },
           "errors": {
             "items": {
               "type": "string"

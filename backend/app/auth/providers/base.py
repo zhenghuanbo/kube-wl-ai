@@ -11,6 +11,7 @@ Adding a provider means implementing this class and registering it in
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import ClassVar
 
@@ -49,6 +50,17 @@ class AuthProvider(ABC):
         return None
 
     async def directory_group_members(self, group_name: str) -> list[str] | None:
+        return None
+
+    async def directory_group_members_many(
+        self, group_names: Sequence[str]
+    ) -> dict[str, list[str]] | None:
+        """Members of many groups, when the provider can do it in one pass.
+
+        ``None`` means "not supported"; callers fall back to
+        :meth:`directory_group_members` per group. Providers whose directory
+        charges a connection per query should override this.
+        """
         return None
 
     @abstractmethod

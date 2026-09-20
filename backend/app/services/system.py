@@ -186,6 +186,25 @@ def _warnings(settings: Settings, counts: SystemCounts) -> list[SystemWarning]:
         )
 
     if (
+        "ldap" in providers
+        and settings.ldap_uri
+        and not (settings.ldap_bind_dn and settings.ldap_bind_password.get_secret_value())
+    ):
+        # The production guard refuses to start in this state, but development is
+        # where people configure LDAP first, and there the failure is silent:
+        # ldap3 falls back to an anonymous bind that usually succeeds and returns
+        # nothing, so logins work and every account quietly arrives with no email,
+        # no name and no groups. Nothing in the logs says why.
+        add(
+            "ldap_without_service_account",
+            "warning",
+            "LDAP 未配置服务账号",
+            "目录账号仍能登录，但读不到邮箱、姓名和用户组：新账号只会拿到默认角色，"
+            "目录组同步也不会生效。因为会退化成匿名绑定，这个过程不会报任何错。",
+            "设置 LDAP_BIND_DN 与 LDAP_BIND_PASSWORD",
+        )
+
+    if (
         providers
         and "local" not in providers
         and not any(p in providers and getattr(settings, f"{p}_uri", "") for p in providers)

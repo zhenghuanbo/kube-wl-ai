@@ -113,15 +113,18 @@ ssh -L 5173:127.0.0.1:5173 <user>@<服务器地址>
 # 然后浏览器打开 http://localhost:5173
 ```
 
-**B. 同一局域网直连** —— 只暴露前端一个端口：
+**B. 同一局域网直连** —— 只暴露前端一个端口。写进 `frontend/.env.local` 即可：
 
 ```bash
-VITE_DEV_HOST=0.0.0.0 npm run dev
-# 浏览器打开 http://<服务器IP>:5173
+VITE_DEV_HOST=0.0.0.0
+VITE_DEV_PORT=5181
 ```
 
-`/api` 与 `/ws` 由 Vite 在**服务端**代理，所以后端仍可以留在 loopback，
-不涉及任何 CORS 配置 —— **只有 5173 一个端口需要可达**。
+然后 `npm run dev`，浏览器打开 `http://<服务器IP>:5181`。也可以只在命令行临时指定：
+
+```bash
+VITE_DEV_HOST=0.0.0.0 npm run dev -- --port 5181
+```
 
 **C. 通过域名（隧道 / Ingress / 云开发代理）** —— 除了绑定，还要声明主机名：
 
@@ -138,6 +141,12 @@ VITE_HMR_HOST=dev.example.edu VITE_HMR_CLIENT_PORT=443 VITE_HMR_PROTOCOL=wss npm
 
 > 没有提供「关掉主机检查」的开关（即 `allowedHosts: true`）。那是常见的建议，但在这里是错的默认值：
 > 它会让任何解析到本机的页面都能访问开发服务器，而那正是这项检查要挡的东西。
+
+**为什么不需要配 CORS。** 前端所有 API 调用都用相对路径（`/api/v1`），由 dev server 在
+**服务端**代理到后端。浏览器只跟 `http://<服务器IP>:5181` 这一个源打交道，从不发起跨域请求 ——
+所以后端可以留在 loopback，也不需要往 `CORS_ORIGINS` 里加任何东西。
+反过来说，如果你绕开代理、让浏览器直连 `http://<服务器IP>:8000`，那才会真的跨域，
+届时必须把前端源加进后端的 `CORS_ORIGINS`。
 
 ---
 

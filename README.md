@@ -101,6 +101,44 @@ npm run dev                   # http://localhost:5173
 开发服务器把 `/api` 与 `/ws` 代理到 `http://localhost:8000`（可用 `VITE_DEV_PROXY_TARGET` 覆盖）。
 前端**不包含任何硬编码后端地址**，生产环境与开发环境都只使用相对路径。
 
+### 从另一台机器访问前端
+
+`npm run dev` 默认只绑 **loopback**，所以在共享机器上跑不会悄悄变成一个谁都能开的服务。
+远程访问按你的网络形态选一种：
+
+**A. SSH 端口转发（推荐）** —— 不暴露任何端口，不需要改配置，HMR 也能用：
+
+```bash
+ssh -L 5173:127.0.0.1:5173 <user>@<服务器地址>
+# 然后浏览器打开 http://localhost:5173
+```
+
+**B. 同一局域网直连** —— 只暴露前端一个端口：
+
+```bash
+VITE_DEV_HOST=0.0.0.0 npm run dev
+# 浏览器打开 http://<服务器IP>:5173
+```
+
+`/api` 与 `/ws` 由 Vite 在**服务端**代理，所以后端仍可以留在 loopback，
+不涉及任何 CORS 配置 —— **只有 5173 一个端口需要可达**。
+
+**C. 通过域名（隧道 / Ingress / 云开发代理）** —— 除了绑定，还要声明主机名：
+
+```bash
+VITE_DEV_HOST=0.0.0.0 VITE_ALLOWED_HOSTS=dev.example.edu npm run dev
+```
+
+裸 IP 和 `localhost` 本来就允许，**域名不在名单里会被返回 403** —— 那个 403 长得像应用坏了，
+实际是 Vite 的 DNS rebinding 防护。若前面还有一层终止 TLS 的代理，热更新还需要指到公网端点：
+
+```bash
+VITE_HMR_HOST=dev.example.edu VITE_HMR_CLIENT_PORT=443 VITE_HMR_PROTOCOL=wss npm run dev
+```
+
+> 没有提供「关掉主机检查」的开关（即 `allowedHosts: true`）。那是常见的建议，但在这里是错的默认值：
+> 它会让任何解析到本机的页面都能访问开发服务器，而那正是这项检查要挡的东西。
+
 ---
 
 ## 常用命令

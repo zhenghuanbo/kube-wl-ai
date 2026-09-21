@@ -362,6 +362,22 @@ scope 限不住它们。更糟的是 `effective_role_codes` 只对 `group_admin`
 ## 8. API 约定
 
 - 前缀 `/api/v1`；健康检查在根路径（`/healthz`、`/readyz`、`/metrics`）。
+- **`/readyz` 会校验数据库的迁移版本，不只是连通性**（`app/db/schema.py`）。这一点很重要：
+  一个落后于模型的库 `SELECT 1` 照样成功，所以只测连通性的探针会一直报 `ok`，直到第一个
+  碰到新列的查询在 ORM 预加载里炸出 `no such column` —— 表现为一个带两百行堆栈的 500，
+  而真正的原因只是**忘了跑一条命令**。现在它会直接给出：
+
+  ```json
+  {"status":"degraded","checks":{
+     "database":"ok",
+     "schema":"error: database at 3f0dbd1b4617, code expects b7c41a9e5d02; run `alembic upgrade head`"}}
+  ```
+
+  三种判定：版本一致 → `ok`；对不上（含库未打标 `unversioned`）→ 503 并给出修复命令；
+  **读不到迁移脚本则报 `unknown` 且不算失败** —— 镜像里没打包迁移目录时无从得知"应该是哪个版本"，
+  为这个让 Pod 不健康会误伤那些在别处统一做迁移的部署。Helm 用 `/readyz` 作 readinessProbe，
+  所以滚动升级时"新代码 + 旧库"的 Pod 不会被接流量（chart 本来就有 pre-upgrade 迁移 hook，
+  这是 `migrations.enabled=false` 时的兜底）。
 - **统一错误信封**（`app/core/errors.py` 已实现）：
 
   ```json

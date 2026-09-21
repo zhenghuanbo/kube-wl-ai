@@ -28,7 +28,7 @@
 | Phase 8 | API 开放、审计与上线（含 Helm Chart） | ✅ 完成 | 60 |
 | Phase 9 | 收尾：系统设置页、计算资源页、移除占位页 | ✅ 完成 | 23 |
 
-**验收状态**：`pytest` **560 passed**；冒烟脚本 **9 个阶段 434 项**在干净库上按序全通过；
+**验收状态**：`pytest` **565 passed**；冒烟脚本 **9 个阶段 434 项**在干净库上按序全通过；
 `ruff` / `mypy` / `vue-tsc` / `vite build` / `helm lint` 全干净。
 
 ### 尚未完成的部分（需要集群侧配合，不是代码问题）
@@ -175,6 +175,19 @@ npm run build
 # 安装 git 钩子
 pre-commit install
 ```
+
+**拉到新代码后先跑迁移。** 模型加了列而库没跟上时，`/readyz` 会返回 503 并说明该做什么：
+
+```console
+$ curl -s localhost:8000/readyz
+{"status":"degraded","checks":{"database":"ok",
+ "schema":"error: database at 3f0dbd1b4617, code expects b7c41a9e5d02; run `alembic upgrade head`"}}
+
+$ ./scripts/migrate.sh upgrade head    # 修好它
+```
+
+不跑迁移的话，进程能启动、`/healthz` 也是 200，但第一个碰到新列的请求（比如登录）会在
+ORM 里抛出 `no such column`，表现为 500 加一大段堆栈——真正的原因只是漏了一条命令。
 
 ---
 

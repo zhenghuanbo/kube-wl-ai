@@ -36,7 +36,7 @@
           "health"
         ],
         "summary": "Readiness probe",
-        "description": "Checks dependencies that must be reachable before serving traffic.",
+        "description": "Checks dependencies that must be reachable before serving traffic.\n\nThe schema check is not decoration. A database that lags the models answers\n`SELECT 1` perfectly well, so a connectivity-only probe reports \"ok\" right up\nuntil the first query touching a new column dies with a `no such column`\nraised from inside the ORM. Checking the revision turns that delayed,\ncryptic 500 into an immediate 503 that names the command to run.",
         "operationId": "readyz_readyz_get",
         "responses": {
           "200": {

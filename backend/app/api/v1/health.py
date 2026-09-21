@@ -9,6 +9,7 @@ from sqlalchemy import text
 
 from app.core.config import get_settings
 from app.core.version import VERSION
+from app.db.schema import check_schema
 from app.db.session import get_engine
 
 router = APIRouter(tags=["health"])
@@ -27,7 +28,14 @@ async def healthz() -> dict[str, Any]:
 
 @router.get("/readyz", summary="Readiness probe")
 async def readyz(response: Response) -> dict[str, Any]:
-    """Checks dependencies that must be reachable before serving traffic."""
+    """Checks dependencies that must be reachable before serving traffic.
+
+    The schema check is not decoration. A database that lags the models answers
+    `SELECT 1` perfectly well, so a connectivity-only probe reports "ok" right up
+    until the first query touching a new column dies with a `no such column`
+    raised from inside the ORM. Checking the revision turns that delayed,
+    cryptic 500 into an immediate 503 that names the command to run.
+    """
     checks: dict[str, str] = {}
     healthy = True
 
@@ -35,7 +43,10 @@ async def readyz(response: Response) -> dict[str, Any]:
         engine = get_engine()
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
-        checks["database"] = "ok"
+            checks["database"] = "ok"
+            checks["schema"] = await check_schema(conn)
+            if checks["schema"] != "ok" and checks["schema"].startswith("error"):
+                healthy = False
     except Exception as exc:
         checks["database"] = f"error: {exc}"
         healthy = False

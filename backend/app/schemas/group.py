@@ -4,16 +4,31 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from app.models.enums import GroupKind, GroupRole
 from app.models.group import Group, UserGroupLink
 from app.schemas.base import ApiModel
 
 
+def _blank_means_absent(value: str | None) -> str | None:
+    """Treat ``""`` as "no directory name" rather than as a name of spaces.
+
+    The distinction matters because ``None`` is meaningful here: it is what
+    reverts a group to matching the directory on ``name``. A form that submits an
+    empty text input should produce that, not a group whose directory name is the
+    empty string.
+    """
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
 class GroupSummary(ApiModel):
     id: int
     name: str
+    directory_name: str | None
     display_name: str
     description: str | None
     kind: GroupKind
@@ -28,6 +43,7 @@ class GroupSummary(ApiModel):
         return cls(
             id=group.id,
             name=group.name,
+            directory_name=group.directory_name,
             display_name=group.display_name,
             description=group.description,
             kind=group.kind,
@@ -41,18 +57,28 @@ class GroupSummary(ApiModel):
 
 class GroupCreate(ApiModel):
     name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    #: The directory group to mirror. Omit when the directory name is already
+    #: identical to ``name``, which is the common case.
+    directory_name: str | None = Field(default=None, max_length=128)
     display_name: str = Field(default="", max_length=128)
     description: str | None = None
     kind: GroupKind = GroupKind.LAB
     owner_user_id: int | None = None
 
+    _normalise_directory_name = field_validator("directory_name")(_blank_means_absent)
+
 
 class GroupUpdate(ApiModel):
+    #: Explicit ``null`` clears it, reverting the group to matching on ``name``;
+    #: omitting the field leaves it alone.
+    directory_name: str | None = Field(default=None, max_length=128)
     display_name: str | None = Field(default=None, max_length=128)
     description: str | None = None
     kind: GroupKind | None = None
     owner_user_id: int | None = None
     is_active: bool | None = None
+
+    _normalise_directory_name = field_validator("directory_name")(_blank_means_absent)
 
 
 class GroupMemberRead(ApiModel):
@@ -109,6 +135,10 @@ class GroupSyncRequest(ApiModel):
 class GroupSyncResult(ApiModel):
     directory_groups: list[str] = Field(default_factory=list)
     matched_groups: list[str] = Field(default_factory=list)
+    #: Directory groups with no platform counterpart. This is the actionable
+    #: part of a reconcile: each name here is a group somebody must create (or
+    #: point at with ``directoryName``) before its members can be mapped.
+    unmatched_groups: list[str] = Field(default_factory=list)
     memberships_added: int = 0
     memberships_removed: int = 0
     memberships_updated: int = 0

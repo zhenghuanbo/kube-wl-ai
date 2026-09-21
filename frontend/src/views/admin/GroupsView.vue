@@ -23,6 +23,7 @@ import {
   updateMember,
   type GroupMember,
   type GroupSummary,
+  type GroupSyncResult,
 } from '@/api/groups'
 import { listUsers } from '@/api/users'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
@@ -53,6 +54,7 @@ const filters = reactive({
 const headers = [
   { title: '用户组', key: 'displayName', sortable: false },
   { title: '标识', key: 'name', sortable: false },
+  { title: '目录组名', key: 'directoryName', sortable: false },
   { title: '类型', key: 'kind', sortable: false },
   { title: '成员', key: 'memberCount', sortable: false },
   { title: '状态', key: 'isActive', sortable: false },
@@ -104,6 +106,7 @@ const formError = ref('')
 
 const form = reactive({
   name: '',
+  directoryName: '',
   displayName: '',
   description: '',
   kind: 'lab' as GroupKind,
@@ -119,6 +122,7 @@ function openCreate(): void {
   formError.value = ''
   Object.assign(form, {
     name: '',
+    directoryName: '',
     displayName: '',
     description: '',
     kind: 'lab' as GroupKind,
@@ -132,6 +136,7 @@ function openEdit(row: GroupSummary): void {
   formError.value = ''
   Object.assign(form, {
     name: row.name,
+    directoryName: row.directoryName ?? '',
     displayName: row.displayName,
     description: row.description ?? '',
     kind: row.kind,
@@ -143,9 +148,12 @@ function openEdit(row: GroupSummary): void {
 async function save(): Promise<void> {
   saving.value = true
   formError.value = ''
+  // ``null`` clears it and reverts the group to matching on ``name``.
+  const directoryName = form.directoryName.trim() || null
   try {
     if (editing.value) {
       await updateGroup(editing.value.id, {
+        directoryName,
         displayName: form.displayName,
         description: form.description || null,
         kind: form.kind,
@@ -155,6 +163,7 @@ async function save(): Promise<void> {
     } else {
       await createGroup({
         name: form.name,
+        directoryName,
         displayName: form.displayName || form.name,
         description: form.description || null,
         kind: form.kind,
@@ -273,13 +282,32 @@ async function removeSelected(member: GroupMember): Promise<void> {
 
 // --- directory sync ----------------------------------------------------------
 const syncing = ref(false)
+const syncResultOpen = ref(false)
+const syncResult = ref<GroupSyncResult | null>(null)
+const syncResultDryRun = ref(false)
+
+/** Directory groups that nothing in the platform answers to yet. */
+const unmatchedGroups = computed(() => syncResult.value?.unmatchedGroups ?? [])
 
 async function runSync(dryRun: boolean): Promise<void> {
   syncing.value = true
   try {
     const result = await syncGroups(dryRun)
+    syncResult.value = result
+    syncResultDryRun.value = dryRun
+    syncResultOpen.value = true
+    // A toast alone cannot carry this. "新增 0" with no explanation is exactly
+    // the state an administrator hits after creating a lab in the directory and
+    // finding that nothing happened, so the counts say what changed and the
+    // dialog says what did not and why.
     const summary = `新增 ${result.membershipsAdded}、更新 ${result.membershipsUpdated}、移除 ${result.membershipsRemoved}`
-    notifications.success(dryRun ? `预演完成：${summary}` : `同步完成：${summary}`)
+    if (result.unmatchedGroups.length || result.errors.length) {
+      notifications.info(
+        dryRun ? `预演完成：${summary}，有需要处理的事项` : `同步完成：${summary}，有需要处理的事项`,
+      )
+    } else {
+      notifications.success(dryRun ? `预演完成：${summary}` : `同步完成：${summary}`)
+    }
     if (!dryRun) await load()
   } catch (error) {
     notifications.error(error instanceof ApiError ? error.message : '同步失败')
@@ -320,8 +348,10 @@ function formatDate(value: string): string {
   <div class="wl-page">
     <PageHeader title="用户组管理" subtitle="实验室与公共组、成员归属与角色">
       <template #actions>
+        <!-- `group:update`, not `group:read`: every role holds `group:read`, so
+             gating on it showed this button to everyone and 403'd on click. -->
         <v-btn
-          v-if="can('group:read')"
+          v-if="can('group:update')"
           variant="tonal"
           prepend-icon="mdi-sync"
           rounded="lg"
@@ -424,6 +454,21 @@ function formatDate(value: string): string {
           <code class="text-caption">{{ item.name }}</code>
         </template>
 
+        <template #[`item.directoryName`]="{ item }">
+          <!-- Falls back to `name`, because that is what matching actually uses
+               when no explicit directory name is set. A dash here would read as
+               "not synced at all", which is the opposite of the truth. -->
+          <code class="text-caption">{{ item.directoryName ?? item.name }}</code>
+          <v-chip
+            v-if="!item.directoryName"
+            size="x-small"
+            variant="text"
+            class="ml-1 text-medium-emphasis"
+          >
+            同标识
+          </v-chip>
+        </template>
+
         <template #[`item.kind`]="{ item }">
           <v-chip size="small" variant="tonal" label>{{ KIND_LABELS[item.kind] }}</v-chip>
         </template>
@@ -503,6 +548,15 @@ function formatDate(value: string): string {
             density="comfortable"
             :disabled="editing !== null"
             hint="用于 K8s 命名空间命名，创建后不可修改"
+            persistent-hint
+            class="mb-5"
+          />
+          <v-text-field
+            v-model="form.directoryName"
+            label="目录组名"
+            variant="outlined"
+            density="comfortable"
+            hint="LDAP 中的组名；留空则用上面的标识去匹配"
             persistent-hint
             class="mb-5"
           />
@@ -725,5 +779,95 @@ function formatDate(value: string): string {
       confirm-color="error"
       @confirm="confirmDelete"
     />
+
+    <v-dialog v-model="syncResultOpen" max-width="620">
+      <v-card rounded="lg">
+        <v-card-title class="pt-5 px-6">
+          {{ syncResultDryRun ? '目录同步预演' : '目录同步结果' }}
+        </v-card-title>
+        <v-card-text class="px-6">
+          <v-alert
+            v-if="syncResultDryRun"
+            type="info"
+            variant="tonal"
+            density="comfortable"
+            class="mb-4"
+          >
+            这是预演，没有写入任何改动。
+          </v-alert>
+
+          <div class="d-flex ga-2 mb-5 flex-wrap">
+            <v-chip size="small" color="success" variant="tonal" label>
+              新增 {{ syncResult?.membershipsAdded ?? 0 }}
+            </v-chip>
+            <v-chip size="small" color="info" variant="tonal" label>
+              更新 {{ syncResult?.membershipsUpdated ?? 0 }}
+            </v-chip>
+            <v-chip size="small" color="warning" variant="tonal" label>
+              移除 {{ syncResult?.membershipsRemoved ?? 0 }}
+            </v-chip>
+            <v-chip
+              size="small"
+              :color="unmatchedGroups.length ? 'warning' : 'grey'"
+              variant="tonal"
+              label
+            >
+              未匹配 {{ unmatchedGroups.length }}
+            </v-chip>
+          </div>
+
+          <!-- The counts above are what changed. This is what did not, and it
+               is the part an administrator actually needs: after creating a lab
+               in the directory, `0 新增` on its own explains nothing. -->
+          <template v-if="unmatchedGroups.length">
+            <div class="text-subtitle-2 mb-1">目录中存在、平台上还没有的用户组</div>
+            <div class="text-caption text-medium-emphasis mb-2">
+              这些组里的成员不会被同步。请为每个组新建一个用户组，把「目录组名」填成下面的名字；
+              若标识与目录名完全一致，留空即可。
+            </div>
+            <v-chip-group column class="mb-4">
+              <v-chip
+                v-for="name in unmatchedGroups"
+                :key="name"
+                size="small"
+                variant="outlined"
+                label
+              >
+                <code>{{ name }}</code>
+              </v-chip>
+            </v-chip-group>
+          </template>
+
+          <template v-if="syncResult?.errors.length">
+            <div class="text-subtitle-2 mb-1">需要注意</div>
+            <ul class="text-body-2 text-medium-emphasis mb-2 pl-4">
+              <li v-for="(message, index) in syncResult.errors" :key="index">{{ message }}</li>
+            </ul>
+          </template>
+
+          <v-alert
+            v-if="!unmatchedGroups.length && !syncResult?.errors.length"
+            type="success"
+            variant="tonal"
+            density="comfortable"
+          >
+            目录中的所有用户组都已在平台上匹配，没有遗留事项。
+          </v-alert>
+        </v-card-text>
+        <v-card-actions class="px-6 pb-5">
+          <v-spacer />
+          <v-btn variant="text" @click="syncResultOpen = false">关闭</v-btn>
+          <v-btn
+            v-if="syncResultDryRun"
+            color="primary"
+            rounded="lg"
+            :loading="syncing"
+            @click="runSync(false)"
+          >
+            确认执行
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
   </div>
 </template>

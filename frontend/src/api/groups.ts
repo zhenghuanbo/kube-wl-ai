@@ -6,6 +6,7 @@ import type { ApiMessage, ListQuery, Page } from '@/types/api'
 export interface GroupSummary {
   id: number
   name: string
+  directoryName: string | null
   displayName: string
   description: string | null
   kind: GroupKind
@@ -23,6 +24,7 @@ export interface GroupListQuery extends ListQuery {
 
 export interface GroupCreatePayload {
   name: string
+  directoryName?: string | null
   displayName?: string
   description?: string | null
   kind?: GroupKind
@@ -30,6 +32,7 @@ export interface GroupCreatePayload {
 }
 
 export interface GroupUpdatePayload {
+  directoryName?: string | null
   displayName?: string
   description?: string | null
   kind?: GroupKind
@@ -53,6 +56,7 @@ export interface GroupMember {
 export interface GroupSyncResult {
   directoryGroups: string[]
   matchedGroups: string[]
+  unmatchedGroups: string[]
   membershipsAdded: number
   membershipsRemoved: number
   membershipsUpdated: number

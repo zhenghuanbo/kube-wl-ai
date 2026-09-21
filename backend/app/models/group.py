@@ -25,6 +25,20 @@ class Group(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    #: The directory (LDAP) group this platform group mirrors, when the two
+    #: names differ.
+    #:
+    #: Directory matching is otherwise by ``name``, but ``name`` is constrained
+    #: to a lowercase ASCII slug because it becomes part of a Kubernetes
+    #: namespace (``wl-{group}-{workspace}``), while a directory ``cn`` is
+    #: arbitrary UTF-8. Without this column a group called ``Lab_Vision`` in the
+    #: directory simply cannot be associated with anything here: the API refuses
+    #: to create a group named ``Lab_Vision``, and matching on ``name`` would
+    #: never find ``lab-vision``.
+    #:
+    #: ``NULL`` means "match on ``name``", which is exactly the behaviour that
+    #: predates this column — so existing rows need no backfill and keep working.
+    directory_name: Mapped[str | None] = mapped_column(String(128), unique=True, index=True)
     display_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     description: Mapped[str | None] = mapped_column(Text)
     kind: Mapped[GroupKind] = mapped_column(
@@ -43,6 +57,15 @@ class Group(Base, TimestampMixin):
 
     def __repr__(self) -> str:
         return f"<Group id={self.id} name={self.name!r}>"
+
+    @property
+    def directory_key(self) -> str:
+        """The name this group is matched against in the directory.
+
+        One place decides this so the bulk reconcile and the per-login sync
+        cannot drift apart on what "the same group" means.
+        """
+        return self.directory_name or self.name
 
 
 class UserGroupLink(Base, TimestampMixin):

@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.providers import AuthProviderError, ExternalIdentity, build_providers
@@ -235,12 +235,35 @@ async def sync_directory_groups(
     if source == UserSource.LOCAL or not identity.groups:
         return
 
-    local_groups = {
-        group.name: group
-        for group in (
-            await session.scalars(select(Group).where(Group.name.in_(identity.groups)))
-        ).all()
-    }
+    # Match on the group's directory key, which is ``directory_name`` when set
+    # and ``name`` otherwise. The two indexed INs keep this from being a full
+    # scan, and the key is applied in Python so this agrees exactly with the bulk
+    # reconcile about what "the same group" means.
+    candidates = (
+        await session.scalars(
+            select(Group).where(
+                or_(Group.directory_name.in_(identity.groups), Group.name.in_(identity.groups))
+            )
+        )
+    ).all()
+    local_groups: dict[str, Group] = {}
+    contested: set[str] = set()
+    for group in candidates:
+        key = group.directory_key
+        if key not in identity.groups:
+            continue
+        if key in local_groups:
+            contested.add(key)
+            continue
+        local_groups[key] = group
+
+    # Same rule as the bulk reconcile: two groups claiming one directory name is
+    # not something to resolve by picking whichever row came back first, which is
+    # what an unguarded dict build would do.
+    for key in contested:
+        local_groups.pop(key, None)
+        logger.warning("directory_group_name_contested", group=key, username=user.username)
+
     target_group_ids = {group.id for group in local_groups.values()}
 
     links = (

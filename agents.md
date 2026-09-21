@@ -364,6 +364,40 @@ get_current_user                          # 解析 JWT → User
 **Grafana 隔离三重保险**：① 目录 `AI-Admin` / `AI-User`；② 后端代签 URL 时锁定变量；
 ③ `/monitor/*` 接口同样走 `scope_filter`。未配置 Grafana 时降级提示，不影响其他模块。
 
+### 10.1 目录组与平台组的对应关系（`Group.directory_name`）
+
+**目录不会自动创建用户组**，这是刻意的：平台的「组」不是标签，而是
+`workspaces` / `applications` / `tasks` / `usage` 的 `NOT NULL` 归属根，
+工作空间的命名空间还由 `wl-{group}-{workspace}` 派生。自动建组等于让目录侧的
+任何改动在平台上开出承载命名空间与配额的地盘，绕过平台的配额与审批流程。
+所以流程是：目录里建组 → 平台里建组 → 同步成员。
+
+**关联是隐式的，靠名字相等**，没有映射表。原先这个「名字」只能是
+`Group.name`，而它被约束成 `^[a-z0-9][a-z0-9-]*$`（因为它要进 K8s 命名空间，
+且正因为已是小写 ASCII，`slug(name) == name`，命名空间才不会在派生时碰撞或变空）。
+目录的 `cn` 则是任意 UTF-8。两者相撞的后果是一个**死结**：
+
+```
+FreeIPA: cn=Lab_Vision          →  平台不允许创建 name=Lab_Vision（正则拒绝）
+平台:     name=lab-vision       →  按 name 匹配永远匹配不到 "Lab_Vision"
+```
+
+`directory_name` 就是解开它的字段：
+
+- 匹配键统一为 `Group.directory_key == directory_name or name`（模型上的属性，
+  **一处定义**，保证全量同步与每次登录的同步不会对「同一个组」有不同理解）。
+- `NULL` 表示「按 `name` 匹配」，也就是这一列出现之前的行为 —— 因此**存量行无需回填**。
+- 唯一性分两处：数据库唯一索引管 `directory_name` 自身重复；跨列的那种
+  （某组的 `directory_name` 撞上另一组的 `name`）由
+  `_ensure_directory_key_free()` 按 `coalesce(directory_name, name)` 检查。
+- 两条同步路径都**拒绝猜**：一个目录名被两个平台组认领时，两边都跳过并报错
+  （全量同步进 `errors`，登录路径记 warning）。不这样做的话，用未加保护的
+  dict 构建会「保留先查到的那一行」，**成员会随查询计划落到不同的组**。
+
+`GroupSyncResult.unmatched_groups` 是给管理员看的那一半：它列出「目录里有、
+平台上还没有」的组。只报 `memberships_added: 0` 而不说为什么，正是
+「我在目录里建了实验室，怎么什么都没发生」的来源。
+
 ---
 
 ## 11. 前端约定

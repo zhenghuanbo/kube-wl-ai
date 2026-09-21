@@ -9492,6 +9492,18 @@
             "pattern": "^[a-z0-9][a-z0-9-]*$",
             "title": "Name"
           },
+          "directoryName": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Directoryname"
+          },
           "displayName": {
             "type": "string",
             "maxLength": 128,
@@ -9717,6 +9729,17 @@
             "type": "string",
             "title": "Name"
           },
+          "directoryName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Directoryname"
+          },
           "displayName": {
             "type": "string",
             "title": "Displayname"
@@ -9771,6 +9794,7 @@
         "required": [
           "id",
           "name",
+          "directoryName",
           "displayName",
           "description",
           "kind",
@@ -9810,6 +9834,13 @@
             "type": "array",
             "title": "Matchedgroups"
           },
+          "unmatchedGroups": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unmatchedgroups"
+          },
           "membershipsAdded": {
             "type": "integer",
             "title": "Membershipsadded",
@@ -9844,6 +9875,18 @@
       },
       "GroupUpdate": {
         "properties": {
+          "directoryName": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Directoryname"
+          },
           "displayName": {
             "anyOf": [
               {

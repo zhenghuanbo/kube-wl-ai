@@ -91,10 +91,37 @@ async def get_group(session: AsyncSession, actor: User, group_id: int) -> Group:
     return group
 
 
+async def _ensure_directory_key_free(
+    session: AsyncSession, group: Group | None, *, directory_key: str
+) -> None:
+    """Refuse a group whose directory key another group already answers to.
+
+    The database enforces uniqueness of ``directory_name`` on its own, but the
+    matching key is ``directory_name or name`` — two columns — so the case that
+    matters most spans both: one group setting an explicit ``directory_name``
+    equal to another group's ``name``. Left unchecked, the directory sync would
+    build a name→group map with a silently overwritten entry and then reconcile
+    the wrong group's membership.
+    """
+    stmt = select(Group).where(func.coalesce(Group.directory_name, Group.name) == directory_key)
+    if group is not None and group.id is not None:
+        stmt = stmt.where(Group.id != group.id)
+    clash = await session.scalar(stmt)
+    if clash is not None:
+        raise ConflictError(
+            f"目录组名 {directory_key} 已被用户组 {clash.name} 使用",
+            code="directory_name_taken",
+        )
+
+
 async def create_group(session: AsyncSession, actor: User, payload: GroupCreate) -> Group:
     existing = await session.scalar(select(Group).where(Group.name == payload.name))
     if existing is not None:
         raise ConflictError(f"用户组 {payload.name} 已存在", code="group_name_taken")
+
+    await _ensure_directory_key_free(
+        session, None, directory_key=payload.directory_name or payload.name
+    )
 
     owner_id = payload.owner_user_id
     if owner_id is not None:
@@ -104,6 +131,7 @@ async def create_group(session: AsyncSession, actor: User, payload: GroupCreate)
 
     group = Group(
         name=payload.name,
+        directory_name=payload.directory_name,
         display_name=payload.display_name or payload.name,
         description=payload.description,
         kind=payload.kind,
@@ -144,6 +172,13 @@ async def update_group(
     owner_id = fields.get("owner_user_id")
     if owner_id is not None and await session.get(User, owner_id) is None:
         raise BadRequestError("指定的负责人不存在", code="unknown_owner")
+
+    if "directory_name" in fields:
+        # ``name`` is immutable here, so this field is the only thing that can
+        # move the group's matching key.
+        await _ensure_directory_key_free(
+            session, group, directory_key=fields["directory_name"] or group.name
+        )
 
     for key, value in fields.items():
         setattr(group, key, value)
@@ -318,15 +353,35 @@ async def sync_directory(
         )
 
     directory_groups = await provider.directory_groups() or []
-    local_groups = {group.name: group for group in (await session.scalars(select(Group))).all()}
-    matched = sorted(name for name in directory_groups if name in local_groups)
+    by_directory_key: dict[str, Group] = {}
+    contested: dict[str, list[str]] = {}
+    for group in (await session.scalars(select(Group))).all():
+        key = group.directory_key
+        if key in by_directory_key:
+            # Two groups answering to the same directory name. Reconciling
+            # either one would be a guess, and guessing means writing
+            # memberships into a group the directory never mentioned. Report it
+            # and touch neither.
+            contested.setdefault(key, [by_directory_key[key].name]).append(group.name)
+            continue
+        by_directory_key[key] = group
+
+    for key in contested:
+        by_directory_key.pop(key, None)
+
+    matched = sorted(name for name in directory_groups if name in by_directory_key)
 
     result = GroupSyncResult(
         directory_groups=sorted(directory_groups),
         matched_groups=matched,
+        unmatched_groups=sorted(name for name in directory_groups if name not in by_directory_key),
         dry_run=dry_run,
     )
     state = _SyncState()
+    for key, names in sorted(contested.items()):
+        state.errors.append(
+            f"目录组 {key} 同时对应 {len(names)} 个用户组（{', '.join(names)}），已跳过，请修正"
+        )
 
     if matched:
         # One pass where the provider supports it. Falling back to per-group
@@ -337,7 +392,7 @@ async def sync_directory(
                 members = bulk.get(name, [])
             else:
                 members = await provider.directory_group_members(name) or []
-            await _reconcile_group(session, local_groups[name], members, state, dry_run=dry_run)
+            await _reconcile_group(session, by_directory_key[name], members, state, dry_run=dry_run)
 
     if not dry_run:
         await session.flush()

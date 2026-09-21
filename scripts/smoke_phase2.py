@@ -112,6 +112,61 @@ def main() -> int:
     check("创建用户组", status == 201, str(group))
     group_id = group["id"]  # type: ignore[index]
 
+    # --- directory association ---------------------------------------------
+    # A platform group's `name` is a lowercase ASCII slug (it becomes part of a
+    # Kubernetes namespace), while a directory `cn` is arbitrary UTF-8.
+    # `directoryName` is what lets `Lab_Vision` in FreeIPA map to `lab-vision`
+    # here; without it such a group simply cannot be associated with anything.
+    print("\n目录组关联")
+    status, linked = call(
+        "POST",
+        "/groups",
+        token=admin,
+        body={"name": "smoke-dir", "directoryName": "Smoke_Lab", "kind": "lab"},
+    )
+    if status == 409:
+        _, listing = call("GET", "/groups?search=smoke-dir", token=admin)
+        linked = next(g for g in listing["items"] if g["name"] == "smoke-dir")  # type: ignore[index]
+        status = 201
+    check("创建带目录组名的用户组", status == 201, str(linked))
+    check("目录组名原样保留", linked.get("directoryName") == "Smoke_Lab", str(linked))
+
+    # The matching key spans two columns, so the database's unique index alone
+    # cannot catch this one — the service has to.
+    status, _ = call(
+        "POST",
+        "/groups",
+        token=admin,
+        body={"name": "smoke-dir-clash", "directoryName": "Smoke_Lab", "kind": "lab"},
+    )
+    check("目录组名重复被拒", status == 409, str(status))
+
+    # A group that sets an explicit directory name stops answering to its
+    # `name` — so the cross-column clash must be tested against `smoke-lab`,
+    # which has no directory name and therefore still claims "smoke-lab".
+    status, _ = call(
+        "POST",
+        "/groups",
+        token=admin,
+        body={"name": "smoke-dir-clash2", "directoryName": "smoke-lab", "kind": "lab"},
+    )
+    check("目录组名撞上他组标识被拒", status == 409, str(status))
+
+    # An empty string must mean "no directory name", not a group whose directory
+    # name is the empty string.
+    status, blank = call(
+        "POST",
+        "/groups",
+        token=admin,
+        body={"name": "smoke-dir-blank", "directoryName": "   ", "kind": "lab"},
+    )
+    if status == 409:
+        _, listing = call("GET", "/groups?search=smoke-dir-blank", token=admin)
+        blank = next(g for g in listing["items"] if g["name"] == "smoke-dir-blank")  # type: ignore[index]
+        status = 201
+    check("创建空白目录组名的用户组", status == 201, str(blank))
+    check("空白目录组名归一为 null", blank.get("directoryName") is None, str(blank))
+
     status, user = call(
         "POST",
         "/users",

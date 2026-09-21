@@ -277,12 +277,15 @@ async def test_globally_scoped_role_does_not_touch_the_flag(
 async def test_another_group_scoped_role_leaves_the_admin_flag_alone(
     seeded: AsyncSession, admin: User
 ) -> None:
-    """Granting an unrelated role in a group says nothing about who administers it.
+    """Granting an unrelated role says nothing about who administers a group.
 
     The flag is the *group-admin* marker, so only the group-admin role may move
-    it. Otherwise an administrator who is also, say, an observer of their own
-    group would silently lose the marker and drop out of the member list's
-    administrator view.
+    it. Otherwise an administrator who is also, say, an observer would silently
+    lose the marker and drop out of the member list's administrator view.
+
+    The unrelated role is granted at *global* scope because group scope is now
+    reserved for `GROUP_SCOPED_ROLES` — that reservation exists precisely because
+    a group-scoped role's permissions are not narrowed by its scope.
     """
     group = await factories.create_group(seeded, name="lab-a")
     member = await factories.create_user(
@@ -294,7 +297,7 @@ async def test_another_group_scoped_role_leaves_the_admin_flag_alone(
         seeded,
         admin,
         member,
-        UserRoleGrant(role_code=RoleCode.OBSERVER.value, scope=RoleScope.GROUP, group_id=group.id),
+        UserRoleGrant(role_code=RoleCode.OBSERVER.value, scope=RoleScope.GLOBAL),
     )
     await seeded.flush()
 
@@ -315,13 +318,11 @@ async def test_revoking_an_unrelated_role_leaves_the_admin_flag_alone(
         seeded,
         admin,
         member,
-        UserRoleGrant(role_code=RoleCode.OBSERVER.value, scope=RoleScope.GROUP, group_id=group.id),
+        UserRoleGrant(role_code=RoleCode.OBSERVER.value, scope=RoleScope.GLOBAL),
     )
     await seeded.flush()
 
-    await users.revoke_role(
-        seeded, admin, member, role_code=RoleCode.OBSERVER.value, group_id=group.id
-    )
+    await users.revoke_role(seeded, admin, member, role_code=RoleCode.OBSERVER.value, group_id=None)
     await seeded.flush()
 
     link = await _link(seeded, member.id, group.id)

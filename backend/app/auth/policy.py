@@ -331,12 +331,14 @@ SCOPE_RULES: dict[type[Any], ScopeRule] = {
     # reason enough to see each other's containers; it is not reason enough to
     # see each other's share of the cluster.
     #
-    # With no administrative scope the result is ``user_id = me``, which is the
-    # ``usage:read_self`` case; a group administrator adds entire groups, which
-    # is ``usage:read_group``; and ``scope.all_access`` short-circuits for
-    # ``usage:read_all``. The permission codes and the row filter agree because
-    # both are derived from the same scope, not because two lists were kept in
-    # step by hand.
+    # With no administrative scope the result is ``user_id = me``; a group
+    # administrator adds entire groups; and ``scope.all_access`` short-circuits
+    # for a global administrator. Those three tiers are produced *here*, by the
+    # scope alone — every usage read endpoint gates on the single
+    # ``usage:read_self`` code and lets this filter decide the breadth. That is
+    # why the catalogue has no ``usage:read_group`` / ``usage:read_all``: as
+    # permission codes they were checked by nothing, so they described a
+    # capability that did not exist and stayed silent when granted.
     UsageDaily: ScopeRule(owner="user_id", group="group_id", workspace="workspace_id"),
     # --- Phase 8 ---------------------------------------------------------
     # The audit trail has no group column and never will: a row records an

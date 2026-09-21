@@ -76,7 +76,7 @@ app/
 │   ├── ws/             终端 WebSocket（/ws/terminal/{id}）
 │   └── wellknown.py    JWKS 端点，供 Grafana 校验令牌
 ├── auth/               ★ 权限体系（§4）
-│   ├── permissions.py  72 个权限点的目录 + 四个角色的权限集合
+│   ├── permissions.py  70 个权限点的目录 + 四个角色的权限集合
 │   ├── policy.py       ★ 公开入口：has_permission / scope_filter / ensure_* 系列
 │   ├── tokens.py       签发与校验 JWT
 │   ├── rate_limit.py   登录限流
@@ -126,7 +126,7 @@ src/
 
 | 层 | 回答的问题 | 实现在哪 | 形式 |
 |---|---|---|---|
-| ① RBAC | 这个人**能不能**做这个动作 | `auth/permissions.py` | `resource:action`，共 **72** 个权限点 |
+| ① RBAC | 这个人**能不能**做这个动作 | `auth/permissions.py` | `resource:action`，共 **70** 个权限点 |
 | ② 数据范围 | 这个动作**能作用在谁身上** | `auth/policy.py::scope_filter` | 自动往 SQL 里注入 `WHERE` |
 | ③ 对象/配额约束 | 做到什么**程度** | `services/quota_guard.py` 等 | 额度、并发数、单实例卡数 |
 
@@ -136,21 +136,31 @@ src/
 |---|---|---|
 | `observer` | 13 | 只读观察者 |
 | `user` | 35 | 普通用户 |
-| `group_admin` | 48 | 组管理员，比 `user` 多出 `node:read` 等 |
-| `global_admin` | 72 | 平台管理员，等于**全部权限点**（`ALL_PERMISSION_CODES`） |
+| `group_admin` | 47 | 组管理员，比 `user` 多出 `node:read` 等 |
+| `global_admin` | 70 | 平台管理员，等于**全部权限点**（`ALL_PERMISSION_CODES`） |
 
 角色是**累积**定义的（`_USER = _OBSERVER | {...}`，见 `permissions.py:167-211`），
 所以「某人有什么权限」= 其所有角色集合的并集。
-`global_admin` 独有 25 个权限点，包括 `user:*`、`group:*`、`resource_group:*`、
-`node:sync`、`system:config`、`workspace:delete`、`monitor:read_all`、`usage:read_all` 等。
+`global_admin` 独有 23 个权限点，包括 `user:*`、`group:*`、`resource_group:*`、
+`node:sync`、`system:config`、`workspace:delete`、`monitor:read_all` 等。
 
 ### 关键机制
 
 - **角色有作用域**：`RoleScope.GROUP` 的分配带 `group_id`，这正是「组管理员天然只管一个组」的实现方式。
+  但注意 `RoleScope.GROUP` 的语义是「**在哪个组里**有这角色」，**不是**「这角色只有组内的权限」：
+  `effective_permissions` 并入权限时**不看 scope**（见 `policy.py`），所以组范围只收窄**数据**
+  （`scope_filter` 的行过滤），不收窄**权限**。正因如此，**只有 `GROUP_SCOPED_ROLES`
+  （当前仅 `group_admin`）里的角色允许按组下发**，两条路径（`plan_role_assignments`、
+  `grant_role`）都强制这一点。否则一个「组范围的 `global_admin`」会拿到全部 70 个权限，
+  而 `system:config` / `user:create` / `node:sync` 根本没有「组」这个维度可供限制。
 - **`DataScope` 表示「能看到哪些行」**，`ScopeRule` 描述每个模型按什么字段过滤
   （`owner` / `group` / `workspace` / `via_user` / `member_of` / `member_workspace` / `public`）。
 - **容易踩错的一点**：`DataScope.group_ids` 是**该用户管理的组**，不是**他所属的组**。
   要判断成员关系请用 `actor.group_ids`，两者语义不同。
+- **权限码只回答「能不能」，不回答「多大范围」**。如果发现想加一个 `xxx:read_group` 这样的码
+  来表达「范围更大」，应该改用 `ScopeRule`；只有当**不同档位对应不同事物**（不同仪表盘、
+  不同端点）时才新增权限码 —— 监控中心（3 个码，各自 gate 不同仪表盘）与用量中心
+  （1 个码 + scope 分档）的区别即在于此。
 - **API 令牌有一层额外的「权限天花板」**（`permission_ceiling`）：令牌只能行使**签发者**
   权限的子集，且可进一步收窄 scope。所以令牌永远不会成为提权途径。
 

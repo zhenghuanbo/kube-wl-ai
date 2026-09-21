@@ -387,7 +387,19 @@ async def set_groups(
 async def grant_role(
     session: AsyncSession, actor: User, user: User, payload: UserRoleGrant
 ) -> User:
-    """Grant a role globally or scoped to a single group."""
+    """Grant a role globally or scoped to a single group.
+
+    Only :data:`GROUP_SCOPED_ROLES` may be granted at group scope, the same
+    invariant ``plan_role_assignments`` enforces on the user-creation path. This
+    is not a formality: ``effective_permissions`` unions the permissions of every
+    role link *regardless of scope*, so a group-scoped ``global_admin`` would hand
+    out all 70 codes — including ``system:config``, ``user:create`` and
+    ``node:sync``, which have no group dimension for the data scope to limit. The
+    scope would confine which *rows* that user sees while leaving the system-wide
+    actions untouched, and ``effective_role_codes`` would report them as holding
+    no role at all (it reads group-scoped links only for ``group_admin``), so the
+    UI would hide every admin page from a user who could call the whole API.
+    """
     if payload.scope == RoleScope.GROUP:
         if payload.group_id is None:
             raise BadRequestError("组范围的角色必须指定 groupId", code="missing_group_id")
@@ -396,6 +408,14 @@ async def grant_role(
         raise BadRequestError("全局范围的角色不能指定 groupId", code="unexpected_group_id")
 
     (role,) = await ensure_roles_grantable(session, actor, [payload.role_code])
+
+    if payload.scope == RoleScope.GROUP and role.code not in GROUP_SCOPED_ROLES:
+        raise BadRequestError(
+            f"角色 {role.code} 不能按组下发，只有 "
+            f"{'、'.join(sorted(GROUP_SCOPED_ROLES))} 支持组范围",
+            code="role_not_group_scoped",
+            detail={"roleCode": role.code, "groupScopedRoles": sorted(GROUP_SCOPED_ROLES)},
+        )
 
     duplicate = await session.scalar(
         select(UserRole).where(

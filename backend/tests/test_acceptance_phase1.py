@@ -246,6 +246,36 @@ async def test_user_cannot_grant_themselves_a_role(client: AsyncClient, world: W
     assert response.status_code == 403
 
 
+async def test_a_role_cannot_be_granted_at_group_scope_unless_it_is_group_scoped(
+    client: AsyncClient, world: World
+) -> None:
+    """A group-scoped `global_admin` would be full power with no group dimension.
+
+    `effective_permissions` unions every role link regardless of scope, so the
+    group scope would confine only the *rows*; `system:config`, `user:create` and
+    `node:sync` have no group to be confined to. And `effective_role_codes` reads
+    group-scoped links only for `group_admin`, so the UI would report this user as
+    having no role at all while the API let them do anything.
+    """
+    await act_as(client, "root")
+
+    response = await client.post(
+        f"/api/v1/users/{world.user_a.id}/roles",
+        json={"roleCode": "global_admin", "scope": "group", "groupId": world.lab_a.id},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "role_not_group_scoped"
+
+    # The refusal is not cosmetic: the target gained nothing. Without the guard
+    # this user ends up holding all 70 codes while `roles` reports nothing.
+    await act_as(client, "user-a")
+    permissions = (await client.get("/api/v1/auth/permissions")).json()
+    assert "system:config" not in permissions["permissions"]
+    assert "user:create" not in permissions["permissions"]
+    assert permissions["roles"] == ["user"]
+
+
 async def test_cannot_deactivate_yourself(client: AsyncClient, world: World) -> None:
     await act_as(client, "root")
 
@@ -518,7 +548,11 @@ async def test_creating_a_group_admin_scopes_the_role_to_their_groups(
 
     assert permissions["scope"]["kind"] == "group"
     assert permissions["scope"]["groupIds"] == [world.lab_b.id]
-    assert "usage:read_group" in permissions["permissions"]
+    # `monitor:read_group`, not `usage:read_group`: the usage tier is decided by
+    # the data scope asserted above, and its permission code was removed because
+    # nothing ever checked it. This assertion is about the group-admin permission
+    # set, so it points at a code that is actually enforced.
+    assert "monitor:read_group" in permissions["permissions"]
 
 
 async def test_a_group_admin_created_without_a_group_is_refused(

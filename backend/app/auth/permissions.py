@@ -106,9 +106,16 @@ PERMISSIONS: tuple[PermissionSpec, ...] = (
     PermissionSpec("task:cancel", "task", "取消任务"),
     PermissionSpec("task:logs", "task", "查看任务日志"),
     # Usage -------------------------------------------------------------------
-    PermissionSpec("usage:read_self", "usage", "查看本人用量"),
-    PermissionSpec("usage:read_group", "usage", "查看本组用量"),
-    PermissionSpec("usage:read_all", "usage", "查看全部用量"),
+    # One read code, not three. How *much* usage a caller sees is a data-scope
+    # question (own rows → whole groups → everything), and the scope already
+    # derives that from the same group/role facts. A `read_group` / `read_all`
+    # pair sat here and was checked by nothing: the endpoints gate on
+    # `read_self` and `scope_filter` does the tiering, so granting `read_all` to
+    # a plain user changed nothing and a group admin holding only `read_self`
+    # still saw their whole group. Monitoring keeps its three codes because they
+    # genuinely gate different dashboards; usage has one page, so breadth belongs
+    # to the scope.
+    PermissionSpec("usage:read_self", "usage", "查看用量（范围由数据权限决定）"),
     PermissionSpec("usage:export", "usage", "导出用量数据"),
     PermissionSpec("usage:manage", "usage", "重算用量聚合"),
     # Monitoring --------------------------------------------------------------
@@ -203,7 +210,7 @@ _GROUP_ADMIN = _USER | frozenset(
         storage:manage
         resource_group:read resource_spec:read runtime_limit:read
         node:read quota:read
-        usage:read_group usage:export monitor:read_group audit:read
+        usage:export monitor:read_group audit:read
         role:read permission:read
         """
     )

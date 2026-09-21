@@ -272,19 +272,60 @@ get_current_user                          # 解析 JWT → User
 4. 判定逻辑集中在 `app/auth/policy.py`，**对外只暴露 `require()` / `scope_filter()` / `ensure_object_access()`**，
    以便将来替换为 Casbin / OPA 时不改调用方。
 5. **前端权限只做 UX，不是安全边界**。绕过前端的请求必须同样被后端拒绝。
+6. **`effective_permissions` 不区分 `UserRole.scope`** —— 组范围的角色**不会**让权限变少，
+   只会让数据范围变窄。因此"哪些角色可以按组下发"必须显式限制（见下）。
 
-### 用量中心的权限（三层的一个特例，不是例外）
+### 组范围的角色只有 `group_admin`（`GROUP_SCOPED_ROLES`）
 
-`usage:read_self` / `usage:read_group` / `usage:read_all` / `usage:export` / `usage:manage`
-看起来像"功能权限里编码了数据范围"，实际上仍然走同一套三层：权限码决定**能不能进这个接口**，
-`scope_filter` 决定**能看到哪些行**。两者一致是因为它们都从 `resolve_scope` 派生，
-不是因为维护了两份对应的清单。
+`RoleScope.GROUP` 的语义是"**在哪个组里**有这个角色"，**不是"这个角色只有组内的权限"**。
+`effective_permissions` 会把所有 `UserRole` 的权限**全量并入**，不看 scope：
 
-| 角色 | 用量权限 | 数据范围 |
+```python
+for link in user.role_links:            # ← 无论 link.scope 是什么
+    codes.update(grant.permission.code for grant in link.role.permission_links)
+```
+
+所以一个"组范围的 `global_admin`"会拿到**全部 70 个权限**，而
+`system:config` / `user:create` / `node:sync` / `group:delete` 这些**根本没有"组"这个维度**，
+scope 限不住它们。更糟的是 `effective_role_codes` 只对 `group_admin` 认组范围的角色
+（`global_role_codes` 过滤 `scope == GLOBAL`），于是前端会认为这个人**没有任何角色**、
+隐藏所有管理入口——而他可以用 API 做任何事。**UI 和 API 对同一个用户给出相反结论。**
+
+因此两条路径都强制同一个不变量：
+
+| 路径 | 强制方式 |
+| --- | --- |
+| 创建用户 / 设置组（`plan_role_assignments`） | 组范围只取 `GROUP_SCOPED_ROLES` 里的角色 |
+| 单独授权（`grant_role`，`POST /users/{id}/roles`） | 组范围且角色不在 `GROUP_SCOPED_ROLES` → 400 `role_not_group_scoped` |
+
+**新增按范围下发的角色时，除了改 `GROUP_SCOPED_ROLES`，还要确认该角色的每个权限码在
+"范围只剩一个组"时仍然合理**——也就是确认它要么真的与组相关，要么是只读的目录类权限。
+`group_admin` 之所以安全，是因为它在组资源之外只持有只读权限
+（`user:read` / `node:read` / `role:read` / `permission:read` / `resource_group:read` /
+`resource_spec:read`），没有任何全局写权限。
+
+### 用量中心的权限（范围由数据权限决定，不由权限码分档）
+
+用量的**读**只有一个权限码：`usage:read_self`。`usage:export` / `usage:manage` 是另外两件事
+（带走文件、重算聚合），不是"更大范围的读"。
+
+"能看到多少"完全由 `scope_filter` 决定，三档都从 `resolve_scope` 派生：
+
+| 角色 | 读用量的权限码 | 数据范围（唯一的分档来源） |
 | --- | --- | --- |
 | observer / user | `usage:read_self` | 仅本人 |
-| group_admin | `+ usage:read_group`、`usage:export` | 本组 + 本人 |
-| global_admin | `+ usage:read_all`、`usage:manage` | 全部 |
+| group_admin | `usage:read_self` | 本组 + 本人（scope 带来的） |
+| global_admin | `usage:read_self` | 全部（`all_access`） |
+
+**这里曾经有 `usage:read_group` / `usage:read_all` 两个码，现已删除**，因为它们不被任何
+端点检查——`/usage/*` 的读接口 gate 在 `read_self` 上，分档由 scope 完成。作为权限码它们
+描述了一种不存在的能力：给普通用户授 `usage:read_all` 什么也不会发生（scope 仍只给自己），
+而只持 `read_self` 的组管理员照样看到整组。**一个不会被检查、却出现在权限清单和授权界面里的
+码，比没有这个码更糟**——授权的人会以为它生效了。
+
+监控中心保留了三个码（`monitor:read_self/group/all`），因为它们**真的**在分档：仪表盘目录
+按码过滤（`monitoring/grafana.py`），打开某个仪表盘时再校验一次（`api/v1/monitor.py`）。
+用量只有一个页面，所以"breadth"属于 scope，不属于权限码。
 
 两个刻意的选择：
 
@@ -292,6 +333,10 @@ get_current_user                          # 解析 JWT → User
    同处一个命名空间足以让你看到同事的容器，但不足以让你看到同事占用了多少张卡。
 2. **`usage:manage` 只给全局管理员。** 重算会一次性重写所有租户的行，
    这件事没有"只管本组"的版本。
+
+**教训（适用于新增模块）**：权限码回答"能不能做"，范围回答"对谁做"。如果发现自己想加一个
+形如 `xxx:read_group` 的码来表达"范围更大"，那多半说明分档应该交给 `ScopeRule`；只有当
+**不同的档位对应不同的事物**（不同仪表盘、不同端点、不同动作）时，才应该新增权限码。
 
 ### 与 K8s RBAC 的区别
 

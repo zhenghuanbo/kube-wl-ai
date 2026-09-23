@@ -71,7 +71,65 @@ HARBOR_ROBOT_NAME=robot$kube-wl-ai
 HARBOR_ROBOT_SECRET=...
 ```
 
-它从不接触计算节点，所以给全权限是合理的。
+`HARBOR_ROBOT_NAME` **必须带 `robot$` 前缀**：它是 Basic 认证的用户名，不是显示名。
+少了前缀，Harbor 会当成一个普通用户名去找，结果是一律 401，而日志里只说
+`failed to authenticate robot account`。
+
+它从不接触计算节点，所以权限可以给得比较宽。
+
+#### 在 Harbor v2.13 上实测过的最小权限集
+
+| 层级 | resource | action |
+|---|---|---|
+| system | `project` | `list` |
+| project `*` | `project` | `read` |
+| project `*` | `repository` | `list` |
+| project `*` | `repository` | `delete` |
+| project `*` | `artifact` | `list` |
+| project `*` | `artifact` | `read` |
+| project `*` | `artifact` | `delete` |
+
+两个容易踩的点：
+
+- **`project:read` 只在 project 层合法。** 放进 system 层，创建 robot 会被拒：
+  `bad request permission: project:read`。而 system 层只给 `project:list` 不够——
+  Harbor 的 `/projects` 对非管理员按「项目成员或 public」过滤，私有 project
+  既列不出也访问不到（实测直接按名字访问私有 project 也是 401）。加上
+  project 层的 `project:read` 之后，5 个 project（含 3 个 private）全部可见。
+- **删除权限是功能需要，不是图省事。** 用户从目录里移除自己的个人镜像时，
+  `delete_image` 会去删 Harbor 里的 tag，删不掉就整条操作报错、目录行也留不下
+  （`app/services/images.py:654`）。Harbor 的权限只到 project，没有「只能删
+  `{project}/{username}/*`」这种表达，所以要么给 `artifact:delete`，要么接受
+  「移除个人镜像」这个按钮失效。平台自己会用 `_ensure_may_manage` +
+  仅对 `PERSONAL` 类型来约束，所以这里授予删除是可控的——但要明白，**这个
+  secret 泄漏就等于拿到全仓库 tag 的删除权**。
+
+#### 用 API 创建 robot 时，`secret` 字段会被忽略
+
+这是 Harbor v2.13 的一个坑，值得单独说：**`POST /api/v2.0/robots` 和
+`PUT /api/v2.0/robots/{id}` 都不接受你指定的 `secret`**，Harbor 会自己生成一个，
+并且**只在响应体里返回一次**。请求里带 `"secret": "..."` 不报错，但被静默丢弃。
+
+症状极具迷惑性：创建返回 `201`，权限也存对了，但用你「设置的」那个 secret 去
+认证永远 401，Harbor 日志只说 `Invalid credentials`。实测对比：
+
+```
+不指定 secret  -> 用响应返回的 secret 认证 -> 200
+指定 secret    -> 用我指定的 secret 认证  -> 401
+                  用响应返回的 secret 认证 -> 200
+```
+
+所以创建脚本必须从响应里取 `secret`：
+
+```python
+st, body = call("POST", "/api/v2.0/robots", payload)
+secret = body["secret"]      # 只在这里出现一次，务必落盘/入库
+```
+
+`PUT` 还有一处：请求体里的 `name` 必须是**完整名 `robot$kube-wl-ai`**，写成
+`kube-wl-ai` 会报 `cannot update the level or name of robot`。
+
+网页界面创建时没有这个问题——界面会把生成的 secret 显示出来。
 
 ### 节点拉取的 robot
 

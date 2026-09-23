@@ -34,7 +34,7 @@ celery_app.conf.update(
 # Importing the task modules registers them with this app. Without this the
 # worker starts with an empty registry and every scheduled message is rejected
 # as unknown — the failure looks like "beat is running but nothing happens".
-from app.workers.tasks import reconcile, usage  # noqa: E402,F401  (registration imports)
+from app.workers.tasks import images, reconcile, usage  # noqa: E402,F401  (registration imports)
 
 #: Every 30 seconds. Sweeping is a handful of reads per live workload, so the
 #: cost is dominated by the number of running things, not by the interval —
@@ -50,5 +50,14 @@ celery_app.conf.beat_schedule = {
     "rollup-usage": {
         "task": "app.workers.tasks.usage.rollup_usage",
         "schedule": 1200.0,
+    },
+    # Daily by default. Nothing else moves an image from "pushed to Harbor" to
+    # "visible in the picker", and the endpoint that does needs `image:share`,
+    # which the person asking "why can't I see my image?" does not have. The
+    # interval is configurable because a small installation can afford to run it
+    # far more often than a large one, where a pass walks every project and tag.
+    "sync-images": {
+        "task": "app.workers.tasks.images.sync_images",
+        "schedule": settings.image_sync_interval_seconds,
     },
 }

@@ -48,6 +48,14 @@ class Settings(BaseSettings):
     celery_broker_url: str = "redis://localhost:6379/1"
     celery_result_backend: str = "redis://localhost:6379/2"
 
+    #: How often the worker refreshes the image catalogue from the registry.
+    #:
+    #: Daily by default because a pass walks every project and every tag, and
+    #: because nothing user-facing reads the catalogue between syncs except a
+    #: picker listing that rarely changes. Lower it on a small installation where
+    #: "I pushed an image and cannot see it" is worth answering in minutes.
+    image_sync_interval_seconds: float = 86400.0
+
     # --- Authentication ------------------------------------------------------
     auth_providers: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["local"])
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -49,6 +50,23 @@ def _host_from_url(url: str) -> str:
     later as an ``ImagePullBackOff``.
     """
     return url.split("://", 1)[-1].strip("/")
+
+
+def _repository_path(repository: str) -> str:
+    """Percent-encode a repository name for a Harbor API path.
+
+    Harbor documents the parameter as *"The name of the repository. If it
+    contains slash, encode it twice over with URL encoding. e.g. a/b -> a%2Fb ->
+    a%252Fb"*, and the platform's scheme makes that the common case rather than
+    the exception: ``{group}/{user}/{image}`` is a nested repository.
+
+    Twice, not once, because Harbor's router decodes the path once before
+    matching and the handler decodes the captured parameter again. Sending a
+    single encoding — or a raw slash, which reads as extra path segments and
+    answers 404 — fails every tag listing, verification and delete for nested
+    repositories.
+    """
+    return quote(quote(repository, safe=""), safe="")
 
 
 class RealHarborClient:
@@ -154,13 +172,19 @@ class RealHarborClient:
         names: list[str] = []
         for row in rows:
             name = str(row.get("name", ""))
-            # Harbor returns "project/repo"; the project prefix is redundant here
-            # and would produce "library/library/pytorch" in a reference.
+            # Harbor returns "project/repo". Split on the *first* slash so only
+            # the project prefix goes: a nested repository arrives as
+            # "lab-vision/zhangsan/my-env" and must stay "zhangsan/my-env".
+            # Keeping the prefix would rebuild the reference as
+            # "library/library/pytorch"; splitting on the last slash would lose
+            # the owner segment that the platform's scheme is built on.
             names.append(name.split("/", 1)[-1] if "/" in name else name)
         return [name for name in names if name]
 
     def list_tags(self, project: str, repository: str) -> list[RegistryTag]:
-        rows = self._paginate(f"/api/v2.0/projects/{project}/repositories/{repository}/artifacts")
+        rows = self._paginate(
+            f"/api/v2.0/projects/{project}/repositories/{_repository_path(repository)}/artifacts"
+        )
         tags: list[RegistryTag] = []
         for artifact in rows:
             digest = artifact.get("digest")
@@ -185,7 +209,9 @@ class RealHarborClient:
     def get_tag(self, project: str, repository: str, tag: str) -> RegistryTag | None:
         try:
             artifact = self._request(
-                "GET", f"/api/v2.0/projects/{project}/repositories/{repository}/artifacts/{tag}"
+                "GET",
+                f"/api/v2.0/projects/{project}/repositories/{_repository_path(repository)}"
+                f"/artifacts/{tag}",
             )
         except RegistryError as exc:
             if exc.not_found:
@@ -209,7 +235,9 @@ class RealHarborClient:
         # the tag as the reference. `DELETE /tags/{tag}` is not a route and
         # returns 405.
         self._request(
-            "DELETE", f"/api/v2.0/projects/{project}/repositories/{repository}/artifacts/{tag}"
+            "DELETE",
+            f"/api/v2.0/projects/{project}/repositories/{_repository_path(repository)}"
+            f"/artifacts/{tag}",
         )
 
     def close(self) -> None:

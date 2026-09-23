@@ -21,7 +21,7 @@
 | **应用程序** | 带介绍信息的可复用实例形态 |
 | **自定义任务** | 直接运行 shell 命令，结束即退出（K8s Job） |
 | **存储** | 文件存储 / 公共数据集 / 对象存储，基于 PV/PVC |
-| **镜像** | 对接 Harbor，区分个人 / 官方 / 共享 |
+| **镜像** | 对接 Harbor；一个用户组一个 project，个人镜像用用户名作仓库前缀；区分个人 / 官方 / 共享 |
 | **用量中心** | 统计用量（**不计费**），管理员可跨用户/组查询导出 |
 | **监控中心** | **只集成**集群侧既有的 Prometheus + Grafana |
 
@@ -211,6 +211,92 @@ workspace_id, group_id, owner_user_id, created_by)`
 > 唯一约束是 `(registry, project, repository, tag)`。
 > Python 属性名为 `registry_host`（`registry` 与 `DeclarativeBase.registry` 冲突），
 > 数据库列名仍是 `registry`。
+
+#### 5.5.1 Harbor 项目结构：一个组一个 project
+
+```
+harbor.edu.cn/
+├── library/                       官方镜像（安装级，全员可拉）
+│   └── pytorch:2.4-cuda12
+├── lab-vision/                    ← 一个用户组 = 一个 Harbor project
+│   ├── share/cuda-toolkit:12.4   组内约定共用
+│   └── zhangsan/my-env:v3         个人镜像，用户名作第一段
+└── lab-nlp/
+    └── wangwu/nlp-env:v2
+```
+
+**project 名 = `Group.name`，不是 `directory_name`。** Harbor 项目名只允许
+`[a-z0-9][a-z0-9._-]*`，目录里的 `cn` 可能是 `Lab_Vision` 或中文，注册表不收。
+`Group.name` 本来就是小写 ASCII slug（它同时是 K8s 命名空间的一段），约束正好够用。
+
+三条规则在 `register_image` 里强制：
+
+| 规则 | 错误码 |
+| --- | --- |
+| project 必须是某个 `Group.name` 或 `library` | `image_project_unknown` |
+| 个人镜像的仓库名必须以本人用户名开头 | `image_prefix_mismatch` |
+| 项目所属组与显式 `groupId` 必须一致 | `image_project_group_mismatch` |
+
+> **为什么平台要管这个**：Harbor 的 RBAC **只到 project** —— 官方权限表里
+> `Create repositories` 是 `Developer` 就有的，且是 project 范围。没有任何配置能
+> 表达"这个成员可以推 `lab-vision/zhangsan/*` 但不能推 `lab-vision/lisi/*`"。
+> 所以**组内没有真正的隔离**，前缀只是平台能在自己这层提供的归属约定，也为将来
+> 发限定前缀的 robot 留出余地。它挡不住直接 `docker push`。
+
+**解析规则**：project 取 reference 的**第一段**，repository 取**其余全部**（可嵌套）。
+
+```
+harbor.edu.cn/lab-vision/zhangsan/my-env:v3
+  → project=lab-vision  repository=zhangsan/my-env  tag=v3
+```
+
+> 早期实现取的是**最后一段**做 repository，于是 project 变成
+> `lab-vision/zhangsan`。这不只是名字难看：同步路径是按 Harbor 报告的
+> `(project, repository)` 建行的，两条路径对同一张镜像写出**两行不同的记录**
+> （唯一键 `(registry, project, repository, tag)` 因此不冲突），目录里镜像翻倍、
+> 用量统计被拆散。
+
+**Harbor API 的 URL 编码**：repository 含斜杠时必须**双重** URL 编码
+（`zhangsan/my-env` → `zhangsan%252Fmy-env`），因为 Harbor 的路由解一次、
+handler 再解一次。用原始斜杠会被当成额外路径段返回 404，导致嵌套 repository 的
+tag 列表、校验、删除全部失败。见 `harbor.py::_repository_path`。
+
+**同步时的归组**：`POST /images/sync` 对**新行**按项目归类 —— `library` →
+`official`/`global`；组 project → 归到该组、`visibility=group`，仓库首段是真实
+用户名时判为 `personal` 并把 `owner_user_id` 指过去；既不是组 project 也不是
+`library` 的（有人手工建了个 Harbor 项目）→ `shared`+`private` 且无 owner，即
+**只给管理员看，不进任何人的选择器**。已存在的行只刷新
+digest/size/layer_count，**不碰** `kind`/`visibility`/`group_id`：同步是镜像仓库的
+镜子，不该撤销管理员在目录里做的决定。
+
+> 不做归组的话，有人往 `lab-vision/zhangsan/secret-model` 推的镜像会以
+> `shared`+`global` 落进目录，出现在**每个实验室**的镜像选择器里 —— 与"一个组一个
+> 私有 project"的目的正好相反。
+>
+> **同步不得授予比登记更宽的可见性**：`register_image` 只允许个人镜像为
+> `private`/`workspace`，只允许管理员放宽共享镜像。所以同步发现的个人镜像是
+> `private` 且指向 owner，共享镜像归组，两者都不会变成全局共享。
+
+#### 5.5.2 选择器只显示三类镜像
+
+创建任务/实例要选镜像，这是整个项目结构对用户唯一可见的地方，因此
+`visible_condition` 就是契约：
+
+| 类别 | 判定 | 谁看得见 |
+| --- | --- | --- |
+| **集群内置** | `kind == official` | 所有登录用户 |
+| **组共享** | `visibility == group` 且组在本人（或所辖）组内 | 该组成员 |
+| **个人** | `owner_user_id == 本人` | 仅本人 |
+| 显式全局 | `visibility == global` | 所有登录用户（需 `image:share`，管理员主动标） |
+| 工作空间共享 | `visibility == workspace` 且在本人工作空间内 | 该空间成员 |
+| 全局管理员 | `scope.all_access` | 全部 |
+
+后两项是有人主动做的动作（普通用户只能发 `private`/`workspace`，`group`/`global`
+需要 `image:share`），所以不会被静默取消；但它们不在"三类"之内。
+
+> **别人的个人镜像不会出现在我的选择器里**：同步发现的个人镜像是 `private`，
+> 手动登记时前缀校验又挡住 `{组}/{他人用户名}/...`。唯一例外是管理员显式把某张
+> 镜像标成 `group` —— 那是主动共享，不是泄漏。
 
 ### 5.6 工作负载
 
@@ -1461,8 +1547,9 @@ Phase 8 结束时，`config/navigation.ts` 里还有两个入口指向 `Placehol
 
 - **OIDC** 仅预留扩展点：`OidcProvider.exchange_code()` 明确抛错说明。大学的统一身份是
   FreeIPA，接入 OIDC 需要校方先提供客户端注册；在拿到之前不写不可验证的代码。
-- `app/workers/celery_app.py` 的 `beat_schedule` 已接入 `reconcile-workloads`（30 秒）
-  与 `rollup-usage`（20 分钟）。
+- `app/workers/celery_app.py` 的 `beat_schedule` 已接入 `reconcile-workloads`（30 秒）、
+  `rollup-usage`（20 分钟）与 `sync-images`（默认每天一次，`IMAGE_SYNC_INTERVAL_SECONDS`
+  可调）。最后一个是镜像从「推送到 Harbor」变成「选择器里可见」的唯一自动途径。
 - **Prometheus 记账不会接入，这是有意为之**。Phase 6 的用量来自平台自身的记录；
   Phase 7 的 Grafana 只做「此刻在干什么」的展示。两者不交叉：把计费建立在 Prometheus 上
   会让采集中断直接变成少计费。**唯一的前置依赖是既有的 Prometheus 是否带

@@ -39,6 +39,7 @@ from app.models.enums import (
     WorkloadEventType,
     WorkloadKind,
 )
+from app.models.group import Group
 from app.models.image import Image
 from app.models.instance import Instance
 from app.models.task import Task
@@ -49,7 +50,29 @@ from app.services.workload_common import Page
 
 logger = get_logger(__name__)
 
-MAX_IMAGES_PER_SYNC = 500
+#: How many projects one pass will walk.
+#:
+#: The bound exists so a registry with something wrong with it cannot make a pass
+#: run unbounded. It also counts *projects*, not images: a project's repositories
+#: and tags are all walked, because a cap on images would silently truncate a
+#: large lab and the catalogue would look arbitrarily incomplete.
+#:
+#: Overrunning it is recorded as an error rather than passed over quietly, and
+#: that is not cosmetic: `_retire_missing` declines to act when a pass reported
+#: errors, and without the error the projects beyond the cap would read as "gone
+#: from the registry" — so a truncated pass would retire the images it never
+#: looked at.
+MAX_PROJECTS_PER_SYNC = 500
+
+#: The lock that keeps two catalogue syncs from running at once.
+#:
+#: Declared here rather than in the worker because both callers need it — the
+#: scheduled task and the manual endpoint — and the API has no business importing
+#: from the worker package to find it.
+SYNC_LOCK_KEY = "kube-wl-ai:image-sync"
+#: Long enough for any plausible pass, short enough that a worker killed mid-sync
+#: does not block the next run for a day.
+SYNC_LOCK_TTL_SECONDS = 1800
 
 #: Kinds whose entries a normal user may create. A user may catalogue images for
 #: themselves; "official" and "shared" are claims about what everyone else will
@@ -58,6 +81,22 @@ SELF_SERVICE_KINDS = frozenset({ImageKind.PERSONAL})
 
 #: Visibility levels a normal user may choose.
 SELF_SERVICE_VISIBILITIES = frozenset({ImageVisibility.PRIVATE, ImageVisibility.WORKSPACE})
+
+#: The one Harbor project that does not belong to a group.
+#:
+#: The platform's registry layout is *one project per group*, with the owner's
+#: username as the repository's first segment — ``lab-vision/zhangsan/my-env``.
+#: ``library`` is the exception: the installation's own space, holding the
+#: official base images every account may pull and the entries an administrator
+#: curates for everyone. Harbor project names are lowercase slugs
+#: (``[a-z0-9][a-z0-9._-]*``), which is exactly what ``Group.name`` already is,
+#: so a group's project is its name — not ``directory_name``, which may hold a
+#: capitalised directory ``cn`` that no registry would accept.
+OFFICIAL_PROJECT = "library"
+
+#: First repository segment reserved for a group's agreed images, as opposed to
+#: one member's own (``lab-vision/share/cuda-toolkit``).
+SHARED_REPOSITORY_PREFIX = "share"
 
 
 @dataclass(slots=True)
@@ -280,6 +319,28 @@ async def register_image(
     _ensure_may_publish(actor, kind, visibility)
 
     parts = parse_reference(reference, default_host=client.host)
+    project_group = await _ensure_project_managed(
+        session,
+        actor,
+        project=parts["project"],
+        repository=parts["repository"],
+        kind=kind,
+    )
+    if project_group is not None:
+        # The project is authoritative about the group. A caller asking for a
+        # different one is asking for a row whose group and project disagree —
+        # exactly the state the scheme exists to prevent.
+        if group_id is not None and group_id != project_group.id:
+            raise BadRequestError(
+                f"镜像位于项目 {parts['project']}，不属于所选用户组",
+                code="image_project_group_mismatch",
+                detail={
+                    "project": parts["project"],
+                    "projectGroupId": project_group.id,
+                    "requestedGroupId": group_id,
+                },
+            )
+        group_id = project_group.id
     group_id = _ensure_placeable(actor, visibility, workspace_id, group_id)
 
     existing = await session.scalars(
@@ -400,6 +461,69 @@ def _ensure_placeable(
             "共享到工作空间的镜像必须指定工作空间", code="image_workspace_required"
         )
     return group_id
+
+
+async def _ensure_project_managed(
+    session: AsyncSession,
+    actor: User,
+    *,
+    project: str,
+    repository: str,
+    kind: ImageKind,
+) -> Group | None:
+    """Check a reference against the platform's registry layout.
+
+    The layout is one Harbor project per platform group, with the owner's
+    username as the repository's first segment::
+
+        library/pytorch:2.4-cuda12            official base images
+        lab-vision/share/cuda-toolkit:12.4   the group's agreed images
+        lab-vision/zhangsan/my-env:v3         one member's own image
+
+    The convention is enforced here because Harbor cannot enforce it. Harbor's
+    RBAC stops at the project — a ``Developer`` may create *any* repository in
+    it, including one named after a colleague — so there is no registry-side
+    setting that says "this member may push here but not there". Rejecting a
+    mismatched prefix at the door is what keeps ownership legible, and it is
+    what would let each group be handed a robot scoped to its own prefix later.
+
+    Returns the group the project belongs to, or ``None`` for ``library``.
+    Raises rather than silently recording a reference nobody will be able to
+    account for.
+    """
+    if project == OFFICIAL_PROJECT:
+        # The installation's own space. Deliberately exempt from the username
+        # rule: `library/pytorch` is nobody's personal image, and the catalogue
+        # entries pointing at it are curated by administrators, which
+        # `_ensure_may_publish` has already checked.
+        return None
+
+    group = await session.scalar(select(Group).where(Group.name == project))
+    if group is None:
+        raise BadRequestError(
+            f"镜像仓库项目 {project} 不对应任何用户组；项目名必须是用户组名或 {OFFICIAL_PROJECT}",
+            code="image_project_unknown",
+            detail={"project": project, "officialProject": OFFICIAL_PROJECT},
+        )
+    # Membership is enough — this is "may I keep my images here", not "may I
+    # administer this group". Raises NotFound for an outsider so group names
+    # cannot be probed.
+    policy.ensure_group_visible(actor, group.id)
+
+    if kind == ImageKind.PERSONAL:
+        owner = repository.split("/", 1)[0]
+        if owner != actor.username:
+            raise BadRequestError(
+                f"个人镜像的仓库名必须以自己的用户名开头"
+                f"（{actor.username}/…），当前为 {repository}",
+                code="image_prefix_mismatch",
+                detail={
+                    "expectedPrefix": actor.username,
+                    "repository": repository,
+                    "hint": f"{project}/{actor.username}/{repository.split('/', 1)[-1]}",
+                },
+            )
+    return group
 
 
 async def update_image(
@@ -583,7 +707,30 @@ async def sync_images(
     # like they came from different registries.
     host = client.host
 
-    for project in wanted[:MAX_IMAGES_PER_SYNC]:
+    # Resolved once for the whole pass. Every synced row has to be attributed to
+    # the group whose project it sits in: without this a tag someone pushed to
+    # `lab-vision/zhangsan/secret-model` lands in the catalogue as a global share
+    # and shows up in every lab's picker, which is the opposite of what a
+    # per-group project is for.
+    # `.tuples()` rather than iterating Rows: this hands back plain tuples, which
+    # is what `dict()` is typed for.
+    groups_by_name: dict[str, int] = dict(
+        (await session.execute(select(Group.name, Group.id))).tuples().all()
+    )
+    users_by_name: dict[str, int] = dict(
+        (await session.execute(select(User.username, User.id))).tuples().all()
+    )
+
+    if len(wanted) > MAX_PROJECTS_PER_SYNC:
+        # Recorded before any work, so `_retire_missing` sees it no matter which
+        # project the pass reaches before it stops.
+        result.errors.append(
+            f"项目数 {len(wanted)} 超过单次同步上限 {MAX_PROJECTS_PER_SYNC}，"
+            f"本次只处理前 {MAX_PROJECTS_PER_SYNC} 个；因结果不完整，未执行停用。"
+            "请分批传 projects 参数同步。"
+        )
+
+    for project in wanted[:MAX_PROJECTS_PER_SYNC]:
         try:
             repositories = await _repositories(client, project)
         except RegistryError as exc:
@@ -598,7 +745,15 @@ async def sync_images(
             for tag in tags:
                 seen.add(_reference_key(tag))
                 try:
-                    await _absorb(session, host, actor, tag, result)
+                    await _absorb(
+                        session,
+                        host,
+                        actor,
+                        tag,
+                        result,
+                        groups_by_name=groups_by_name,
+                        users_by_name=users_by_name,
+                    )
                 except Exception as exc:
                     result.failed += 1
                     result.errors.append(f"{project}/{repository}:{tag.tag}: {exc}")
@@ -625,8 +780,74 @@ def _reference_key(tag: RegistryTag) -> str:
     return f"{tag.project}/{tag.repository}:{tag.tag}"
 
 
+def _classify_synced(
+    tag: RegistryTag,
+    *,
+    groups_by_name: dict[str, int],
+    users_by_name: dict[str, int],
+) -> dict[str, object]:
+    """Decide how a freshly discovered tag should be catalogued.
+
+    Classification follows the registry layout rather than guessing:
+    ``library`` is the installation's official space and stays globally visible;
+    a group's project yields rows the group can see, with the repository's first
+    segment saying whether they are the group's agreed images (``share/``) or
+    one member's own.
+
+    Only ever used for *new* rows. An existing row keeps whatever an
+    administrator set on it — a sync must not undo curation.
+    """
+    if tag.project == OFFICIAL_PROJECT:
+        return {
+            "kind": ImageKind.OFFICIAL.value,
+            "visibility": ImageVisibility.GLOBAL.value,
+            "group_id": None,
+            "owner_user_id": None,
+        }
+
+    group_id = groups_by_name.get(tag.project)
+    owner_segment = tag.repository.split("/", 1)[0] if "/" in tag.repository else ""
+    # `share/` is reserved, so it is never treated as an owner even in the
+    # unlikely event that an account carries that name.
+    owner_id = (
+        None if owner_segment == SHARED_REPOSITORY_PREFIX else users_by_name.get(owner_segment)
+    )
+
+    # A sync may not grant *more* visibility than registering the same reference
+    # would. `register_image` only ever lets a personal image be `private` or
+    # `workspace`, and only lets an administrator widen a shared one — so a
+    # discovered personal image is private to its owner, and a discovered shared
+    # one belongs to the group. Neither becomes a global share.
+    if owner_id is not None:
+        kind, visibility = ImageKind.PERSONAL.value, ImageVisibility.PRIVATE.value
+    elif group_id is not None:
+        kind, visibility = ImageKind.SHARED.value, ImageVisibility.GROUP.value
+    else:
+        # A project that is neither a group's nor `library`: a stray Harbor
+        # project nobody claimed. Nothing can say who should see it, so it is
+        # catalogued for administrators and offered to nobody — `private` with
+        # no owner matches no clause of `visible_condition` except the
+        # administrator's. Filing it `global` instead, which is what this used
+        # to do, put an unclaimed project's images in every account's picker.
+        kind, visibility = ImageKind.SHARED.value, ImageVisibility.PRIVATE.value
+
+    return {
+        "kind": kind,
+        "visibility": visibility,
+        "group_id": group_id,
+        "owner_user_id": owner_id,
+    }
+
+
 async def _absorb(
-    session: AsyncSession, host: str, actor: User | None, tag: RegistryTag, result: SyncResult
+    session: AsyncSession,
+    host: str,
+    actor: User | None,
+    tag: RegistryTag,
+    result: SyncResult,
+    *,
+    groups_by_name: dict[str, int],
+    users_by_name: dict[str, int],
 ) -> None:
     """Create or refresh one row from what the registry reported."""
     statement = select(Image).where(
@@ -646,13 +867,12 @@ async def _absorb(
                 tag=tag.tag,
                 digest=tag.digest,
                 display_name=f"{tag.repository}:{tag.tag}",
-                kind=ImageKind.SHARED.value,
-                visibility=ImageVisibility.GLOBAL.value,
                 category=ApplicationCategory.OTHER.value,
                 size_bytes=tag.size_bytes,
                 layer_count=tag.layer_count,
                 synced_at=datetime.now(UTC),
                 created_by=actor.id if actor else None,
+                **_classify_synced(tag, groups_by_name=groups_by_name, users_by_name=users_by_name),
             )
         )
         result.created += 1

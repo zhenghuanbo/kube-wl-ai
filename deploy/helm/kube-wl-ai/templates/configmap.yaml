@@ -28,6 +28,7 @@ data:
   sshMode: {{ .Values.config.instance.sshMode | quote }}
   sshNodeportRange: {{ .Values.config.instance.sshNodeportRange | quote }}
   loginRateLimitEnabled: {{ .Values.config.loginRateLimitEnabled | quote }}
+  imageSyncIntervalSeconds: {{ .Values.config.imageSyncIntervalSeconds | quote }}
   # Surfaced so the value is visible to a reviewer without reading the Secret.
   # The token *itself* is never here.
   jwtAlgorithm: {{ .Values.config.jwt.algorithm | quote }}

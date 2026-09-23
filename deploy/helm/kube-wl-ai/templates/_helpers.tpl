@@ -109,6 +109,8 @@ reconciling against a different setting than the API that created the row.
 {{- define "kube-wl-ai.commonEnv" -}}
 - name: APP_ENV
   value: {{ .Values.config.appEnv | quote }}
+- name: IMAGE_SYNC_INTERVAL_SECONDS
+  value: {{ .Values.config.imageSyncIntervalSeconds | quote }}
 - name: LOG_LEVEL
   value: {{ .Values.config.logLevel | quote }}
 - name: LOG_JSON

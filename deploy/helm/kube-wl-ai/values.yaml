@@ -93,6 +93,12 @@ config:
   accessTokenExpireMinutes: 15
   refreshTokenExpireDays: 7
 
+  # How often the worker refreshes the image catalogue from Harbor. Nothing else
+  # moves an image from "pushed" to "visible in the picker", so this is the knob
+  # that answers "I pushed my image, why can't I see it?". A pass walks every
+  # project and every tag, so a large installation should not lower it much.
+  imageSyncIntervalSeconds: 86400
+
   # Login rate limiting. The counter is the audit trail, so it lives in the
   # database and survives a restart; see agents.md §13 Phase 8.
   loginRateLimitEnabled: true

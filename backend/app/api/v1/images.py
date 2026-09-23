@@ -13,6 +13,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query
 
 from app.core.deps import AppSettings, CurrentUser, DbSession, require
+from app.core.errors import ConflictError
+from app.core.locks import exclusive
 from app.k8s import run_gateway
 from app.models.enums import ApplicationCategory, ImageKind, ImageVisibility, WorkloadKind
 from app.registries import get_registry
@@ -207,11 +209,25 @@ async def sync_images(
     Deliberately not a ``GET``: it writes, and a request that mutates state must
     not be reachable by an image tag or a prefetch.
     """
-    client = get_registry(settings)
-    result = await image_service.sync_images(
-        session, actor, client, settings, projects=payload.projects or None
-    )
-    await session.commit()
+    # The same lock the scheduled pass takes. Two passes read the same tags, both
+    # find no catalogue row and both insert — the unique constraint rolls one of
+    # them back, and the loser here would be a person waiting on a 500.
+    async with exclusive(
+        image_service.SYNC_LOCK_KEY,
+        ttl_seconds=image_service.SYNC_LOCK_TTL_SECONDS,
+        url=settings.redis_url,
+    ) as acquired:
+        if not acquired:
+            raise ConflictError(
+                "已有一次镜像同步正在进行，请稍后重试",
+                code="image_sync_in_progress",
+            )
+
+        client = get_registry(settings)
+        result = await image_service.sync_images(
+            session, actor, client, settings, projects=payload.projects or None
+        )
+        await session.commit()
     return ImageSyncResult(
         created=result.created,
         updated=result.updated,

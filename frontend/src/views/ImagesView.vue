@@ -201,6 +201,28 @@ function openRegister(): void {
 const referenceValid = computed(() => form.reference.trim().length > 0)
 
 /**
+ * Where the reference will land, previewed as it is typed.
+ *
+ * A mirror of the backend split — the project is the first segment after the
+ * host and the repository is everything after it — so the layout is visible
+ * before submitting rather than discovered through a validation error. UX only:
+ * the backend re-derives this and is the authority, and a wrong guess here can
+ * never let a reference through.
+ */
+const referenceParts = computed(() => {
+  const raw = form.reference.trim()
+  if (!raw) return null
+  const parts = raw.split('@')[0].split('/')
+  if (parts.length > 1 && (parts[0].includes('.') || parts[0].includes(':') || parts[0] === 'localhost')) {
+    parts.shift()
+  }
+  const last = parts.length - 1
+  parts[last] = parts[last].replace(/:.*$/, '')
+  if (parts.length <= 1) return { host: '', project: 'library', repository: parts[0] ?? '' }
+  return { host: '', project: parts[0], repository: parts.slice(1).join('/') }
+})
+
+/**
  * Derive the display name from the reference as it is typed.
  *
  * Only while the user has not written one: replacing something they typed would
@@ -240,7 +262,11 @@ async function save(): Promise<void> {
     if (!(error instanceof ApiError)) throw error
     // The API confirms the reference with the registry before storing it, so a
     // failure here is usually "that image does not exist" — which is the point.
-    notifications.error(error.message)
+    // Two of the failures are about the layout rather than the image, and the
+    // server sends the reference the caller should have used; showing only the
+    // prose would make them work it out again by hand.
+    const hint = typeof error.detail.hint === 'string' ? error.detail.hint : ''
+    notifications.error(hint ? `${error.message}。建议：${hint}` : error.message)
   } finally {
     saving.value = false
   }
@@ -709,6 +735,11 @@ function specs(image: ImageSummary): string[] {
             提交后会先向镜像仓库确认这个地址确实存在。打错的地址在这里就会被拦下，
             而不是等容器调度之后变成 ImagePullBackOff。
           </v-alert>
+          <v-alert type="info" variant="tonal" density="compact" class="mb-3">
+            镜像按<b>用户组</b>分仓：官方镜像放 <code>library</code>，你自己推的写成
+            <code>仓库地址/组名/你的用户名/镜像名:标签</code>，组共享的写成
+            <code>仓库地址/组名/share/镜像名:标签</code>。
+          </v-alert>
           <v-row dense>
             <v-col cols="12">
               <v-text-field
@@ -717,10 +748,24 @@ function specs(image: ImageSummary): string[] {
                 density="comfortable"
                 variant="outlined"
                 hide-details="auto"
-                placeholder="registry.example.edu/project/pytorch:2.4-cuda12"
-                hint="完整的 host/project/name:tag。也用 @sha256:… 固定到某个摘要。"
+                placeholder="registry.example.edu/我的组/我的用户名/pytorch:2.4-cuda12"
+                hint="完整的 host/组名/用户名/镜像名:标签；官方镜像用 host/library/…，组共享用 host/组名/share/…。也用 @sha256:… 固定到某个摘要。"
                 persistent-hint
               />
+            </v-col>
+            <v-col v-if="referenceParts" cols="12">
+              <div class="text-caption text-medium-emphasis d-flex flex-wrap ga-2 align-center">
+                <span>解析为</span>
+                <v-chip size="x-small" variant="tonal" color="primary">
+                  项目 {{ referenceParts.project }}
+                </v-chip>
+                <v-chip size="x-small" variant="tonal">
+                  仓库 {{ referenceParts.repository || '—' }}
+                </v-chip>
+                <span class="text-disabled">
+                  项目名必须是用户组名或 library
+                </span>
+              </div>
             </v-col>
             <v-col cols="12" sm="6">
               <v-text-field

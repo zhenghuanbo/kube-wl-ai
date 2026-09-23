@@ -94,6 +94,17 @@ def parse_reference(reference: str, default_host: str = "") -> dict[str, Any]:
     * a ``@sha256:`` digest wins over the tag, because a reference carrying both
       is pulled by digest and recording the tag would misdescribe it.
 
+    The project is the **first** path segment after the host and the repository
+    is **everything after it**, so repositories nest:
+    ``harbor.x.edu/lab-vision/zhangsan/my-env:v1`` is project ``lab-vision`` and
+    repository ``zhangsan/my-env``. That split is what the platform's image
+    scheme is built on — one project per group, with the owner's username as the
+    repository's first segment. Splitting at the *last* slash instead read the
+    project as ``lab-vision/zhangsan``, which no registry would ever have a
+    project by; worse, the sync path builds its rows from what Harbor reports
+    (``project=lab-vision, repository=zhangsan/my-env``), so the same image got
+    two different catalogue rows depending on which code path wrote it.
+
     Rejects rather than guesses: a malformed reference stored in the catalogue
     surfaces much later as an ``ImagePullBackOff``, which is precisely the
     problem this catalogue exists to prevent.
@@ -122,11 +133,19 @@ def parse_reference(reference: str, default_host: str = "") -> dict[str, Any]:
     if len(parts) > 1 and ("." in parts[0] or ":" in parts[0] or parts[0] == "localhost"):
         host = parts.pop(0)
 
-    if not parts or not parts[-1]:
+    if not parts or not all(parts):
+        # `all` rather than `parts[-1]`: an empty segment anywhere (``a//b``,
+        # ``a/b/``) makes the joined repository ambiguous, and a reference the
+        # platform cannot round-trip back to a name is worse than a rejection.
         raise RegistryError(f"镜像地址不合法：{reference}")
 
-    repository = parts[-1]
-    project = "/".join(parts[:-1]) or "library"
+    if len(parts) == 1:
+        # No project in the reference at all: Harbor files it under `library`.
+        project = "library"
+        repository = parts[0]
+    else:
+        project = parts[0]
+        repository = "/".join(parts[1:])
 
     if not host:
         raise RegistryError(f"镜像地址缺少仓库主机名：{reference}（请写成 host/project/name:tag）")

@@ -36,6 +36,13 @@
 - **Helm Chart 从未真正 `helm install` 过。** 已过 `helm lint`、两条 RBAC 分支的渲染，
   以及针对真实 1.28 API Server 的 `kubectl apply --dry-run=server`；但 `values.yaml` 中的
   镜像仓库地址、StorageClass 名称、LDAP 服务账号口令**仍是占位值**。
+- **Harbor 侧的 project 与 robot 需要人工创建。** 平台只通过 API 读镜像仓库，不会创建
+  project 或 robot 账号；节点级的拉取凭证也要逐节点配置。步骤见
+  [`deploy/harbor/README.md`](./deploy/harbor/README.md)，配置生成用
+  `scripts/harbor-node-pull-credential.sh`。
+- **组间在 registry 层没有读隔离。** 当前用节点级只读凭证拉镜像，节点不区分 Pod 属于谁，
+  所以任何 Pod 都能拉该 robot 可读的所有 project；可见性只由平台目录（`Image.visibility`）
+  控制页面显示什么。要恢复隔离需改为按组 robot + `imagePullSecret` 注入，路径同上文档 §4。
 - **`legacy/` 目录尚未删除**（原计划 Phase 8 删除）。它包含旧代码中泄漏的 kubeconfig 与
   硬编码 `SECRET_KEY`，删除前需**先确认集群侧凭证已吊销并轮换**。
 - 待外部确认：既有 Prometheus 是否带 `namespace` / `pod` 标签、是否存在 RWX StorageClass、

@@ -213,7 +213,7 @@ class LDAPProvider(AuthProvider):
                 or username
             )
 
-            groups = self._read_groups(connection, user_dn)
+            groups = self._read_groups(connection, user_dn, username)
 
         return ExternalIdentity(
             username=username,
@@ -223,12 +223,32 @@ class LDAPProvider(AuthProvider):
             groups=groups,
         )
 
-    def _read_groups(self, connection: ldap3.Connection, user_dn: str) -> tuple[str, ...]:
-        """Group ``cn`` values the user is a direct member of."""
+    def _read_groups(
+        self, connection: ldap3.Connection, user_dn: str, username: str
+    ) -> tuple[str, ...]:
+        """Group ``cn`` values the user is a direct member of.
+
+        Both membership spellings are searched, and they must be, because a
+        directory uses one or the other and the two are not interchangeable:
+
+        * ``member`` holds the member's **full DN** — ``groupOfNames``, Active
+          Directory, FreeIPA.
+        * ``memberUid`` holds the bare **login name** — ``posixGroup``, which is
+          what a plain OpenLDAP deployment almost always uses.
+
+        The bulk reconcile has always read both (``_members_from_entry``). This
+        login-time path read only ``member``, so on a ``posixGroup`` directory the
+        two disagreed: a sync would map a user's groups while the same user's own
+        login reported none, leaving them on the default role until somebody
+        happened to run the sync by hand.
+        """
         try:
             connection.search(
                 search_base=self._group_base_dn(),
-                search_filter=f"(member={escape_filter_chars(user_dn)})",
+                search_filter=(
+                    f"(|(member={escape_filter_chars(user_dn)})"
+                    f"(memberUid={escape_filter_chars(username)}))"
+                ),
                 attributes=["cn"],
                 size_limit=500,
             )

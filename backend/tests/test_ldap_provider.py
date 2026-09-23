@@ -181,6 +181,76 @@ def test_group_search_failure_does_not_block_login(
     assert "ldap_group_lookup_failed" in {entry["event"] for entry in logs}
 
 
+# --- posixGroup: both membership spellings ------------------------------------
+GROUP_BASE = "cn=groups,cn=accounts,dc=example,dc=edu"
+
+
+def _is_group_search(call: dict[str, Any]) -> bool:
+    """The group subtree search, as opposed to the user attribute search."""
+    return call["base"] == GROUP_BASE
+
+
+def _groups_search() -> dict[str, Any]:
+    return next(call for call in _connection().searches if _is_group_search(call))
+
+
+def test_group_search_asks_for_member_uid_as_well_as_member(
+    ldap_settings: Settings, fake_ldap: type[_FakeConnection]
+) -> None:
+    """A ``posixGroup`` directory lists members by login name, not by DN.
+
+    Reading only ``member`` made login disagree with the bulk reconcile on the
+    same directory: the sync mapped the membership and the user's own login
+    reported no groups, so they sat on the default role until somebody ran the
+    sync by hand.
+    """
+    fake_ldap.handler = _entries_for({"uid": "zhangsan", "mail": "z@example.edu"})
+
+    LDAPProvider(ldap_settings)._read_identity("zhangsan", USER_DN)
+
+    search = _groups_search()
+    assert "memberUid=zhangsan" in search["filter"]
+    # The DN form must stay: FreeIPA/AD groups carry `member` instead.
+    assert f"member={USER_DN}" in search["filter"]
+
+
+def test_group_search_escapes_the_username(
+    ldap_settings: Settings, fake_ldap: type[_FakeConnection]
+) -> None:
+    """The username reaches a filter, so a metacharacter must not break out of it."""
+    provider = LDAPProvider(ldap_settings)
+
+    # `_read_groups` is called directly, i.e. past `authenticate`'s own guard,
+    # because this asserts on what the filter builder does rather than on whether
+    # such a login would be allowed through.
+    provider._read_groups(_FakeConnection(server=object()), USER_DN, "a*)(uid=*")
+
+    search = _groups_search()
+    assert "a*)(uid=*" not in search["filter"]
+    assert "\\2a\\29\\28uid=\\2a" in search["filter"]
+
+
+def test_posix_group_membership_is_reported_at_login(
+    ldap_settings: Settings, fake_ldap: type[_FakeConnection]
+) -> None:
+    """End to end on the login path: a memberUid match becomes a real group."""
+    person = _Entry({"uid": "zhangsan", "mail": "z@example.edu", "cn": "Zhang San"})
+    group = _Entry({"cn": "hpc"})
+
+    def handler(call: dict[str, Any]) -> list[_Entry]:
+        if _is_group_search(call):
+            # The directory only answers this because the filter mentions
+            # memberUid; a member-only filter would return nothing here.
+            return [group] if "memberUid=zhangsan" in call["filter"] else []
+        return [person]
+
+    fake_ldap.handler = handler
+
+    result = LDAPProvider(ldap_settings)._read_identity("zhangsan", USER_DN)
+
+    assert result.groups == ("hpc",)
+
+
 # --- what is asked of the directory -------------------------------------------
 def test_member_of_is_not_requested() -> None:
     """``memberOf`` was fetched and never read; groups come from the reverse search."""

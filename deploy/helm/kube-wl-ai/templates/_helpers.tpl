@@ -184,6 +184,10 @@ reconciling against a different setting than the API that created the row.
   value: {{ .Values.config.ldap.bindDn | quote }}
 - name: LDAP_OBSERVER_GROUP
   value: {{ .Values.config.ldap.observerGroup | quote }}
+{{- if .Values.config.ldapCaCertSecret }}
+- name: LDAP_CA_CERT
+  value: "/etc/ssl/ldap/{{ .Values.config.ldapCaCertKey }}"
+{{- end }}
 - name: LDAP_BIND_PASSWORD
   valueFrom:
     secretKeyRef:

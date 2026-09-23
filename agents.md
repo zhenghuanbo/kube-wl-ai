@@ -501,8 +501,8 @@ scope 限不住它们。更糟的是 `effective_role_codes` 只对 `group_admin`
 
 | 服务 | 方式 |
 | --- | --- |
-| **FreeIPA** | LDAPS，`uid={username},cn=users,cn=accounts,{base_dn}` |
-| **Harbor** | API v2.0；按组建 project 与只读 robot 账号；在 namespace 生成 `imagePullSecret` |
+| **FreeIPA** | LDAPS，`uid={username},cn=users,cn=accounts,{base_dn}`；验证口令用本人 bind、读属性用服务账号；配置见 [`deploy/ldap/README.md`](./deploy/ldap/README.md) |
+| **Harbor** | API v2.0；一个用户组一个 project（`library` 例外），个人镜像用用户名作仓库前缀；平台侧 1 个系统级 robot（全权限）读 API；节点侧 1 个**只读** robot 供 kubelet 拉镜像。详见 `deploy/harbor/README.md` |
 | **Prometheus** | 既有实例，用于用量聚合（GPU 秒 / CPU 核秒 / 内存 GB 秒） |
 | **Grafana** | 既有实例；开启 `GF_AUTH_JWT_ENABLED`，JWKS 指向后端 `/.well-known/jwks.json`；后端签发 5 分钟 JWT 并**强制锁定** `var-namespace` / `var-pod` |
 

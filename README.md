@@ -28,7 +28,7 @@
 | Phase 8 | API 开放、审计与上线（含 Helm Chart） | ✅ 完成 | 60 |
 | Phase 9 | 收尾：系统设置页、计算资源页、移除占位页 | ✅ 完成 | 23 |
 
-**验收状态**：`pytest` **565 passed**；冒烟脚本 **9 个阶段 434 项**在干净库上按序全通过；
+**验收状态**：`pytest` **614 passed**；冒烟脚本 **9 个阶段 434 项**在干净库上按序全通过；
 `ruff` / `mypy` / `vue-tsc` / `vite build` / `helm lint` 全干净。
 
 ### 尚未完成的部分（需要集群侧配合，不是代码问题）
@@ -247,7 +247,7 @@ node scripts/smoke_frontend_views.mjs      # 挂载全部视图 + 内容/反向�
 | --- | --- |
 | `DATABASE_URL` | `postgresql+asyncpg://...`（生产）/ `sqlite+aiosqlite://...`（本地、测试） |
 | `SECRET_KEY` | 会话与令牌签名根密钥，**必须**在生产环境替换（不足 32 字节时生产环境拒绝启动） |
-| `AUTH_PROVIDERS` | `local` / `ldap` / `oidc` 的逗号分隔列表，按顺序尝试 |
+| `AUTH_PROVIDERS` | `local` / `ldap` / `oidc` 的逗号分隔列表，按顺序尝试。**`local` 放在最前才是真正的应急后门**——目录不可达会让整条链 503。详见 [`deploy/ldap/README.md`](./deploy/ldap/README.md) |
 | `K8S_ENABLED` / `K8S_IN_CLUSTER` / `KUBECONFIG` | 集群访问方式；关闭后实例与任务接口不可用，元数据管理不受影响 |
 | `PROMETHEUS_URL` | 既有 Prometheus 地址（可选，用量统计不依赖它） |
 | `GRAFANA_PUBLIC_URL` | Grafana 的同源挂载路径，**为空即视为未接入**，监控中心只显示平台自身统计 |

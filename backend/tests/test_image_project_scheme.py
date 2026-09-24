@@ -424,11 +424,13 @@ async def test_a_synced_group_image_is_invisible_to_another_lab(
     assert all(row["repository"] != "scheme-dana/experiment" for row in listed.json()["items"])
 
 
-async def test_a_sync_does_not_overwrite_an_administrators_curation(
+async def test_a_sync_does_not_overwrite_a_pinned_rows_curation(
     admin_client: AsyncClient, world: World, registry: FakeRegistryClient, seeded: AsyncSession
 ) -> None:
-    """Classification applies to new rows only. A sync mirrors the registry; it
-    does not get to undo a decision someone made in the catalogue."""
+    """A pin hands the row to a human. Classification is otherwise derived from
+    the path and re-derived on every pass, so a pinned row is the one place a
+    deliberate decision — here, widening a group share to the whole platform —
+    survives a sync."""
     await seed_tag(registry, LAB, "share/toolkit", "1.0")
     await act_as(admin_client, "scheme-root")
     created = await register(
@@ -436,6 +438,7 @@ async def test_a_sync_does_not_overwrite_an_administrators_curation(
         f"harbor.test/{LAB}/share/toolkit:1.0",
         kind="shared",
         visibility="global",
+        isPinned=True,
     )
     assert created.status_code == 201, created.text
 
@@ -445,6 +448,35 @@ async def test_a_sync_does_not_overwrite_an_administrators_curation(
     row = await seeded.get(Image, created.json()["id"])
     assert row is not None
     assert row.visibility == "global"
+
+
+async def test_a_sync_refiles_an_unpinned_row_whose_path_no_longer_matches(
+    admin_client: AsyncClient, world: World, registry: FakeRegistryClient, seeded: AsyncSession
+) -> None:
+    """The strict rules have to reach rows already in the catalogue.
+
+    `hpc/harbor-portal` — a repository dropped straight into a group's project,
+    matching none of the three shapes — used to be filed as a group share. A
+    sync is what corrects it, and an unpinned row is the sync's to correct.
+    """
+    await seed_tag(registry, LAB, "toolkit", "1.0")
+    await act_as(admin_client, "scheme-root")
+    created = await register(
+        admin_client,
+        f"harbor.test/{LAB}/toolkit:1.0",
+        kind="shared",
+        visibility="group",
+    )
+    assert created.status_code == 201, created.text
+
+    await admin_client.post("/api/v1/images/sync", json={"projects": [LAB]})
+
+    seeded.expire_all()
+    row = await seeded.get(Image, created.json()["id"])
+    assert row is not None
+    assert row.visibility == "private", "paths outside the convention are not group shares"
+    assert row.owner_user_id is None, "and they belong to nobody, so only an admin sees them"
+    assert row.group_id == world.lab.id, "the project is still recorded as the group's"
 
 
 # ---------------------------------------------------------------------------
@@ -629,6 +661,52 @@ async def test_images_from_a_project_that_is_neither_a_group_nor_library_are_not
 
     row = await seeded.scalar(select(Image).where(Image.project == "stray-project"))
     assert row is not None, "the sync must still catalogue it for administrators"
+
+    await act_as(admin_client, "scheme-dana")
+    assert row.id not in await visible_ids(admin_client)
+
+
+async def test_a_repository_dropped_straight_into_a_groups_project_is_not_shared(
+    admin_client: AsyncClient, world: World, registry: FakeRegistryClient, seeded: AsyncSession
+) -> None:
+    """`hpc/harbor-portal`, in miniature: a repository sitting in a group's
+    project that follows neither agreed shape.
+
+    The old rule — "a group's project is the group's space" — handed this to
+    every member of the group, so one person's convenience push became an image
+    the whole lab could pull. Only `share/` is the group's.
+    """
+    await seed_tag(registry, LAB, "harbor-portal", "v2.13.0")
+    await act_as(admin_client, "scheme-root")
+    await admin_client.post("/api/v1/images/sync", json={"projects": [LAB]})
+
+    row = await seeded.scalar(select(Image).where(Image.repository == "harbor-portal"))
+    assert row is not None, "it is still catalogued — the catalogue says what exists"
+    assert row.group_id == world.lab.id, "and the project it sits in is still recorded"
+    assert row.visibility == "private", "but the group is not given it"
+
+    await act_as(admin_client, "scheme-dana")
+    assert row.id not in await visible_ids(admin_client)
+
+
+async def test_a_name_prefix_that_is_not_an_account_is_not_shared_either(
+    admin_client: AsyncClient, world: World, registry: FakeRegistryClient, seeded: AsyncSession
+) -> None:
+    """A first segment that merely looks like a username names nobody.
+
+    `{group}/team-cache/x` is neither the group's agreed space nor anyone's
+    personal path. Filed as personal it would belong to no one; falling through
+    to "a group's project is shared with the group", which is what used to
+    happen, invented a group share out of nothing.
+    """
+    await seed_tag(registry, LAB, "team-cache/pytorch", "2.4")
+    await act_as(admin_client, "scheme-root")
+    await admin_client.post("/api/v1/images/sync", json={"projects": [LAB]})
+
+    row = await seeded.scalar(select(Image).where(Image.repository == "team-cache/pytorch"))
+    assert row is not None
+    assert row.visibility == "private"
+    assert row.owner_user_id is None
 
     await act_as(admin_client, "scheme-dana")
     assert row.id not in await visible_ids(admin_client)

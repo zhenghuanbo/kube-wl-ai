@@ -110,7 +110,10 @@ class Image(Base, TimestampMixin):
     )
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
 
-    #: Curated entries survive a sync that no longer reports them.
+    #: Curated entries are owned by a human: a sync neither retires them when the
+    #: registry stops reporting them, nor re-files their derived ``kind`` /
+    #: ``visibility`` when their path stops matching the shape they were filed
+    #: under. Both are the same promise — do not undo a deliberate decision.
     is_pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     #: How many instances, tasks and applications reference this image. Denormalised

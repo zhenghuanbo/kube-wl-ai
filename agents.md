@@ -266,21 +266,32 @@ harbor.edu.cn/lab-vision/zhangsan/my-env:v3
 handler 再解一次。用原始斜杠会被当成额外路径段返回 404，导致嵌套 repository 的
 tag 列表、校验、删除全部失败。见 `harbor.py::_repository_path`。
 
-**同步时的归组**：`POST /images/sync` 对**新行**按项目归类 —— `library` →
-`official`/`global`；组 project → 归到该组、`visibility=group`，仓库首段是真实
-用户名时判为 `personal` 并把 `owner_user_id` 指过去；既不是组 project 也不是
-`library` 的（有人手工建了个 Harbor 项目）→ `shared`+`private` 且无 owner，即
-**只给管理员看，不进任何人的选择器**。已存在的行只刷新
-digest/size/layer_count，**不碰** `kind`/`visibility`/`group_id`：同步是镜像仓库的
-镜子，不该撤销管理员在目录里做的决定。
+**同步时的归组**：分类是**引用路径的纯函数**，约定只有三种形状，别的都不算：
 
+| 路径 | kind / visibility | 谁能看到 |
+| --- | --- | --- |
+| `library/<镜像>` | `official` / `global` | 所有登录用户 |
+| `{组}/share/<镜像>` | `shared` / `group` | 该组成员 |
+| `{组}/{用户名}/<镜像>` | `personal` / `private` | 仅该用户 |
+
+`{组}` 必须是平台上真实存在的组，`{用户名}` 必须是真实账号 —— 只有平台能解析这个
+名字时，路径才被当成对该组/该人的声明。其余一律**不属于任何一类**：没人认领的
+Harbor 项目、直接丢进组项目的仓库（如 `hpc/harbor-portal`）、首段不是账号的路径
+（如 `{组}/team-cache/x`）。这些行**照样进目录**（目录的职责就是说清楚"有什么"），
+但落为 `shared`+`private` 且无 owner，`visible_condition` 的任何一个分支都不匹配，
+**只给管理员看，不进任何人的选择器**。
+
+> 宽松规则（"组项目就是组的空间"）曾把 `hpc/harbor-portal` —— 某个人顺手推的一次
+> —— 变成每个 hpc 成员都能拉的镜像。严格才是重点。
+>
 > 不做归组的话，有人往 `lab-vision/zhangsan/secret-model` 推的镜像会以
 > `shared`+`global` 落进目录，出现在**每个实验室**的镜像选择器里 —— 与"一个组一个
 > 私有 project"的目的正好相反。
->
-> **同步不得授予比登记更宽的可见性**：`register_image` 只允许个人镜像为
-> `private`/`workspace`，只允许管理员放宽共享镜像。所以同步发现的个人镜像是
-> `private` 且指向 owner，共享镜像归组，两者都不会变成全局共享。
+
+**同步会重算已有行的分类**：`kind`/`visibility`/`group_id`/`owner_user_id` 既然由路径
+推导，一行如果按它现在的路径不再符合当初归入的形状，那就是**过时**而不是"人工策展"，
+由同步改正。**唯一例外是 `is_pinned` 的行** —— 管理员 pin 一行就是接管了它（这正是
+pin 的用途），同步既不回收它、也不重算它的分类。
 
 #### 5.5.2 选择器只显示三类镜像
 
@@ -302,6 +313,10 @@ digest/size/layer_count，**不碰** `kind`/`visibility`/`group_id`：同步是�
 > **别人的个人镜像不会出现在我的选择器里**：同步发现的个人镜像是 `private`，
 > 手动登记时前缀校验又挡住 `{组}/{他人用户名}/...`。唯一例外是管理员显式把某张
 > 镜像标成 `group` —— 那是主动共享，不是泄漏。
+>
+> **对照实例**：`zhenghuanbo` 属于 `hpc` 组，他看到的就是 `library/*`（官方）+
+> `hpc/zhenghuanbo/*`（个人）+ `hpc/share/*`（组共享）。`hpc/harbor-portal` 不在
+> 其中 —— 它不在 `share/` 下，就不属于这个组。
 
 ### 5.6 工作负载
 

@@ -754,14 +754,25 @@ def _classify_synced(
 ) -> dict[str, object]:
     """Decide how a freshly discovered tag should be catalogued.
 
-    Classification follows the registry layout rather than guessing:
-    ``library`` is the installation's official space and stays globally visible;
-    a group's project yields rows the group can see, with the repository's first
-    segment saying whether they are the group's agreed images (``share/``) or
-    one member's own.
+    Classification is a pure function of the reference path, and the convention
+    is exact — there are three shapes and nothing else counts:
 
-    Only ever used for *new* rows. An existing row keeps whatever an
-    administrator set on it — a sync must not undo curation.
+    * ``library/<image>`` — official, visible to every signed-in account;
+    * ``<group>/share/<image>`` — shared with that one group;
+    * ``<group>/<username>/<image>`` — private to that user.
+
+    ``<group>`` has to be a group that exists on the platform and ``<username>``
+    a real account, so a path is only ever read as a claim about a group or a
+    person when the platform can resolve that name. Everything else matches no
+    shape: a stray project nobody claimed, an image dropped straight into a
+    group's project, a path whose owner segment is not an account. Those rows are
+    still catalogued — the catalogue's job is to say what exists — but they are
+    filed ``private`` with no owner, and no clause of :func:`visible_condition`
+    matches them bar the administrator's. They reach nobody's picker.
+
+    Being strict is the point. A lenient rule ("a group's project is the group's
+    space") quietly promoted `hpc/harbor-portal` — somebody's one-off push —
+    into an image that every member of hpc could pull.
     """
     if tag.project == OFFICIAL_PROJECT:
         return {
@@ -772,36 +783,37 @@ def _classify_synced(
         }
 
     group_id = groups_by_name.get(tag.project)
-    owner_segment = tag.repository.split("/", 1)[0] if "/" in tag.repository else ""
-    # `share/` is reserved, so it is never treated as an owner even in the
-    # unlikely event that an account carries that name.
-    owner_id = (
-        None if owner_segment == SHARED_REPOSITORY_PREFIX else users_by_name.get(owner_segment)
-    )
 
-    # A sync may not grant *more* visibility than registering the same reference
-    # would. `register_image` only ever lets a personal image be `private` or
-    # `workspace`, and only lets an administrator widen a shared one — so a
-    # discovered personal image is private to its owner, and a discovered shared
-    # one belongs to the group. Neither becomes a global share.
-    if owner_id is not None:
-        kind, visibility = ImageKind.PERSONAL.value, ImageVisibility.PRIVATE.value
-    elif group_id is not None:
-        kind, visibility = ImageKind.SHARED.value, ImageVisibility.GROUP.value
-    else:
-        # A project that is neither a group's nor `library`: a stray Harbor
-        # project nobody claimed. Nothing can say who should see it, so it is
-        # catalogued for administrators and offered to nobody — `private` with
-        # no owner matches no clause of `visible_condition` except the
-        # administrator's. Filing it `global` instead, which is what this used
-        # to do, put an unclaimed project's images in every account's picker.
-        kind, visibility = ImageKind.SHARED.value, ImageVisibility.PRIVATE.value
+    if group_id is not None:
+        # `share/` is reserved, so it is never read as an owner even in the
+        # unlikely event that an account carries that name. A repository named
+        # exactly `share`, with no image under it, is not the convention either.
+        if tag.repository.startswith(f"{SHARED_REPOSITORY_PREFIX}/"):
+            return {
+                "kind": ImageKind.SHARED.value,
+                "visibility": ImageVisibility.GROUP.value,
+                "group_id": group_id,
+                "owner_user_id": None,
+            }
+        owner_segment = tag.repository.split("/", 1)[0] if "/" in tag.repository else ""
+        owner_id = users_by_name.get(owner_segment)
+        if owner_id is not None:
+            return {
+                "kind": ImageKind.PERSONAL.value,
+                "visibility": ImageVisibility.PRIVATE.value,
+                "group_id": group_id,
+                "owner_user_id": owner_id,
+            }
 
+    # Matched no shape. `group_id` is still recorded when the project happens to
+    # be a group's — the row does sit in that group's project — but `private`
+    # keeps it out of the group's picker, and an administrator who later decides
+    # the group *should* have it only has to widen the visibility.
     return {
-        "kind": kind,
-        "visibility": visibility,
+        "kind": ImageKind.SHARED.value,
+        "visibility": ImageVisibility.PRIVATE.value,
         "group_id": group_id,
-        "owner_user_id": owner_id,
+        "owner_user_id": None,
     }
 
 
@@ -848,6 +860,21 @@ async def _absorb(
         or image.size_bytes != tag.size_bytes
         or image.layer_count != tag.layer_count
     )
+    # A sync owns the *derived* classification. `kind`, `visibility` and the
+    # group/owner attribution are a function of the reference path, so a row
+    # filed under a shape its path no longer matches is stale rather than
+    # curated — and the strict rules above are worthless if they only ever apply
+    # to rows discovered after they were written.
+    #
+    # `is_pinned` is the exception: an administrator who pinned a row has taken
+    # ownership of it (that is what the pin is for), and a pass that silently
+    # re-filed it would undo a deliberate decision.
+    if not image.is_pinned:
+        derived = _classify_synced(tag, groups_by_name=groups_by_name, users_by_name=users_by_name)
+        for attribute, value in derived.items():
+            if getattr(image, attribute) != value:
+                setattr(image, attribute, value)
+                changed = True
     image.digest = tag.digest or image.digest
     image.size_bytes = tag.size_bytes if tag.size_bytes is not None else image.size_bytes
     image.layer_count = tag.layer_count if tag.layer_count is not None else image.layer_count

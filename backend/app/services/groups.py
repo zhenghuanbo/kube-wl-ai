@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import policy
 from app.auth.providers import AuthProvider, build_providers
 from app.auth.service import ensure_primary_group
+from app.core.config import Settings
 from app.core.errors import BadRequestError, ConflictError, NotFoundError
 from app.core.logging import get_logger
 from app.models.enums import GroupKind, GroupRole
@@ -337,15 +338,24 @@ async def remove_member(session: AsyncSession, actor: User, group: Group, user_i
 # Directory reconciliation
 # ---------------------------------------------------------------------------
 async def sync_directory(
-    session: AsyncSession, actor: User, *, dry_run: bool = False
+    session: AsyncSession,
+    actor: User,
+    *,
+    dry_run: bool = False,
+    settings: Settings | None = None,
 ) -> GroupSyncResult:
     """Reconcile group memberships with the directory.
 
     Only groups that already exist locally by name are touched — the directory
     never creates groups here. Only memberships flagged ``is_directory_managed``
     are revoked, so a hand-granted membership always survives.
+
+    ``settings`` is threaded in from the request rather than read from the
+    process-global cache: which directory is configured is a property of the
+    running application, and a caller that was handed one set of settings must
+    not silently have a different set consulted underneath it.
     """
-    provider = _directory_provider()
+    provider = _directory_provider(settings)
     if provider is None:
         raise BadRequestError(
             "未配置可用的目录服务（LDAP），无法同步",
@@ -412,8 +422,8 @@ async def sync_directory(
     return result
 
 
-def _directory_provider() -> AuthProvider | None:
-    for provider in build_providers():
+def _directory_provider(settings: Settings | None = None) -> AuthProvider | None:
+    for provider in build_providers(settings):
         if provider.name == "ldap":
             return provider
     return None

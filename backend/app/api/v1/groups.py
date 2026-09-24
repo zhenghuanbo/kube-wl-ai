@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Query, Request
 
 from app.auth import policy
 from app.core.audit import record_audit
+from app.core.config import Settings, get_settings
 from app.core.deps import CurrentUser, DbSession, require
 from app.models.enums import GroupKind
 from app.schemas.base import ApiMessage
@@ -90,14 +91,20 @@ async def create_group(
     dependencies=[Depends(require("group:update"))],
 )
 async def sync_groups(
-    payload: GroupSyncRequest, request: Request, session: DbSession, actor: CurrentUser
+    payload: GroupSyncRequest,
+    request: Request,
+    session: DbSession,
+    actor: CurrentUser,
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> GroupSyncResult:
     """Pull memberships from FreeIPA.
 
     Run with ``dryRun`` first: it reports exactly what would change without
     writing anything.
     """
-    result = await group_service.sync_directory(session, actor, dry_run=payload.dry_run)
+    result = await group_service.sync_directory(
+        session, actor, dry_run=payload.dry_run, settings=settings
+    )
     if not payload.dry_run:
         record_audit(
             session,

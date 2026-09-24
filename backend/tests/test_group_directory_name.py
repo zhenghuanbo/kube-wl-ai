@@ -54,7 +54,10 @@ class _FakeDirectory:
 @pytest.fixture
 def directory(monkeypatch: pytest.MonkeyPatch) -> _FakeDirectory:
     fake = _FakeDirectory([])
-    monkeypatch.setattr(groups, "_directory_provider", lambda: fake)
+    # Takes the settings the service threads through and ignores them: this stub
+    # stands in for "a directory is configured", which is the precondition the
+    # fixture exists to establish.
+    monkeypatch.setattr(groups, "_directory_provider", lambda settings=None: fake)
     return fake
 
 

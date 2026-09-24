@@ -204,13 +204,18 @@ status, status_message, checked_at, workspace_id, group_id, owner_user_id, creat
 ### 5.5 镜像
 
 `images(registry, project, repository, tag, digest, kind=personal|official|shared, visibility,
-category, framework, framework_version, python_version, cuda_version, os_version, size_bytes,
-layer_count, display_name, description, is_pinned, is_active, usage_count, synced_at, sync_error,
-workspace_id, group_id, owner_user_id, created_by)`
+size_bytes, layer_count, display_name, description, is_pinned, is_active, usage_count, synced_at,
+sync_error, workspace_id, group_id, owner_user_id, created_by)`
 
 > 唯一约束是 `(registry, project, repository, tag)`。
 > Python 属性名为 `registry_host`（`registry` 与 `DeclarativeBase.registry` 冲突），
 > 数据库列名仍是 `registry`。
+>
+> 镜像**没有** framework / category 一类的分类字段：同一个 `pytorch:2.4-cuda12`
+> 既跑 notebook 也跑训练任务，那套分类属于工作负载而不是镜像。真正区分镜像的只有
+> `kind` 与 `visibility`，而且都由引用路径**严格**推导 —— `library/*` → official、
+> `{组}/share/*` → shared、`{组}/{用户名}/*` → personal，其余不属于任何一类
+> （见 5.5.1），不靠人工填写。
 
 #### 5.5.1 Harbor 项目结构：一个组一个 project
 

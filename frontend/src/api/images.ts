@@ -1,7 +1,7 @@
 /** Image catalogue endpoints (`app/api/v1/images.py`). */
 import { api } from '@/api/client'
 import type { ListQuery, Page } from '@/types/api'
-import type { ApplicationCategory, WorkloadEvent } from '@/types/application'
+import type { WorkloadEvent } from '@/types/application'
 import type {
   ImageDetail,
   ImageKind,
@@ -15,10 +15,8 @@ import type {
 } from '@/types/image'
 
 export interface ImageListQuery extends ListQuery {
-  category?: ApplicationCategory
   kind?: ImageKind
   visibility?: ImageVisibility
-  framework?: string
   /** Only the caller's own entries, ignoring the shared catalogue. */
   ownedOnly?: boolean
   includeInactive?: boolean

@@ -33,7 +33,6 @@ from app.core.errors import BadRequestError, ConflictError, NotFoundError
 from app.core.logging import get_logger
 from app.models.application import Application
 from app.models.enums import (
-    ApplicationCategory,
     ImageKind,
     ImageVisibility,
     WorkloadEventType,
@@ -184,10 +183,8 @@ async def list_images(
     session: AsyncSession,
     actor: User,
     *,
-    category: ApplicationCategory | None = None,
     kind: ImageKind | None = None,
     visibility: ImageVisibility | None = None,
-    framework: str | None = None,
     search: str | None = None,
     owned_only: bool = False,
     include_inactive: bool = False,
@@ -214,12 +211,6 @@ async def list_images(
     if visibility is not None:
         statement = statement.where(Image.visibility == visibility.value)
         count_statement = count_statement.where(Image.visibility == visibility.value)
-    if category is not None:
-        statement = statement.where(Image.category == category.value)
-        count_statement = count_statement.where(Image.category == category.value)
-    if framework:
-        statement = statement.where(Image.framework == framework)
-        count_statement = count_statement.where(Image.framework == framework)
     if search:
         # Match the human name and the reference: people search for "pytorch"
         # and for "2.4-cuda12", and either should find the same row.
@@ -228,7 +219,6 @@ async def list_images(
             func.lower(Image.display_name).like(pattern),
             func.lower(Image.repository).like(pattern),
             func.lower(Image.tag).like(pattern),
-            func.lower(Image.framework).like(pattern),
         )
         statement = statement.where(clause)
         count_statement = count_statement.where(clause)
@@ -303,16 +293,10 @@ async def register_image(
     reference: str,
     display_name: str = "",
     description: str | None = None,
-    category: ApplicationCategory = ApplicationCategory.OTHER,
     kind: ImageKind = ImageKind.PERSONAL,
     visibility: ImageVisibility = ImageVisibility.PRIVATE,
     workspace_id: int | None = None,
     group_id: int | None = None,
-    framework: str | None = None,
-    framework_version: str | None = None,
-    python_version: str | None = None,
-    cuda_version: str | None = None,
-    os_version: str | None = None,
     is_pinned: bool = False,
 ) -> Image:
     """Add one reference to the catalogue, confirming it with the registry first."""
@@ -389,18 +373,12 @@ async def register_image(
         digest=digest,
         display_name=display_name or f"{parts['repository']}:{parts['tag']}",
         description=description,
-        category=category.value,
         kind=kind.value,
         visibility=visibility.value,
         workspace_id=workspace_id,
         group_id=group_id,
         owner_user_id=actor.id,
         created_by=actor.id,
-        framework=framework,
-        framework_version=framework_version,
-        python_version=python_version,
-        cuda_version=cuda_version,
-        os_version=os_version,
         size_bytes=size_bytes,
         layer_count=layer_count,
         synced_at=datetime.now(UTC),
@@ -533,12 +511,6 @@ async def update_image(
     *,
     display_name: str | None = None,
     description: str | None = None,
-    category: ApplicationCategory | None = None,
-    framework: str | None = None,
-    framework_version: str | None = None,
-    python_version: str | None = None,
-    cuda_version: str | None = None,
-    os_version: str | None = None,
     is_active: bool | None = None,
     is_pinned: bool | None = None,
     visibility: ImageVisibility | None = None,
@@ -565,17 +537,11 @@ async def update_image(
     for attribute, value in (
         ("display_name", display_name),
         ("description", description),
-        ("framework", framework),
-        ("framework_version", framework_version),
-        ("python_version", python_version),
-        ("cuda_version", cuda_version),
         ("is_active", is_active),
         ("is_pinned", is_pinned),
     ):
         if value is not None:
             setattr(image, attribute, value)
-    if category is not None:
-        image.category = category
 
     await session.flush()
     await workload_events.record(
@@ -867,7 +833,6 @@ async def _absorb(
                 tag=tag.tag,
                 digest=tag.digest,
                 display_name=f"{tag.repository}:{tag.tag}",
-                category=ApplicationCategory.OTHER.value,
                 size_bytes=tag.size_bytes,
                 layer_count=tag.layer_count,
                 synced_at=datetime.now(UTC),

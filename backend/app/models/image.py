@@ -38,7 +38,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, str_enum
-from app.models.enums import ApplicationCategory, ImageKind, ImageVisibility
+from app.models.enums import ImageKind, ImageVisibility
 
 if TYPE_CHECKING:
     from app.models.group import Group
@@ -87,23 +87,6 @@ class Image(Base, TimestampMixin):
         nullable=False,
         default=ImageVisibility.PRIVATE,
     )
-    #: What the image is for; drives the same picker grouping as applications.
-    category: Mapped[ApplicationCategory] = mapped_column(
-        str_enum(ApplicationCategory, "image_category"),
-        nullable=False,
-        default=ApplicationCategory.OTHER,
-    )
-
-    # --- contents ------------------------------------------------------------
-    #: Free-form, but the common ones are worth their own column: a user
-    #: choosing an image is usually answering "does this have PyTorch and which
-    #: CUDA does it need?".
-    framework: Mapped[str | None] = mapped_column(String(64), index=True)
-    framework_version: Mapped[str | None] = mapped_column(String(64))
-    python_version: Mapped[str | None] = mapped_column(String(32))
-    cuda_version: Mapped[str | None] = mapped_column(String(32))
-    os_version: Mapped[str | None] = mapped_column(String(64))
-
     # --- registry metadata ---------------------------------------------------
     size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     #: Number of layers, exposed by Harbor; a cheap proxy for "is this a real
@@ -155,15 +138,6 @@ class Image(Base, TimestampMixin):
         if self.digest:
             return f"{self.registry_host}/{self.project}/{self.repository}@{self.digest}"
         return self.reference
-
-    @property
-    def requires_gpu(self) -> bool:
-        """Whether the image was built against CUDA.
-
-        Inferred from the CUDA tag rather than stored as its own flag: one fact,
-        one place, and the tag is what the image's author actually controls.
-        """
-        return bool(self.cuda_version)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<Image {self.id} {self.reference}>"

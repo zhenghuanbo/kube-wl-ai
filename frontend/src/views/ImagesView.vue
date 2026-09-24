@@ -2,9 +2,14 @@
 /**
  * Image catalogue.
  *
- * A gallery rather than a table, for the same reason as the application
- * catalogue: an image is chosen for what is inside it — which framework, which
- * CUDA, how big — and a row of columns cannot carry that.
+ * A table, because what a person does here is scan a list for a name and copy
+ * its reference. Cards spent a third of the viewport on a description and a row
+ * of spec chips that were usually empty, so a screenful held four images.
+ *
+ * Images come in three kinds, and the split is read off the registry layout
+ * rather than typed in: `library/` is official, a group's project is shared with
+ * that group, a member's own path is private to them. There is no
+ * framework/category axis — that describes the workload, not the image.
  *
  * Two things this page is careful about:
  *
@@ -37,7 +42,6 @@ import PageHeader from '@/components/common/PageHeader.vue'
 import { usePermissions } from '@/composables/usePermissions'
 import { useNotificationStore } from '@/stores/notifications'
 import type { WorkloadEvent } from '@/types/application'
-import { CATEGORY_OPTIONS, type ApplicationCategory } from '@/types/application'
 import type {
   ImageDetail,
   ImageKind,
@@ -47,7 +51,6 @@ import type {
   RegistryStatus,
 } from '@/types/image'
 import {
-  FRAMEWORKS,
   IMAGE_KIND_META,
   IMAGE_VISIBILITY_META,
   SELF_SERVICE_VISIBILITIES,
@@ -60,9 +63,6 @@ const canCreate = computed(() => can('image:create'))
 const canShare = computed(() => can('image:share'))
 const canDelete = computed(() => can('image:delete'))
 
-const categoryTitle = (value: string): string =>
-  CATEGORY_OPTIONS.find((option) => option.value === value)?.title ?? value
-
 // --- listing -----------------------------------------------------------------
 const rows = ref<ImageSummary[]>([])
 const total = ref(0)
@@ -70,13 +70,37 @@ const usage = ref<ImageUsage | null>(null)
 const registry = ref<RegistryStatus | null>(null)
 const loading = ref(false)
 const page = ref(1)
-const pageSize = ref(24)
+const pageSize = ref(25)
+
+interface Column {
+  title: string
+  key: string
+  sortable?: boolean
+  align?: 'start' | 'end'
+}
+
+/**
+ * Four columns, in the order the question is actually asked: what is it, where
+ * does it live, may I use it, and is it still there.
+ *
+ * `kind` and `verified` are the two that earn their width — one says whether the
+ * row will be in somebody else's picker, the other whether a sync has ever
+ * confirmed it exists. A hand-registered entry that no sync has seen is exactly
+ * the row that turns into an `ImagePullBackOff`, so it is flagged rather than
+ * blended in.
+ */
+const headers: Column[] = [
+  { title: '镜像', key: 'displayName', sortable: false },
+  { title: '类型', key: 'kind', sortable: false },
+  { title: '大小', key: 'sizeBytes', sortable: false, align: 'end' },
+  { title: '核对', key: 'verified', sortable: false },
+  { title: '使用', key: 'usageCount', sortable: false, align: 'end' },
+  { title: '操作', key: 'actions', sortable: false, align: 'end' },
+]
 
 const filters = reactive({
   search: '',
-  category: null as ApplicationCategory | null,
   kind: null as ImageKind | null,
-  framework: null as string | null,
   ownedOnly: false,
   includeInactive: false,
 })
@@ -88,9 +112,7 @@ async function load(): Promise<void> {
       page: page.value,
       pageSize: pageSize.value,
       search: filters.search.trim() || undefined,
-      category: filters.category ?? undefined,
       kind: filters.kind ?? undefined,
-      framework: filters.framework ?? undefined,
       ownedOnly: filters.ownedOnly || undefined,
       includeInactive: filters.includeInactive || undefined,
     })
@@ -132,9 +154,7 @@ watch(
 )
 watch(
   () => [
-    filters.category,
     filters.kind,
-    filters.framework,
     filters.ownedOnly,
     filters.includeInactive,
     page.value,
@@ -155,14 +175,8 @@ const form = reactive({
   reference: '',
   displayName: '',
   description: '',
-  category: 'other' as ApplicationCategory,
   kind: 'personal' as ImageKind,
   visibility: 'private' as ImageVisibility,
-  framework: null as string | null,
-  frameworkVersion: '',
-  pythonVersion: '',
-  cudaVersion: '',
-  osVersion: '',
   isPinned: false,
 })
 
@@ -185,14 +199,8 @@ function openRegister(): void {
     reference: '',
     displayName: '',
     description: '',
-    category: 'other',
     kind: 'personal',
     visibility: 'private',
-    framework: null,
-    frameworkVersion: '',
-    pythonVersion: '',
-    cudaVersion: '',
-    osVersion: '',
     isPinned: false,
   })
   dialogOpen.value = true
@@ -245,14 +253,8 @@ async function save(): Promise<void> {
       reference: form.reference.trim(),
       displayName: form.displayName.trim() || undefined,
       description: form.description || null,
-      category: form.category,
       kind: form.kind,
       visibility: form.visibility,
-      framework: form.framework,
-      frameworkVersion: form.frameworkVersion || null,
-      pythonVersion: form.pythonVersion || null,
-      cudaVersion: form.cudaVersion || null,
-      osVersion: form.osVersion || null,
       isPinned: form.isPinned || undefined,
     })
     notifications.success(`已登记 ${created.reference}`)
@@ -308,12 +310,6 @@ const editSaving = ref(false)
 const editForm = reactive({
   displayName: '',
   description: '',
-  category: 'other' as ApplicationCategory,
-  framework: null as string | null,
-  frameworkVersion: '',
-  pythonVersion: '',
-  cudaVersion: '',
-  osVersion: '',
   visibility: 'private' as ImageVisibility,
   kind: 'personal' as ImageKind,
   isPinned: false,
@@ -326,12 +322,6 @@ async function openEdit(row: ImageSummary): Promise<void> {
     Object.assign(editForm, {
       displayName: detail.displayName,
       description: detail.description ?? '',
-      category: detail.category,
-      framework: detail.framework,
-      frameworkVersion: detail.frameworkVersion ?? '',
-      pythonVersion: detail.pythonVersion ?? '',
-      cudaVersion: detail.cudaVersion ?? '',
-      osVersion: detail.osVersion ?? '',
       visibility: detail.visibility,
       kind: detail.kind,
       isPinned: detail.isPinned,
@@ -349,12 +339,6 @@ async function saveEdit(): Promise<void> {
     await updateImage(editing.value.id, {
       displayName: editForm.displayName || null,
       description: editForm.description || null,
-      category: editForm.category,
-      framework: editForm.framework,
-      frameworkVersion: editForm.frameworkVersion || null,
-      pythonVersion: editForm.pythonVersion || null,
-      cudaVersion: editForm.cudaVersion || null,
-      osVersion: editForm.osVersion || null,
       visibility: editForm.visibility,
       kind: editForm.kind,
       isPinned: editForm.isPinned,
@@ -455,19 +439,6 @@ function formatTime(value?: string | null): string {
   if (!value) return '—'
   return new Date(value).toLocaleString('zh-CN', { hour12: false })
 }
-
-function specs(image: ImageSummary): string[] {
-  const parts: string[] = []
-  if (image.framework) {
-    parts.push(
-      image.frameworkVersion ? `${image.framework} ${image.frameworkVersion}` : image.framework,
-    )
-  }
-  if (image.cudaVersion) parts.push(`CUDA ${image.cudaVersion}`)
-  if (image.pythonVersion) parts.push(`Python ${image.pythonVersion}`)
-  if (image.osVersion) parts.push(image.osVersion)
-  return parts
-}
 </script>
 
 <template>
@@ -544,40 +515,18 @@ function specs(image: ImageSummary): string[] {
         style="max-width: 280px"
       />
       <v-select
-        v-model="filters.category"
-        :items="CATEGORY_OPTIONS"
-        item-title="title"
-        item-value="value"
-        density="comfortable"
-        variant="outlined"
-        hide-details
-        clearable
-        label="分类"
-        style="max-width: 170px"
-      />
-      <v-select
         v-model="filters.kind"
         :items="[
           { title: '官方镜像', value: 'official' },
-          { title: '共享镜像', value: 'shared' },
-          { title: '个人镜像', value: 'personal' },
+          { title: '组共享镜像', value: 'shared' },
+          { title: '个人私有镜像', value: 'personal' },
         ]"
         density="comfortable"
         variant="outlined"
         hide-details
         clearable
         label="类型"
-        style="max-width: 160px"
-      />
-      <v-select
-        v-model="filters.framework"
-        :items="FRAMEWORKS"
-        density="comfortable"
-        variant="outlined"
-        hide-details
-        clearable
-        label="框架"
-        style="max-width: 160px"
+        style="max-width: 170px"
       />
       <v-switch
         v-model="filters.ownedOnly"
@@ -597,133 +546,125 @@ function specs(image: ImageSummary): string[] {
       />
     </FilterBar>
 
-    <div v-if="loading" class="d-flex justify-center pa-8">
-      <v-progress-circular indeterminate color="primary" />
-    </div>
-
-    <EmptyState
-      v-else-if="!rows.length"
-      icon="mdi-docker"
-      title="镜像目录中还没有条目"
-      description="登记一个镜像地址，平台会先向仓库确认它确实存在，再收进目录。"
+    <v-data-table
+      :headers="headers"
+      :items="rows"
+      :loading="loading"
+      :items-per-page="pageSize"
+      :page="page"
+      :items-length="total"
+      item-value="id"
+      hover
+      @update:page="page = $event"
+      @update:items-per-page="pageSize = $event"
     >
-      <v-btn v-if="canCreate" color="primary" variant="flat" @click="openRegister">
-        登记镜像
-      </v-btn>
-      <v-btn v-if="canShare" variant="tonal" class="ml-2" @click="runSync">从仓库同步</v-btn>
-    </EmptyState>
+      <template #item.displayName="{ item }">
+        <div class="d-flex align-center ga-1">
+          <span class="font-weight-medium">{{ item.displayName }}</span>
+          <v-icon v-if="item.isPinned" icon="mdi-pin" size="x-small" color="primary" />
+          <v-icon v-if="!item.isActive" icon="mdi-eye-off-outline" size="x-small" color="grey" />
+        </div>
+        <div class="text-caption text-medium-emphasis wl-mono">{{ item.reference }}</div>
+        <div v-if="item.description" class="text-caption text-medium-emphasis text-truncate">
+          {{ item.description }}
+        </div>
+      </template>
 
-    <v-row v-else dense>
-      <v-col v-for="image in rows" :key="image.id" cols="12" sm="6" lg="4" xl="3">
-        <v-card variant="flat" class="wl-image-card h-100 d-flex flex-column" @click="openDetail(image)">
-          <div class="d-flex align-start ga-2 pa-4 pb-2">
-            <v-avatar
-              :color="IMAGE_KIND_META[image.kind].color"
-              variant="tonal"
-              size="40"
-              rounded
-            >
-              <v-icon :icon="IMAGE_KIND_META[image.kind].icon" />
-            </v-avatar>
-            <div class="flex-grow-1 min-w-0">
-              <div class="d-flex align-center ga-1">
-                <span class="text-body-1 font-weight-medium text-truncate">
-                  {{ image.displayName }}
-                </span>
-                <v-icon v-if="image.isPinned" icon="mdi-pin" size="x-small" color="primary" />
-              </div>
-              <div class="text-caption text-medium-emphasis wl-mono text-truncate">
-                {{ image.repository }}:{{ image.tag }}
-              </div>
-            </div>
-            <v-menu location="bottom end">
-              <template #activator="{ props: menuProps }">
-                <v-btn
-                  v-bind="menuProps"
-                  icon="mdi-dots-vertical"
-                  size="small"
-                  variant="text"
-                  @click.stop
-                />
-              </template>
-              <v-list density="compact">
-                <v-list-item prepend-icon="mdi-content-copy" title="复制地址" @click="copyReference(image.reference)" />
-                <v-list-item prepend-icon="mdi-pencil-outline" title="编辑" @click="openEdit(image)" />
-                <v-list-item
-                  prepend-icon="mdi-delete-outline"
-                  title="移除"
-                  :disabled="!canDelete"
-                  @click="openDelete(image)"
-                />
-              </v-list>
-            </v-menu>
-          </div>
+      <template #item.kind="{ item }">
+        <v-chip size="small" variant="tonal" :color="IMAGE_KIND_META[item.kind].color">
+          {{ IMAGE_KIND_META[item.kind].title }}
+        </v-chip>
+      </template>
 
-          <v-card-text class="pt-0 pb-2 flex-grow-1">
-            <p v-if="image.description" class="text-body-2 mb-2 wl-clamp">{{ image.description }}</p>
+      <template #item.sizeBytes="{ item }">
+        <span class="text-medium-emphasis">{{ formatSize(item.sizeBytes) }}</span>
+      </template>
 
-            <div class="d-flex flex-wrap ga-1 mb-2">
-              <v-chip size="x-small" variant="tonal" :color="IMAGE_KIND_META[image.kind].color">
-                {{ IMAGE_KIND_META[image.kind].title }}
-              </v-chip>
-              <v-chip size="x-small" variant="tonal">
-                {{ categoryTitle(image.category) }}
-              </v-chip>
-              <v-chip
-                v-for="spec in specs(image)"
-                :key="spec"
-                size="x-small"
+      <template #item.verified="{ item }">
+        <!--
+          `verified` means a sync has actually seen this in the registry.
+          Showing it matters: an entry confirmed once at registration is
+          not the same as one the catalogue keeps rechecking.
+        -->
+        <v-tooltip
+          :text="item.verified ? `已核对 · ${formatTime(item.syncedAt)}` : '尚未与仓库核对'"
+          location="top"
+        >
+          <template #activator="{ props: tipProps }">
+            <v-icon
+              v-bind="tipProps"
+              :icon="item.verified ? 'mdi-check-decagram-outline' : 'mdi-help-circle-outline'"
+              :color="item.verified ? 'success' : 'warning'"
+              size="small"
+            />
+          </template>
+        </v-tooltip>
+      </template>
+
+      <template #item.usageCount="{ item }">
+        <v-tooltip v-if="item.usageCount" :text="`${item.usageCount} 个工作负载正在使用`" location="top">
+          <template #activator="{ props: tipProps }">
+            <v-chip v-bind="tipProps" size="x-small" variant="tonal" prepend-icon="mdi-cube-outline">
+              {{ item.usageCount }}
+            </v-chip>
+          </template>
+        </v-tooltip>
+        <span v-else class="text-medium-emphasis">—</span>
+      </template>
+
+      <template #item.actions="{ item }">
+        <div class="d-flex align-center justify-end ga-1">
+          <v-btn
+            size="small"
+            variant="text"
+            icon="mdi-content-copy"
+            title="复制地址"
+            @click="copyReference(item.reference)"
+          />
+          <v-btn
+            size="small"
+            variant="text"
+            icon="mdi-information-outline"
+            title="详情"
+            @click="openDetail(item)"
+          />
+          <v-menu location="bottom end">
+            <template #activator="{ props: menuProps }">
+              <v-btn
+                v-bind="menuProps"
+                icon="mdi-dots-vertical"
+                size="small"
                 variant="text"
-              >
-                {{ spec }}
-              </v-chip>
-            </div>
-          </v-card-text>
+              />
+            </template>
+            <v-list density="compact">
+              <v-list-item prepend-icon="mdi-pencil-outline" title="编辑" @click="openEdit(item)" />
+              <v-list-item
+                prepend-icon="mdi-delete-outline"
+                title="移除"
+                base-color="error"
+                :disabled="!canDelete"
+                @click="openDelete(item)"
+              />
+            </v-list>
+          </v-menu>
+        </div>
+      </template>
 
-          <v-divider />
-          <div class="d-flex align-center justify-space-between px-4 py-2">
-            <span class="text-caption text-medium-emphasis">{{ formatSize(image.sizeBytes) }}</span>
-            <div class="d-flex align-center ga-2">
-              <!--
-                `verified` means a sync has actually seen this in the registry.
-                Showing it matters: an entry confirmed once at registration is
-                not the same as one the catalogue keeps rechecking.
-              -->
-              <v-tooltip
-                :text="image.verified ? `已核对 · ${formatTime(image.syncedAt)}` : '尚未与仓库核对'"
-                location="top"
-              >
-                <template #activator="{ props: tipProps }">
-                  <v-icon
-                    v-bind="tipProps"
-                    :icon="image.verified ? 'mdi-check-decagram-outline' : 'mdi-help-circle-outline'"
-                    :color="image.verified ? 'success' : 'warning'"
-                    size="small"
-                  />
-                </template>
-              </v-tooltip>
-              <v-tooltip v-if="image.usageCount" :text="`${image.usageCount} 个工作负载正在使用`" location="top">
-                <template #activator="{ props: tipProps }">
-                  <v-chip v-bind="tipProps" size="x-small" variant="tonal" prepend-icon="mdi-cube-outline">
-                    {{ image.usageCount }}
-                  </v-chip>
-                </template>
-              </v-tooltip>
-              <v-icon v-if="!image.isActive" icon="mdi-eye-off-outline" size="small" color="grey" />
-            </div>
-          </div>
-        </v-card>
-      </v-col>
-    </v-row>
+      <template #no-data>
+        <EmptyState
+          icon="mdi-docker"
+          title="镜像目录中还没有条目"
+          description="登记一个镜像地址，平台会先向仓库确认它确实存在，再收进目录。"
+        >
+          <v-btn v-if="canCreate" color="primary" variant="flat" @click="openRegister">
+            登记镜像
+          </v-btn>
+          <v-btn v-if="canShare" variant="tonal" class="ml-2" @click="runSync">从仓库同步</v-btn>
+        </EmptyState>
+      </template>
+    </v-data-table>
 
-    <div v-if="total > pageSize" class="d-flex justify-center mt-4">
-      <v-pagination
-        v-model="page"
-        :length="Math.ceil(total / pageSize)"
-        :total-visible="7"
-        density="comfortable"
-      />
-    </div>
 
     <!-- Register -->
     <v-dialog v-model="dialogOpen" max-width="700" persistent>
@@ -774,68 +715,6 @@ function specs(image: ImageSummary): string[] {
                 density="comfortable"
                 variant="outlined"
                 hide-details="auto"
-              />
-            </v-col>
-            <v-col cols="12" sm="6">
-              <v-select
-                v-model="form.category"
-                :items="CATEGORY_OPTIONS"
-                item-title="title"
-                item-value="value"
-                label="分类"
-                density="comfortable"
-                variant="outlined"
-                hide-details="auto"
-              />
-            </v-col>
-            <v-col cols="12" sm="6">
-              <v-select
-                v-model="form.framework"
-                :items="FRAMEWORKS"
-                label="框架"
-                density="comfortable"
-                variant="outlined"
-                hide-details="auto"
-                clearable
-              />
-            </v-col>
-            <v-col cols="12" sm="3">
-              <v-text-field
-                v-model="form.frameworkVersion"
-                label="框架版本"
-                density="comfortable"
-                variant="outlined"
-                hide-details="auto"
-              />
-            </v-col>
-            <v-col cols="12" sm="3">
-              <v-text-field
-                v-model="form.cudaVersion"
-                label="CUDA"
-                density="comfortable"
-                variant="outlined"
-                hide-details="auto"
-                placeholder="12.1"
-              />
-            </v-col>
-            <v-col cols="12" sm="6">
-              <v-text-field
-                v-model="form.pythonVersion"
-                label="Python"
-                density="comfortable"
-                variant="outlined"
-                hide-details="auto"
-                placeholder="3.11"
-              />
-            </v-col>
-            <v-col cols="12" sm="6">
-              <v-text-field
-                v-model="form.osVersion"
-                label="基础系统"
-                density="comfortable"
-                variant="outlined"
-                hide-details="auto"
-                placeholder="ubuntu 22.04"
               />
             </v-col>
             <v-col cols="12">
@@ -935,47 +814,6 @@ function specs(image: ImageSummary): string[] {
                 hide-details="auto"
               />
             </v-col>
-            <v-col cols="12" sm="6">
-              <v-select
-                v-model="editForm.category"
-                :items="CATEGORY_OPTIONS"
-                item-title="title"
-                item-value="value"
-                label="分类"
-                density="comfortable"
-                variant="outlined"
-                hide-details="auto"
-              />
-            </v-col>
-            <v-col cols="12" sm="6">
-              <v-select
-                v-model="editForm.framework"
-                :items="FRAMEWORKS"
-                label="框架"
-                density="comfortable"
-                variant="outlined"
-                hide-details="auto"
-                clearable
-              />
-            </v-col>
-            <v-col cols="12" sm="3">
-              <v-text-field
-                v-model="editForm.frameworkVersion"
-                label="框架版本"
-                density="comfortable"
-                variant="outlined"
-                hide-details="auto"
-              />
-            </v-col>
-            <v-col cols="12" sm="3">
-              <v-text-field
-                v-model="editForm.cudaVersion"
-                label="CUDA"
-                density="comfortable"
-                variant="outlined"
-                hide-details="auto"
-              />
-            </v-col>
             <v-col cols="12">
               <v-textarea
                 v-model="editForm.description"
@@ -1055,7 +893,6 @@ function specs(image: ImageSummary): string[] {
           <v-chip size="small" variant="tonal">
             {{ IMAGE_VISIBILITY_META[detail.visibility].title }}
           </v-chip>
-          <v-chip size="small" variant="tonal">{{ categoryTitle(detail.category) }}</v-chip>
           <v-chip v-if="detail.isPinned" size="small" variant="tonal" color="primary" prepend-icon="mdi-pin">
             保留
           </v-chip>
@@ -1088,11 +925,6 @@ function specs(image: ImageSummary): string[] {
               {{ formatSize(detail.sizeBytes) }}
               <template v-if="detail.layerCount"> · {{ detail.layerCount }} 层</template>
             </v-list-item-subtitle>
-          </v-list-item>
-          <v-list-item v-if="specs(detail).length">
-            <template #prepend><v-icon icon="mdi-cube-outline" /></template>
-            <v-list-item-title>环境</v-list-item-title>
-            <v-list-item-subtitle>{{ specs(detail).join(' · ') }}</v-list-item-subtitle>
           </v-list-item>
           <v-list-item>
             <template #prepend><v-icon icon="mdi-account-outline" /></template>

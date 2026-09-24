@@ -99,12 +99,7 @@ function formatSize(bytes?: number | null): string {
 }
 
 function subtitle(image: ImageSummary): string {
-  const parts: string[] = []
-  if (image.framework) {
-    parts.push(image.frameworkVersion ? `${image.framework} ${image.frameworkVersion}` : image.framework)
-  }
-  if (image.cudaVersion) parts.push(`CUDA ${image.cudaVersion}`)
-  if (image.pythonVersion) parts.push(`Python ${image.pythonVersion}`)
+  const parts: string[] = [IMAGE_KIND_META[image.kind].title]
   const size = formatSize(image.sizeBytes)
   if (size) parts.push(size)
   return parts.join(' · ') || image.reference

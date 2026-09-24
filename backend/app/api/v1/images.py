@@ -16,7 +16,7 @@ from app.core.deps import AppSettings, CurrentUser, DbSession, require
 from app.core.errors import ConflictError
 from app.core.locks import exclusive
 from app.k8s import run_gateway
-from app.models.enums import ApplicationCategory, ImageKind, ImageVisibility, WorkloadKind
+from app.models.enums import ImageKind, ImageVisibility, WorkloadKind
 from app.registries import get_registry
 from app.schemas.application import WorkloadEventRead
 from app.schemas.common import Page, PageMeta
@@ -68,10 +68,8 @@ async def list_images(
     session: DbSession,
     actor: CurrentUser,
     _: Annotated[None, CanRead],
-    category: Annotated[ApplicationCategory | None, Query()] = None,
     kind: Annotated[ImageKind | None, Query()] = None,
     visibility: Annotated[ImageVisibility | None, Query()] = None,
-    framework: Annotated[str | None, Query(max_length=64)] = None,
     search: Annotated[str | None, Query(max_length=128)] = None,
     owned_only: Annotated[bool, Query(alias="ownedOnly")] = False,
     include_inactive: Annotated[bool, Query(alias="includeInactive")] = False,
@@ -81,10 +79,8 @@ async def list_images(
     result = await image_service.list_images(
         session,
         actor,
-        category=category,
         kind=kind,
         visibility=visibility,
-        framework=framework,
         search=search,
         owned_only=owned_only,
         include_inactive=include_inactive,
@@ -150,16 +146,10 @@ async def register_image(
         reference=payload.reference,
         display_name=payload.display_name,
         description=payload.description,
-        category=payload.category,
         kind=payload.kind,
         visibility=payload.visibility,
         workspace_id=payload.workspace_id,
         group_id=payload.group_id,
-        framework=payload.framework,
-        framework_version=payload.framework_version,
-        python_version=payload.python_version,
-        cuda_version=payload.cuda_version,
-        os_version=payload.os_version,
         is_pinned=payload.is_pinned,
     )
     await session.commit()
@@ -181,12 +171,6 @@ async def update_image(
         image,
         display_name=payload.display_name,
         description=payload.description,
-        category=payload.category,
-        framework=payload.framework,
-        framework_version=payload.framework_version,
-        python_version=payload.python_version,
-        cuda_version=payload.cuda_version,
-        os_version=payload.os_version,
         is_active=payload.is_active,
         is_pinned=payload.is_pinned,
         visibility=payload.visibility,

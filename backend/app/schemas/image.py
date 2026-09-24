@@ -6,7 +6,7 @@ from datetime import datetime
 
 from pydantic import Field, field_validator
 
-from app.models.enums import ApplicationCategory, ImageKind, ImageVisibility
+from app.models.enums import ImageKind, ImageVisibility
 from app.models.image import Image
 from app.schemas.base import ApiModel
 
@@ -27,12 +27,6 @@ class ImageSummary(ApiModel):
     digest: str | None = None
     kind: ImageKind
     visibility: ImageVisibility
-    category: ApplicationCategory
-    framework: str | None = None
-    framework_version: str | None = None
-    python_version: str | None = None
-    cuda_version: str | None = None
-    os_version: str | None = None
     size_bytes: int | None = None
     layer_count: int | None = None
     #: True when the metadata came from the registry, rather than being typed in.
@@ -68,12 +62,6 @@ class ImageSummary(ApiModel):
             digest=image.digest,
             kind=ImageKind(image.kind),
             visibility=ImageVisibility(image.visibility),
-            category=ApplicationCategory(image.category),
-            framework=image.framework,
-            framework_version=image.framework_version,
-            python_version=image.python_version,
-            cuda_version=image.cuda_version,
-            os_version=image.os_version,
             size_bytes=image.size_bytes,
             layer_count=image.layer_count,
             # "Verified" means a sync has seen it; a hand-registered entry is
@@ -109,16 +97,10 @@ class ImageRegister(ApiModel):
     reference: str = Field(min_length=1, max_length=MAX_REFERENCE)
     display_name: str = Field(default="", max_length=255)
     description: str | None = Field(default=None, max_length=2000)
-    category: ApplicationCategory = ApplicationCategory.OTHER
     kind: ImageKind = ImageKind.PERSONAL
     visibility: ImageVisibility = ImageVisibility.PRIVATE
     workspace_id: int | None = None
     group_id: int | None = None
-    framework: str | None = Field(default=None, max_length=64)
-    framework_version: str | None = Field(default=None, max_length=64)
-    python_version: str | None = Field(default=None, max_length=32)
-    cuda_version: str | None = Field(default=None, max_length=32)
-    os_version: str | None = Field(default=None, max_length=64)
     is_pinned: bool = False
 
     @field_validator("reference")
@@ -135,12 +117,6 @@ class ImageRegister(ApiModel):
 class ImageUpdate(ApiModel):
     display_name: str | None = Field(default=None, max_length=255)
     description: str | None = Field(default=None, max_length=2000)
-    category: ApplicationCategory | None = None
-    framework: str | None = Field(default=None, max_length=64)
-    framework_version: str | None = Field(default=None, max_length=64)
-    python_version: str | None = Field(default=None, max_length=32)
-    cuda_version: str | None = Field(default=None, max_length=32)
-    os_version: str | None = Field(default=None, max_length=64)
     is_active: bool | None = None
     is_pinned: bool | None = None
     visibility: ImageVisibility | None = None

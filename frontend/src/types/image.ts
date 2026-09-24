@@ -8,9 +8,13 @@
  *   pins the digest.
  * - `verified` says whether a sync has actually seen this in the registry. An
  *   unverified entry was confirmed once at registration and never rechecked.
+ *
+ * What an image *is* comes down to `kind`, and it is derived from where the tag
+ * lives in the registry rather than typed in: `library/` is official, a group's
+ * project is shared, a member's own path is personal. There is deliberately no
+ * framework/category field — the same `pytorch:2.4-cuda12` serves a notebook and
+ * a training job, so the taxonomy belongs to the workload, not the image.
  */
-
-import type { ApplicationCategory } from '@/types/application'
 
 export type ImageKind = 'personal' | 'official' | 'shared'
 export type ImageVisibility = 'private' | 'workspace' | 'group' | 'global'
@@ -27,12 +31,6 @@ export interface ImageSummary {
   digest?: string | null
   kind: ImageKind
   visibility: ImageVisibility
-  category: ApplicationCategory
-  framework?: string | null
-  frameworkVersion?: string | null
-  pythonVersion?: string | null
-  cudaVersion?: string | null
-  osVersion?: string | null
   sizeBytes?: number | null
   layerCount?: number | null
   verified: boolean
@@ -60,28 +58,16 @@ export interface ImageRegisterPayload {
   reference: string
   displayName?: string
   description?: string | null
-  category?: ApplicationCategory
   kind?: ImageKind
   visibility?: ImageVisibility
   workspaceId?: number | null
   groupId?: number | null
-  framework?: string | null
-  frameworkVersion?: string | null
-  pythonVersion?: string | null
-  cudaVersion?: string | null
-  osVersion?: string | null
   isPinned?: boolean
 }
 
 export interface ImageUpdatePayload {
   displayName?: string | null
   description?: string | null
-  category?: ApplicationCategory | null
-  framework?: string | null
-  frameworkVersion?: string | null
-  pythonVersion?: string | null
-  cudaVersion?: string | null
-  osVersion?: string | null
   isActive?: boolean | null
   isPinned?: boolean | null
   visibility?: ImageVisibility | null
@@ -116,13 +102,13 @@ export const IMAGE_KIND_META: Readonly<
   Record<ImageKind, { title: string; description: string; icon: string; color: string }>
 > = {
   personal: {
-    title: '个人镜像',
+    title: '个人私有镜像',
     description: '只有你自己能看到和使用。移除时会一并删除仓库中的 tag。',
     icon: 'mdi-account-outline',
     color: 'grey',
   },
   shared: {
-    title: '共享镜像',
+    title: '组共享镜像',
     description: '在指定的范围内共享，供他人选用。移除时不会动仓库里的 tag。',
     icon: 'mdi-share-variant-outline',
     color: 'primary',
@@ -162,15 +148,3 @@ export const IMAGE_VISIBILITY_META: Readonly<
 
 /** Visibility levels an ordinary user may choose. */
 export const SELF_SERVICE_VISIBILITIES: readonly ImageVisibility[] = ['private', 'workspace']
-
-/** Ready-made framework labels, so the field is not free-text in practice. */
-export const FRAMEWORKS: readonly string[] = [
-  'pytorch',
-  'tensorflow',
-  'jax',
-  'mindspore',
-  'paddlepaddle',
-  'onnxruntime',
-  'vllm',
-  'other',
-]

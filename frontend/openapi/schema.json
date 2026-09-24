@@ -5472,22 +5472,6 @@
         ],
         "parameters": [
           {
-            "name": "category",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "$ref": "#/components/schemas/ApplicationCategory"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Category"
-            }
-          },
-          {
             "name": "kind",
             "in": "query",
             "required": false,
@@ -5517,23 +5501,6 @@
                 }
               ],
               "title": "Visibility"
-            }
-          },
-          {
-            "name": "framework",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "maxLength": 64
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Framework"
             }
           },
           {
@@ -10049,64 +10016,6 @@
           "visibility": {
             "$ref": "#/components/schemas/ImageVisibility"
           },
-          "category": {
-            "$ref": "#/components/schemas/ApplicationCategory"
-          },
-          "framework": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Framework"
-          },
-          "frameworkVersion": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Frameworkversion"
-          },
-          "pythonVersion": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Pythonversion"
-          },
-          "cudaVersion": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Cudaversion"
-          },
-          "osVersion": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Osversion"
-          },
           "sizeBytes": {
             "anyOf": [
               {
@@ -10255,7 +10164,6 @@
           "tag",
           "kind",
           "visibility",
-          "category",
           "createdAt",
           "updatedAt"
         ],
@@ -10298,10 +10206,6 @@
             ],
             "title": "Description"
           },
-          "category": {
-            "$ref": "#/components/schemas/ApplicationCategory",
-            "default": "other"
-          },
           "kind": {
             "$ref": "#/components/schemas/ImageKind",
             "default": "personal"
@@ -10331,66 +10235,6 @@
               }
             ],
             "title": "Groupid"
-          },
-          "framework": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 64
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Framework"
-          },
-          "frameworkVersion": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 64
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Frameworkversion"
-          },
-          "pythonVersion": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 32
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Pythonversion"
-          },
-          "cudaVersion": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 32
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Cudaversion"
-          },
-          "osVersion": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 64
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Osversion"
           },
           "isPinned": {
             "type": "boolean",
@@ -10463,64 +10307,6 @@
           },
           "visibility": {
             "$ref": "#/components/schemas/ImageVisibility"
-          },
-          "category": {
-            "$ref": "#/components/schemas/ApplicationCategory"
-          },
-          "framework": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Framework"
-          },
-          "frameworkVersion": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Frameworkversion"
-          },
-          "pythonVersion": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Pythonversion"
-          },
-          "cudaVersion": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Cudaversion"
-          },
-          "osVersion": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Osversion"
           },
           "sizeBytes": {
             "anyOf": [
@@ -10654,7 +10440,6 @@
           "tag",
           "kind",
           "visibility",
-          "category",
           "createdAt",
           "updatedAt"
         ],
@@ -10746,76 +10531,6 @@
               }
             ],
             "title": "Description"
-          },
-          "category": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ApplicationCategory"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "framework": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 64
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Framework"
-          },
-          "frameworkVersion": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 64
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Frameworkversion"
-          },
-          "pythonVersion": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 32
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Pythonversion"
-          },
-          "cudaVersion": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 32
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Cudaversion"
-          },
-          "osVersion": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 64
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Osversion"
           },
           "isActive": {
             "anyOf": [

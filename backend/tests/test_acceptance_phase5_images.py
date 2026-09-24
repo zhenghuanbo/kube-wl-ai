@@ -421,11 +421,11 @@ async def test_an_owner_can_edit_their_own_entry(
 
     response = await client.patch(
         f"/api/v1/images/{body['id']}",
-        json={"displayName": "PyTorch 2.4", "framework": "pytorch", "cudaVersion": "12.1"},
+        json={"displayName": "PyTorch 2.4", "description": "训练用的基础镜像"},
     )
     assert response.status_code == 200, response.text
     assert response.json()["displayName"] == "PyTorch 2.4"
-    assert response.json()["cudaVersion"] == "12.1"
+    assert response.json()["description"] == "训练用的基础镜像"
 
 
 async def test_another_user_cannot_edit_it(

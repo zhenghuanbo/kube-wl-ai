@@ -114,12 +114,6 @@ const IMAGE = {
   digest: 'sha256:abc123',
   kind: 'official',
   visibility: 'global',
-  category: 'deep_learning',
-  framework: 'pytorch',
-  frameworkVersion: '2.4',
-  pythonVersion: '3.11',
-  cudaVersion: '12.1',
-  osVersion: 'ubuntu 22.04',
   sizeBytes: 7516192768,
   layerCount: 14,
   verified: true,
@@ -794,7 +788,15 @@ const EXPECTS = {
   // `/mnt/data` and the attached-instance list live in the detail drawer, which
   // is closed on first paint; the table is what this asserts.
   StorageView: ['我的数据盘', 'my-data', '50 GB', '24%', '已就绪', '个人数据盘', '张三'],
-  ImagesView: ['PyTorch 2.4 CUDA 12', 'pytorch:2.4-cuda12', '官方镜像', 'pytorch 2.4', '7.0 GB'],
+  // The table carries the reference and the kind chip; the framework chips it
+  // used to show are gone with the columns behind them.
+  ImagesView: [
+    'PyTorch 2.4 CUDA 12',
+    'registry.local/ai/pytorch:2.4-cuda12',
+    '官方镜像',
+    '含 CUDA 12.1 运行时',
+    '7.0 GB',
+  ],
   InstancesView: ['训练 A', 'train-a', '运行中'],
   TasksView: ['训练第一轮', 'train-run-1', '已完成'],
   // The gallery shows the display name and the introduction; the slug appears

@@ -63,6 +63,20 @@ export function setResourceGroupSpecs(
   return api.put<ResourceSpec[]>(`/resource-groups/${groupId}/specs`, specIds)
 }
 
+/**
+ * Replace which nodes belong to a pool.
+ *
+ * Nodes dropped from the list move to the default pool, and every move rewrites
+ * the node's `wl-pool` label — so this is the call that actually re-points the
+ * scheduler, not just a bookkeeping update.
+ */
+export function setResourceGroupNodes(
+  groupId: number,
+  nodeIds: number[],
+): Promise<NodeSyncResult> {
+  return api.put<NodeSyncResult>(`/resource-groups/${groupId}/nodes`, nodeIds)
+}
+
 // --- specs -------------------------------------------------------------------
 export function listResourceSpecs(
   query: { gpuOnly?: boolean; isActive?: boolean } = {},

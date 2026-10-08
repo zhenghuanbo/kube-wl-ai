@@ -132,6 +132,7 @@ const nodeHeaders = [
   { title: '节点', key: 'displayName' },
   { title: '状态', key: 'status', width: '110px' },
   { title: '可调度', key: 'schedulable', width: '100px' },
+  { title: '资源池', key: 'resourceGroupName', width: '140px' },
   { title: 'CPU', key: 'cpu', width: '150px' },
   { title: '内存', key: 'memory', width: '150px' },
   { title: '加速卡', key: 'gpu', width: '180px' },
@@ -327,6 +328,13 @@ function nodeStatusColor(status: string): string {
               :color="item.schedulable ? 'success' : 'error'"
               size="small"
             />
+          </template>
+
+          <template #item.resourceGroupName="{ item }">
+            <v-chip v-if="item.resourceGroupName" size="small" variant="tonal" label>
+              {{ item.resourceGroupName }}
+            </v-chip>
+            <span v-else class="text-medium-emphasis text-caption">未归属</span>
           </template>
 
           <template #item.cpu="{ item }">

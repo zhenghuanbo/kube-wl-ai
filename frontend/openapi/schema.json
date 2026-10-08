@@ -2316,6 +2316,68 @@
         }
       }
     },
+    "/api/v1/resource-groups/{group_id}/nodes": {
+      "put": {
+        "tags": [
+          "resources"
+        ],
+        "summary": "Set Resource Group Nodes",
+        "description": "Replace which nodes belong to a pool.\n\nNodes dropped from the list go to the default pool, and each move rewrites the\nnode's ``wl-pool`` label so the scheduler and the database agree. The response\nreports how many labels had to change, which is the number worth showing an\noperator after a bulk move.",
+        "operationId": "set_resource_group_nodes_api_v1_resource_groups__group_id__nodes_put",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "group_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Group Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer"
+                },
+                "title": "Node Ids"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeSyncResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/resource-specs": {
       "get": {
         "tags": [
@@ -2787,7 +2849,7 @@
           "resources"
         ],
         "summary": "Sync Nodes",
-        "description": "Pull the node inventory from the cluster and reconcile it.",
+        "description": "Pull the node inventory from the cluster and reconcile it.\n\nAlso re-derives each node's pool and rewrites the ``wl-pool`` label to match,\nso this is what keeps the cluster and the database telling the same story.",
         "operationId": "sync_nodes_api_v1_nodes_sync_post",
         "responses": {
           "200": {
@@ -9189,6 +9251,28 @@
             "type": "boolean",
             "title": "Ismanaged"
           },
+          "resourceGroupId": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resourcegroupid"
+          },
+          "resourceGroupName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resourcegroupname"
+          },
           "gpuCount": {
             "type": "integer",
             "title": "Gpucount",
@@ -11666,6 +11750,16 @@
           "devicesSeen": {
             "type": "integer",
             "title": "Devicesseen"
+          },
+          "labelsPatched": {
+            "type": "integer",
+            "title": "Labelspatched",
+            "default": 0
+          },
+          "nodesUnpooled": {
+            "type": "integer",
+            "title": "Nodesunpooled",
+            "default": 0
           }
         },
         "additionalProperties": false,
@@ -12287,6 +12381,11 @@
               }
             ],
             "title": "Storageclass"
+          },
+          "isDefault": {
+            "type": "boolean",
+            "title": "Isdefault",
+            "default": false
           }
         },
         "additionalProperties": false,
@@ -12374,6 +12473,16 @@
           "isActive": {
             "type": "boolean",
             "title": "Isactive"
+          },
+          "isDefault": {
+            "type": "boolean",
+            "title": "Isdefault",
+            "default": false
+          },
+          "nodeCount": {
+            "type": "integer",
+            "title": "Nodecount",
+            "default": 0
           },
           "gpuModels": {
             "items": {
@@ -12669,6 +12778,16 @@
             "type": "boolean",
             "title": "Isactive"
           },
+          "isDefault": {
+            "type": "boolean",
+            "title": "Isdefault",
+            "default": false
+          },
+          "nodeCount": {
+            "type": "integer",
+            "title": "Nodecount",
+            "default": 0
+          },
           "gpuModels": {
             "items": {
               "type": "string"
@@ -12823,6 +12942,17 @@
               }
             ],
             "title": "Isactive"
+          },
+          "isDefault": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Isdefault"
           }
         },
         "additionalProperties": false,

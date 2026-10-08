@@ -46,6 +46,10 @@ export interface ResourceGroupSummary {
   maxRuntimeSeconds: number | null
   storageClass: string | null
   isActive: boolean
+  /** The catch-all pool: where nodes land when nothing else claims them. */
+  isDefault: boolean
+  /** How many nodes are filed here, counted server-side. */
+  nodeCount: number
   gpuModels: string[]
   specCount: number
   createdAt: string
@@ -101,6 +105,9 @@ export interface ComputeNode {
   memoryAllocatableMb: number
   labels: Record<string, string>
   isManaged: boolean
+  /** The resource pool this node belongs to. */
+  resourceGroupId: number | null
+  resourceGroupName: string | null
   gpuCount: number
   gpuModels: string[]
   lastSeenAt: string | null
@@ -120,6 +127,10 @@ export interface NodeSyncResult {
   nodesCreated: number
   nodesUpdated: number
   devicesSeen: number
+  /** Nodes whose pool label the sync had to rewrite. */
+  labelsPatched: number
+  /** Nodes with no pool because no default is configured. Should be zero. */
+  nodesUnpooled: number
 }
 
 export interface Quota {

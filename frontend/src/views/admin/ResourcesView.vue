@@ -24,6 +24,7 @@ import {
   listResourceGroups,
   listResourceSpecs,
   listRuntimeLimits,
+  setResourceGroupNodes,
   setResourceGroupSpecs,
   syncNodes,
   updateResourceGroup,
@@ -106,6 +107,7 @@ const poolForm = reactive({
   networkType: 'internal' as NetworkType,
   maxRuntimeSeconds: null as number | null,
   storageClass: '',
+  isDefault: false,
   specIds: [] as number[],
   limits: {
     maxConcurrentInstances: 2,
@@ -131,6 +133,7 @@ async function openPool(pool?: ResourceGroupSummary): Promise<void> {
       networkType: detail.networkType,
       maxRuntimeSeconds: detail.maxRuntimeSeconds,
       storageClass: detail.storageClass ?? '',
+      isDefault: detail.isDefault,
       specIds: detail.specs.map((spec) => spec.id),
       limits: {
         maxConcurrentInstances: detail.limits?.maxConcurrentInstances ?? 2,
@@ -151,6 +154,7 @@ async function openPool(pool?: ResourceGroupSummary): Promise<void> {
       networkType: 'internal',
       maxRuntimeSeconds: null,
       storageClass: '',
+      isDefault: false,
       specIds: [],
       limits: {
         maxConcurrentInstances: 2,
@@ -179,6 +183,7 @@ async function submitPool(): Promise<void> {
       networkType: poolForm.networkType,
       maxRuntimeSeconds: poolForm.maxRuntimeSeconds,
       storageClass: poolForm.storageClass || null,
+      isDefault: poolForm.isDefault,
     }
 
     const saved = poolEditing.value
@@ -346,10 +351,19 @@ async function runSync(): Promise<void> {
   syncing.value = true
   try {
     const result = await syncNodes()
-    notifications.success(
-      `已同步 ${result.nodesSeen} 个节点、${result.devicesSeen} 张加速卡` +
-        (result.nodesCreated ? `，新增 ${result.nodesCreated} 个` : ''),
-    )
+    const parts = [
+      `已同步 ${result.nodesSeen} 个节点、${result.devicesSeen} 张加速卡`,
+      result.nodesCreated ? `新增 ${result.nodesCreated} 个` : '',
+      result.labelsPatched ? `修正 ${result.labelsPatched} 个节点归属标签` : '',
+    ].filter(Boolean)
+    notifications.success(parts.join('，'))
+    if (result.nodesUnpooled) {
+      // Not a failure of the sync: it means nobody has told the platform where
+      // unfiled nodes should go, so those machines cannot be scheduled at all.
+      notifications.warning(
+        `有 ${result.nodesUnpooled} 个节点没有资源池，请在资源池中指定一个默认资源池`,
+      )
+    }
     await loadNodes()
   } catch (error) {
     if (error instanceof ApiError) notifications.error(error.message)
@@ -360,6 +374,37 @@ async function runSync(): Promise<void> {
 
 async function inspectGpus(node: ComputeNode): Promise<void> {
   gpuPanel.value = { node, devices: await listNodeGpus(node.id) }
+}
+
+// --- node assignment ---------------------------------------------------------
+const nodeEditor = ref<{ pool: ResourceGroupSummary; selected: number[] } | null>(null)
+const nodeSaving = ref(false)
+
+function openNodeEditor(pool: ResourceGroupSummary): void {
+  nodeEditor.value = {
+    pool,
+    selected: nodes.value.filter((node) => node.resourceGroupId === pool.id).map((n) => n.id),
+  }
+}
+
+async function submitNodeEditor(): Promise<void> {
+  const editor = nodeEditor.value
+  if (!editor) return
+  nodeSaving.value = true
+  try {
+    const result = await setResourceGroupNodes(editor.pool.id, editor.selected)
+    notifications.success(
+      `${editor.pool.displayName} 现有 ${editor.selected.length} 个节点` +
+        (result.labelsPatched ? `，更新了 ${result.labelsPatched} 个节点标签` : ''),
+    )
+    nodeEditor.value = null
+    // Both tabs change: the pool's node count, and every node's pool.
+    await Promise.all([loadPools(), loadNodes()])
+  } catch (error) {
+    if (error instanceof ApiError) notifications.error(error.message)
+  } finally {
+    nodeSaving.value = false
+  }
 }
 
 // --- deletion ----------------------------------------------------------------
@@ -440,6 +485,7 @@ onMounted(async () => {
               { title: '归属用户组', key: 'groupName' },
               { title: '网络', key: 'networkType' },
               { title: 'GPU 型号', key: 'gpuModels' },
+              { title: '节点', key: 'nodeCount' },
               { title: '规格数', key: 'specCount' },
               { title: '状态', key: 'isActive' },
               { title: '操作', key: 'actions', align: 'end' },
@@ -450,8 +496,23 @@ onMounted(async () => {
             hover
           >
             <template #item.displayName="{ item }">
-              <div class="font-weight-medium">{{ item.displayName }}</div>
+              <div class="d-flex align-center ga-2">
+                <span class="font-weight-medium">{{ item.displayName }}</span>
+                <v-chip v-if="item.isDefault" size="x-small" variant="flat" color="primary">
+                  默认
+                </v-chip>
+              </div>
               <div class="text-caption text-medium-emphasis">{{ item.name }}</div>
+            </template>
+
+            <template #item.nodeCount="{ item }">
+              <template v-if="item.isDefault">
+                <span class="text-medium-emphasis">{{ item.nodeCount }}（其他池之外）</span>
+              </template>
+              <template v-else-if="item.nodeCount">
+                {{ item.nodeCount }}
+              </template>
+              <span v-else class="text-medium-emphasis">—</span>
             </template>
 
             <template #item.kind="{ item }">
@@ -489,6 +550,15 @@ onMounted(async () => {
             </template>
 
             <template #item.actions="{ item }">
+              <v-btn
+                v-if="can('resource_group:update') && !item.isDefault"
+                size="small"
+                variant="text"
+                color="primary"
+                @click="openNodeEditor(item)"
+              >
+                节点
+              </v-btn>
               <v-btn
                 v-if="can('resource_group:update')"
                 size="small"
@@ -677,6 +747,7 @@ onMounted(async () => {
               { title: '节点', key: 'name' },
               { title: '状态', key: 'status' },
               { title: '可调度', key: 'schedulable' },
+              { title: '资源池', key: 'resourceGroupName' },
               { title: 'CPU', key: 'cpuTotalMilli' },
               { title: '内存', key: 'memoryTotalMb' },
               { title: '加速卡', key: 'gpuCount' },
@@ -696,6 +767,24 @@ onMounted(async () => {
             </template>
             <template #item.schedulable="{ item }">
               <StatusChip :status="item.schedulable ? 'schedulable' : 'unschedulable'" />
+            </template>
+            <template #item.resourceGroupName="{ item }">
+              <v-chip v-if="item.resourceGroupName" size="small" variant="tonal" color="primary">
+                {{ item.resourceGroupName }}
+              </v-chip>
+              <!-- No pool means no workload can ever be scheduled here: the sync
+                   could not decide where the node belongs. -->
+              <v-tooltip
+                v-else
+                text="尚未归属任何资源池，无法被调度。请设置默认资源池，或把节点分配给某个资源池。"
+                location="top"
+              >
+                <template #activator="{ props }">
+                  <v-chip v-bind="props" size="small" variant="tonal" color="warning">
+                    未归属
+                  </v-chip>
+                </template>
+              </v-tooltip>
             </template>
             <template #item.cpuTotalMilli="{ item }">
               {{ formatCpu(item.cpuAllocatableMilli) }}
@@ -813,6 +902,17 @@ onMounted(async () => {
             multiple
             chips
             closable-chips
+            class="mb-4"
+          />
+
+          <v-switch
+            v-model="poolForm.isDefault"
+            color="primary"
+            hide-details="auto"
+            label="设为默认资源池"
+            :messages="[
+              '每个节点都必须属于某个资源池。未被其他资源池认领的节点会归入默认资源池，且其节点范围由其他资源池决定，不能手工编辑。',
+            ]"
             class="mb-4"
           />
 
@@ -952,6 +1052,58 @@ onMounted(async () => {
           <v-btn color="primary" variant="flat" :loading="limitSaving" @click="submitLimit">
             保存
           </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <!-- node assignment -->
+    <v-dialog
+      :model-value="nodeEditor !== null"
+      max-width="560"
+      persistent
+      @update:model-value="nodeEditor = null"
+    >
+      <v-card v-if="nodeEditor">
+        <v-card-title>{{ nodeEditor.pool.displayName }} 的节点</v-card-title>
+        <v-card-text>
+          <v-select
+            v-model="nodeEditor.selected"
+            :items="nodes"
+            item-title="displayName"
+            item-value="id"
+            label="属于该资源池的节点"
+            multiple
+            chips
+            closable-chips
+            hide-details="auto"
+            :menu-props="{ maxHeight: 320 }"
+          >
+            <template #item="{ props: itemProps, item }">
+              <v-list-item v-bind="itemProps" :subtitle="item.name">
+                <template #append>
+                  <v-chip
+                    v-if="item.resourceGroupName"
+                    size="x-small"
+                    variant="tonal"
+                    :color="item.resourceGroupId === nodeEditor.pool.id ? 'primary' : undefined"
+                  >
+                    {{ item.resourceGroupName }}
+                  </v-chip>
+                </template>
+              </v-list-item>
+            </template>
+          </v-select>
+
+          <p class="text-caption text-medium-emphasis mt-3">
+            取消勾选的节点会移入默认资源池，而不是变成无归属。保存时会同步修改集群上节点的
+            <code>wl-pool</code> 标签——调度器读的是标签，所以这一步之后新任务才会落到新位置。
+            已经在运行的实例和任务不受影响，会继续在原节点上跑完。
+          </p>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" @click="nodeEditor = null">取消</v-btn>
+          <v-btn color="primary" :loading="nodeSaving" @click="submitNodeEditor">保存</v-btn>
         </v-card-actions>
       </v-card>
     </v-dialog>

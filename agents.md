@@ -179,12 +179,68 @@ nginx ──► api (FastAPI/uvicorn) ──┬─► PostgreSQL
 
 ### 5.3 资源与配额
 
-`resource_groups(kind=public|private, k8s_label_selector, network_type, max_runtime_seconds)` ·
-`resource_specs(cpu_milli, memory_mb, gpu_type, gpu_count)` · `resource_group_specs` ·
-`runtime_limits` · `resource_group_limits` · `compute_nodes` · `gpu_devices` ·
+`resource_groups(kind=public|private, is_default, k8s_label_selector, network_type,
+max_runtime_seconds)` · `resource_specs(cpu_milli, memory_mb, gpu_type, gpu_count)` ·
+`resource_group_specs` · `runtime_limits` · `resource_group_limits` ·
+`compute_nodes(resource_group_id, ...)` · `gpu_devices` ·
 `quotas(scope_type=user|group|workspace, ...)`
 
 > `gpu_type` 是**字符串枚举**（如 `v100` / `a100` / `h100`），**不是**整数。
+
+#### 节点归属：数据库是事实，`wl-pool` 标签是物化视图
+
+资源池是**调度目标**，不只是配额单位。这条链路有三段，缺一段任务就会落到别的机器上：
+
+| 环节 | 载体 | 谁写 |
+| --- | --- | --- |
+| 事实 | `compute_nodes.resource_group_id` | 平台（同步时推导、管理员改派） |
+| 物化 | 节点标签 `wl-pool: <资源池 name>` | 平台（同步/改派时 patch） |
+| 读取 | Pod 的 `nodeSelector` | `pool_node_selector()`，下发工作负载时烘焙 |
+
+**`resource_group_id` 是唯一权威**，标签只是它的副本。`resolve_node_pool_id()` 的收敛规则：
+
+| 数据库 | 节点标签 | 结果 |
+| --- | --- | --- |
+| 有池 P | ≠ P | 以 P 为准，patch 标签为 P |
+| 有池 P | = P | 不动（稳态下同步**不产生任何写请求**） |
+| 空 | 指向真实存在的池 | 采纳该池（运维预打标 / 引导 / 资源池删除后重新归位） |
+| 空 | 缺失或指向已删除的池 | 归入默认池并 patch 标签；若无默认池则计入 `nodesUnpooled` |
+
+> **为什么不是反向（标签为权威）**：标签是集群里的、可被任何有权限的人改，而且改标签
+> 不会驱逐已在运行的 Pod（`requiredDuringSchedulingIgnoredDuringExecution` 只作用于调度时刻）。
+> 把它当权威等于把"哪台机器属于哪个池"交给集群侧的临时状态。
+
+> **为什么单值 key 很关键**：`wl-pool` 是**单值**键，"一个节点恰好属于一个池"由构造保证，
+> 不需要额外校验；改派也就是 patch 一个键，是原子的——不存在"先摘除、后加入"之间的空窗。
+
+> **失败方向是安全的**：`nodeSelector` 是硬性要求，所以数据库与标签分歧只会导致 Pod
+> `Pending` + `FailedScheduling` 事件，**不会**把任务放到错误的机器上。因此这套收敛机制
+> 保护的是可用性而不是隔离性，它的义务只是最终一致。这也是不引入 taint 的原因：硬隔离
+> 会让"标签短暂落后"变成"任务卡住"，而收益只是防住一个本来就不该发生的情况。
+
+**默认池（`is_default`）** 是让归属保持**完备**的兜底：没有被任何具名池认领的节点仍然有家，
+平台就不需要表达"这台机器不属于任何池"——那是一种任何工作负载都到不了的状态。
+
+- 第一个创建的资源池自动成为默认池（`create_resource_group` 里 `payload.is_default or not has_default`）；
+  显式指定会顶掉上一个（`_demote_other_group_defaults`），因为"默认池"是定冠词，有两个就有歧义。
+- 默认池的**节点范围是推导出来的**（所有具名池的补集），所以
+  `PUT /resource-groups/{id}/nodes` 对它是拒绝的（`default_group_nodes_are_derived`），
+  手工维护的列表和算出来的补集会是同一个问题的两个答案。
+- `PUT /resource-groups/{id}/nodes` 的语义是**替换整个集合**：被取消勾选的节点移入默认池，
+  而不是变成无归属；若此时没有默认池则整笔拒绝（`no_default_resource_group`），不做一半。
+- 删除资源池时，若仍有节点属于它则拒绝（`resource_group_has_nodes`）。外键是
+  `ON DELETE SET NULL`，放任删除会留下任何工作负载都到不了的硬件——这种故障没有报错，且是永久的。
+
+**引导顺序**：升级后必须先确保存在一个默认池（建任意一个池即可），再跑一次
+`POST /nodes/sync` 让节点拿到 `wl-pool` 标签；否则新下发的工作负载带着 `wl-pool: <池>`
+选择器却匹配不到任何节点，会一直 `Pending`。**已存在的** Deployment/Job 不受影响：
+它们的 `nodeSelector` 在下发时就已烘焙（空选择器仍然是空选择器），reconcile 只读状态。
+
+> 选择器只在**创建**和 `set_replicas` 时下发，之后不再改写——这也意味着**改派节点不会
+> 迁移已经在跑的工作负载**，它们仍在原机器上跑完。这是刻意的：任务的 `backoff_limit = 0`，
+> 驱逐一个任务 Pod 等于永久杀死它。
+
+`node_sync_interval_seconds`（默认 120s）驱动 `app.workers.tasks.nodes.sync_nodes`。
 
 ### 5.4 存储
 
@@ -690,10 +746,11 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 | 配额 | 由已授权资源组的 `ResourceGroupLimit` 汇总；GPU 按型号取各池**最大**规格（规格是互斥选项，求和会虚增额度） |
 | 一人一空间 | `workspace_members.user_id` **单列唯一**，数据库层兜底；迁移需显式 `moveFromExisting` |
 | 资源可见性 | 目录（资源组/规格/时长/节点）对全体登录用户可读，**授权**才是边界 |
-| API | `/workspaces`（含 `/mine`、`/reconcile`、成员、资源授权）、`/resource-groups`、`/resource-specs`、`/runtime-limits`、`/nodes`、`/quotas` |
+| API | `/workspaces`（含 `/mine`、`/reconcile`、成员、资源授权）、`/resource-groups`（含 `/nodes`、`/specs`、`/limits`）、`/resource-specs`、`/runtime-limits`、`/nodes`（含 `/sync`）、`/quotas` |
 | 列表搜索 | 所有列表接口都接受 `search`（按 `name` / `display_name`）。`/resource-specs` 原先漏了它，Phase 6 补上，见下方"静默忽略的参数" |
 | 测试 | 新增 61 项（36 项 API 验收 + 25 项命名/数量解析单测），全量 **183 项通过** |
 | 前端 | 我的工作空间（配额进度、网络档位、可用资源池）、工作空间管理（建/停/删、成员、资源授权、重新下发）、资源与配额（资源池/规格/时长/节点四个页签） |
+| 节点归属 | 见 §5.3「节点归属」：数据库 `compute_nodes.resource_group_id` 为权威，`wl-pool` 标签由同步物化，Pod 用 `nodeSelector` 读取；`is_default` 兜底保证归属完备，迁移 `e5b2a7c9d1f3` |
 
 **Phase 2 验收结果**：
 - 质量门禁：`ruff check` + `ruff format --check` + `mypy --strict`（70 文件）+ `pytest`（183 项）全绿；
@@ -1563,6 +1620,52 @@ Phase 8 结束时，`config/navigation.ts` 里还有两个入口指向 `Placehol
   `VERSION = "0.1.0"` 同时写在 `app/main.py` 和 `app/api/v1/health.py` 里。
   已收敛到 `app/core/version.py`——一个能和自己不一致的版本号比没有版本号更糟。
 
+### ✅ 后续增量 — 节点归属与资源池分区（第一步，已完成）
+
+把「资源池」从**配额单位**变成**调度目标**。此前 `ResourceGroup` 与节点之间没有任何关联，
+`k8s_label_selector` 由管理员手填且默认是 `{}`，所以每个资源池实际上匹配整个集群 ——
+"任务跑在哪个池"只是一种说法，不是集群层面的事实。
+
+**语义**（详见 §5.3）：
+
+- `compute_nodes.resource_group_id` 是唯一权威；节点标签 `wl-pool` 是它的物化副本；
+  Pod 的 `nodeSelector` 读取标签。`nodeSelector` 是硬性要求，所以两者分歧只会让 Pod
+  `Pending`，**不会**把任务放到错误的机器上 —— 失败方向是安全的。
+- `resource_groups.is_default` 标记兜底池，第一个创建的资源池自动成为默认池，
+  保证"每个节点都有归属"这条不变式（归属是**完备**的，不存在"不属于任何池"的节点）。
+- 同步只在标签与数据库不一致时才写（稳态下零写请求）。收敛规则见 §5.3 的表格。
+- 节点改派走 `PUT /resource-groups/{id}/nodes`（替换整个集合语义），被移除的节点移入默认池。
+- 工作负载下发时由 `pool_node_selector()` 注入 `wl-pool`，且**池自己的选择器不能覆盖它** ——
+  否则一个池可以把自己指到别的池的机器上，分区就漏了。
+
+**交付物**：迁移 `e5b2a7c9d1f3`（`resource_groups.is_default` +
+`compute_nodes.resource_group_id` + 索引 + `ON DELETE SET NULL` 外键）·
+`K8sGateway.patch_node_labels()`（真实实现走 strategic-merge patch）·
+`app/workers/tasks/nodes.py` + beat `sync-nodes`（`NODE_SYNC_INTERVAL_SECONDS`，默认 120s）·
+`tests/test_node_pool_membership.py`（20 项）· 前端资源池页签的节点列/默认池开关/节点改派弹窗。
+
+**本轮修复的既有缺陷**（都是新测试翻出来的，不是新引入的）：
+
+1. **`group_to_summary()` 里的 `group.group.name` 是一次未预期的懒加载**。
+   `ResourceGroup.group` 是 `lazy="joined"`，查询出来的对象没问题；但
+   `create_resource_group()` 新建的对象上这个关系从未被赋值，读它就触发一次 IO。
+   异步 SQLAlchemy 下这会抛 `MissingGreenlet` —— **除非**父组恰好在同一个 session 的
+   identity map 里（`_ensure_group_exists()` 用 `session.get()` 会把它放进去），
+   此时懒加载走内存、什么都不会发生。也就是说这个 bug 只在缓存没被焐热时出现：
+   现场表现为**时有时无的 500**。已改为赋值关系而非外键（`_resolve_owning_group()`）。
+2. **`update_resource_group()` 会留下过期的父组**。它用 `setattr(group, "group_id", ...)`
+   改外键，而该对象是查询出来的、`group.group` 已经指向**旧的**父组，于是改挂用户组之后
+   响应里返回的仍是旧组名。这是第 1 条的反面：一个是读不到（报错），一个是读到错的
+   （静默错误，更糟）。同样改为赋值关系，并让 `groupId: null` 真正表示"改成全体可用的池"。
+
+> 第 1 条在改动前就存在（`git show HEAD` 可见 `group_name=group.group.name` 原样），
+> 属于**被发现的**旧缺陷。它和第 2 条是同一个设计错误的两面：把关系当外键用。
+
+**尚未做（第二步，用户明确要求先不做）**：节点移除流程（`cordon → drain → 重新归池`，
+复用一直只读不写的 `compute_nodes.schedulable`）、`FailedScheduling` 事件的前端呈现。
+另外**不引入 taint**：硬隔离会把"标签短暂落后"从"任务 Pending 但可自愈"变成"卡死"，
+而它防住的情况本来就不该发生。
+
 ### 有意推迟（非遗漏）
 
 - **OIDC** 仅预留扩展点：`OidcProvider.exchange_code()` 明确抛错说明。大学的统一身份是
@@ -1702,6 +1805,7 @@ Vuex `namespace: true` 拼写错误、`Admin/User.vue` 为 0 字节、
 | 业务服务层 | `backend/app/services/` |
 | **工作空间生命周期与集群下发** | `backend/app/services/workspaces.py` |
 | 资源组 / 规格 / 节点 / 配额 | `backend/app/services/resources.py` |
+| **节点 ↔ 资源池归属** | `backend/app/services/resources.py`（`resolve_node_pool_id` / `sync_nodes` / `set_group_nodes`）、`backend/app/services/workload_common.py`（`pool_node_selector`） |
 | **K8s 抽象与假实现** | `backend/app/k8s/gateway.py`（`FakeK8sGateway` 供测试） |
 | K8s 真实客户端 | `backend/app/k8s/client.py`（唯一 import `kubernetes` 的模块） |
 | 命名空间 / 标签命名规则 | `backend/app/k8s/naming.py` |

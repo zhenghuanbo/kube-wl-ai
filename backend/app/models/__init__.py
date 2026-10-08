@@ -43,6 +43,7 @@ from app.models.instance import Instance
 from app.models.rbac import Permission, Role, RolePermission, UserRole
 from app.models.resource import (
     GPU_MODELS,
+    POOL_LABEL,
     ComputeNode,
     GpuDevice,
     Quota,
@@ -65,6 +66,7 @@ from app.models.workspace import Workspace, WorkspaceMember, WorkspaceResourceGr
 __all__ = [
     "GPU_MODELS",
     "LIVE_STORAGE_STATUSES",
+    "POOL_LABEL",
     "TERMINAL_TASK_STATUSES",
     "ApiToken",
     "Application",

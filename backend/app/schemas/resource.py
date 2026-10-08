@@ -27,6 +27,12 @@ class ResourceGroupSummary(ApiModel):
     max_runtime_seconds: int | None = None
     storage_class: str | None = None
     is_active: bool
+    #: The catch-all pool. Exactly one pool may carry this, and it is where nodes
+    #: land when nothing else claims them.
+    is_default: bool = False
+    #: How many nodes are filed here. Derived from the node rows, and the number
+    #: an operator actually wants when deciding whether a pool may be deleted.
+    node_count: int = 0
     gpu_models: list[str] = Field(default_factory=list)
     spec_count: int = 0
     created_at: datetime
@@ -51,6 +57,7 @@ class ResourceGroupCreate(ApiModel):
     network_type: NetworkType = NetworkType.INTERNAL
     max_runtime_seconds: int | None = Field(default=None, ge=60)
     storage_class: str | None = Field(default=None, max_length=64)
+    is_default: bool = False
 
     @field_validator("max_runtime_seconds")
     @classmethod
@@ -73,6 +80,7 @@ class ResourceGroupUpdate(ApiModel):
     max_runtime_seconds: int | None = Field(default=None, ge=60)
     storage_class: str | None = Field(default=None, max_length=64)
     is_active: bool | None = None
+    is_default: bool | None = None
 
 
 class ResourceGroupLimitsRead(ApiModel):
@@ -186,6 +194,10 @@ class ComputeNodeRead(ApiModel):
     memory_allocatable_mb: int
     labels: dict[str, Any] = Field(default_factory=dict)
     is_managed: bool
+    #: The pool this node belongs to. ``resource_group_name`` is denormalised so a
+    #: node table does not need a second request per row to show where it lives.
+    resource_group_id: int | None = None
+    resource_group_name: str | None = None
     gpu_count: int = 0
     gpu_models: list[str] = Field(default_factory=list)
     last_seen_at: datetime | None = None
@@ -196,6 +208,10 @@ class NodeSyncResult(ApiModel):
     nodes_created: int
     nodes_updated: int
     devices_seen: int
+    #: Nodes whose pool label the sync had to rewrite.
+    labels_patched: int = 0
+    #: Nodes with no pool because no default is configured. Should be zero.
+    nodes_unpooled: int = 0
 
 
 # ---------------------------------------------------------------------------

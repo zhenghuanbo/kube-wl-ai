@@ -2,9 +2,15 @@
 
 The shape here encodes one decision worth stating plainly: **hardware is pooled
 into resource groups, and a workspace must be granted a group before it can use
-it.** A resource group is therefore both a scheduling target (a node label
-selector) and an authorisation unit, which is why the grant table lives with the
+it.** A resource group is therefore both a scheduling target (the ``wl-pool``
+node label) and an authorisation unit, which is why the grant table lives with the
 workspace models.
+
+The partition is total and exclusive. Every node the platform manages sits in
+exactly one pool — ``ComputeNode.resource_group_id`` says which, and one pool
+carries :attr:`ResourceGroup.is_default` so that a node with no home still has
+one. Exclusivity comes for free from ``wl-pool`` being a single-valued key rather
+than one boolean label per pool.
 """
 
 from __future__ import annotations
@@ -46,6 +52,17 @@ if TYPE_CHECKING:
 #: set is enforced at the API schema layer instead.
 GPU_MODELS: tuple[str, ...] = ("v100", "a100", "a800", "h100", "h800", "a10", "l40s", "none")
 
+#: Node label holding the pool a node belongs to.
+#:
+#: One key with one value, deliberately: that is what makes "a node belongs to
+#: exactly one pool" true by construction rather than by a constraint somebody
+#: has to remember to check. Changing a node's pool is a single-key patch, so
+#: there is no window in which it is in two pools or none.
+#:
+#: The platform owns this key. Anything else that writes it will be corrected on
+#: the next sync, because ``ComputeNode.resource_group_id`` is the authority.
+POOL_LABEL = "wl-pool"
+
 
 class ResourceGroup(Base, TimestampMixin):
     """A pool of interchangeable nodes, and the permission to schedule onto it."""
@@ -83,6 +100,14 @@ class ResourceGroup(Base, TimestampMixin):
     storage_class: Mapped[str | None] = mapped_column(String(64))
 
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    #: The pool that catches nodes nobody has filed elsewhere.
+    #:
+    #: Exactly one pool may hold this flag. It exists because the node partition
+    #: has to be *total*: a node that joins the cluster, or whose pool is deleted
+    #: under it, must still land somewhere. Leaving it unassigned instead would
+    #: mean a machine that no workload can ever reach, which is how hardware goes
+    #: quietly missing.
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     group: Mapped[Group | None] = relationship(lazy="joined")
     specs: Mapped[list[ResourceSpec]] = relationship(
@@ -95,6 +120,16 @@ class ResourceGroup(Base, TimestampMixin):
         cascade="all, delete-orphan",
         uselist=False,
         lazy="selectin",
+    )
+    nodes: Mapped[list[ComputeNode]] = relationship(
+        back_populates="resource_group",
+        # Not ``selectin``: eagerly loading this would drag every node row —
+        # including the labels blob — into every pool listing, to answer questions
+        # the callers answer with a count query instead. ``raise`` rather than
+        # ``lazy`` so an accidental traversal fails immediately instead of
+        # triggering IO from a greenlet that cannot do it.
+        lazy="raise",
+        passive_deletes=True,
     )
 
     def __repr__(self) -> str:
@@ -195,7 +230,14 @@ class ResourceGroupLimit(Base, TimestampMixin):
 
 
 class ComputeNode(Base, TimestampMixin):
-    """A cluster node, cached so scheduling decisions do not hit the API server."""
+    """A cluster node, cached so scheduling decisions do not hit the API server.
+
+    The row owns one fact the cluster cannot: **which resource pool the node
+    belongs to.** ``resource_group_id`` is the authority; the ``wl-pool`` node
+    label is a materialised view of it, written by the sync so that
+    ``nodeSelector`` has something to match. Neither can be derived from the
+    other, which is why both exist and why the sync reconciles them.
+    """
 
     __tablename__ = "compute_nodes"
 
@@ -220,8 +262,18 @@ class ComputeNode(Base, TimestampMixin):
     #: to touch namespaces it created, and operators need to know which nodes it
     #: is accounting for.
     is_managed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    #: The pool this node is in. Nullable only because a freshly discovered node
+    #: has not been filed yet and because deleting a pool must not cascade into
+    #: deleting hardware; the next sync homes it to :attr:`ResourceGroup.is_default`.
+    #: Every node the platform manages is expected to carry a value.
+    resource_group_id: Mapped[int | None] = mapped_column(
+        ForeignKey("resource_groups.id", ondelete="SET NULL"), index=True
+    )
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    resource_group: Mapped[ResourceGroup | None] = relationship(
+        back_populates="nodes", lazy="joined"
+    )
     gpu_devices: Mapped[list[GpuDevice]] = relationship(
         back_populates="node",
         cascade="all, delete-orphan",

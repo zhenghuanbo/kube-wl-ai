@@ -780,10 +780,27 @@ async def test_node_sync_records_nodes_and_their_accelerators(
     assert by_name["gpu-node-1"]["cpuAllocatableMilli"] == 63000
     assert by_name["cpu-node-1"]["gpuCount"] == 0
 
-    # Syncing again updates rather than duplicates.
+    # Syncing again updates rather than duplicates — and reports *no* updates,
+    # because nothing about the nodes changed. The counter is a change count, not
+    # a "rows I looked at" count; the old version incremented it for every node it
+    # visited, which made it useless for spotting drift.
     again = await admin_client.post("/api/v1/nodes/sync")
     assert again.json()["nodesCreated"] == 0
-    assert again.json()["nodesUpdated"] == 2
+    assert again.json()["nodesUpdated"] == 0
+
+    # A node that really did change is counted.
+    gateway.nodes[1] = NodeInfo(
+        name="cpu-node-1",
+        status="not_ready",
+        schedulable=False,
+        cpu_total_milli=16000,
+        memory_total_mb=65536,
+        cpu_allocatable_milli=15500,
+        memory_allocatable_mb=60000,
+        labels={"kubernetes.io/hostname": "cpu-node-1"},
+    )
+    changed = await admin_client.post("/api/v1/nodes/sync")
+    assert changed.json()["nodesUpdated"] == 1
 
 
 async def test_a_disappeared_node_stops_looking_schedulable(

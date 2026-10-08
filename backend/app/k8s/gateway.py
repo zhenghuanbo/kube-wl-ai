@@ -417,6 +417,13 @@ class K8sGateway(Protocol):
 
     def list_nodes(self) -> list[NodeInfo]: ...
 
+    def patch_node_labels(self, name: str, labels: dict[str, str]) -> None:
+        """Merge labels into a node, leaving its other labels untouched.
+
+        The platform's only cluster-scoped write. Used by the node sync to keep
+        the pool label in step with the database.
+        """
+
     # --- workloads ---------------------------------------------------------
     def apply_deployment(self, spec: WorkloadSpec) -> None:
         """Create the Deployment, or patch it to match ``spec``."""
@@ -583,6 +590,19 @@ class FakeK8sGateway:
     def list_nodes(self) -> list[NodeInfo]:
         self._record("list_nodes")
         return list(self.nodes)
+
+    def patch_node_labels(self, name: str, labels: dict[str, str]) -> None:
+        self._record("patch_node_labels", name, dict(labels))
+        if not labels:
+            return
+        for index, node in enumerate(self.nodes):
+            if node.name == name:
+                # Merge, as the real patch does: a test that asserts the whole
+                # label map would otherwise not notice a platform key going
+                # missing, because the fake would have replaced the map too.
+                self.nodes[index] = replace(node, labels={**node.labels, **labels})
+                return
+        raise K8sError(f"node {name!r} not found")
 
     # --- workloads ---------------------------------------------------------
     def apply_deployment(self, spec: WorkloadSpec) -> None:

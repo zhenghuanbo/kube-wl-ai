@@ -34,7 +34,12 @@ celery_app.conf.update(
 # Importing the task modules registers them with this app. Without this the
 # worker starts with an empty registry and every scheduled message is rejected
 # as unknown — the failure looks like "beat is running but nothing happens".
-from app.workers.tasks import images, reconcile, usage  # noqa: E402,F401  (registration imports)
+from app.workers.tasks import (  # noqa: E402,F401  (registration imports)
+    images,
+    nodes,
+    reconcile,
+    usage,
+)
 
 #: Every 30 seconds. Sweeping is a handful of reads per live workload, so the
 #: cost is dominated by the number of running things, not by the interval —
@@ -50,6 +55,15 @@ celery_app.conf.beat_schedule = {
     "rollup-usage": {
         "task": "app.workers.tasks.usage.rollup_usage",
         "schedule": 1200.0,
+    },
+    # Every two minutes by default. This is not a cache refresh: it is what keeps
+    # each node's `wl-pool` label equal to the pool the database files it in, and
+    # that label is what `nodeSelector` matches. A node whose label is stale is a
+    # node whose pool's workloads cannot be scheduled, so the window matters.
+    # A steady state patches nothing — the sync compares before it writes.
+    "sync-nodes": {
+        "task": "app.workers.tasks.nodes.sync_nodes",
+        "schedule": settings.node_sync_interval_seconds,
     },
     # Daily by default. Nothing else moves an image from "pushed to Harbor" to
     # "visible in the picker", and the endpoint that does needs `image:share`,

@@ -14,7 +14,9 @@ from app.core.errors import BadRequestError, ConflictError, NotFoundError
 from app.core.logging import get_logger
 from app.k8s import K8sGateway, NodeInfo, run_gateway
 from app.models.enums import GpuDeviceStatus, NodeStatus, QuotaResource, QuotaScope
+from app.models.group import Group
 from app.models.resource import (
+    POOL_LABEL,
     ComputeNode,
     GpuDevice,
     Quota,
@@ -63,6 +65,7 @@ def group_to_summary(
     *,
     specs: Sequence[ResourceSpec] | None = None,
     spec_count: int | None = None,
+    node_count: int = 0,
 ) -> ResourceGroupSummary:
     resolved = list(specs) if specs is not None else []
     return ResourceGroupSummary(
@@ -77,6 +80,11 @@ def group_to_summary(
         max_runtime_seconds=group.max_runtime_seconds,
         storage_class=group.storage_class,
         is_active=group.is_active,
+        is_default=group.is_default,
+        # Not read from ``group.nodes``: that collection is ``lazy="raise"``,
+        # because counting it means loading every node row — labels blob included —
+        # to produce one integer. Callers pass a count from a grouped query.
+        node_count=node_count,
         gpu_models=_gpu_models(resolved),
         spec_count=spec_count if spec_count is not None else len(resolved),
         created_at=group.created_at,
@@ -84,8 +92,10 @@ def group_to_summary(
     )
 
 
-def group_to_detail(group: ResourceGroup, specs: Sequence[ResourceSpec]) -> ResourceGroupDetail:
-    summary = group_to_summary(group, specs=specs)
+def group_to_detail(
+    group: ResourceGroup, specs: Sequence[ResourceSpec], *, node_count: int = 0
+) -> ResourceGroupDetail:
+    summary = group_to_summary(group, specs=specs, node_count=node_count)
     return ResourceGroupDetail(
         **summary.model_dump(),
         k8s_label_selector=dict(group.k8s_label_selector or {}),
@@ -107,6 +117,7 @@ def limit_to_read(limit: RuntimeLimit) -> RuntimeLimitRead:
 
 def node_to_read(node: object) -> ComputeNodeRead:
     devices = node.gpu_devices  # type: ignore[attr-defined]
+    pool = node.resource_group  # type: ignore[attr-defined]
     return ComputeNodeRead(
         id=node.id,  # type: ignore[attr-defined]
         name=node.name,  # type: ignore[attr-defined]
@@ -119,6 +130,8 @@ def node_to_read(node: object) -> ComputeNodeRead:
         memory_allocatable_mb=node.memory_allocatable_mb,  # type: ignore[attr-defined]
         labels=dict(node.labels or {}),  # type: ignore[attr-defined]
         is_managed=node.is_managed,  # type: ignore[attr-defined]
+        resource_group_id=node.resource_group_id,  # type: ignore[attr-defined]
+        resource_group_name=(pool.display_name or pool.name) if pool is not None else None,
         gpu_count=len(devices),
         gpu_models=sorted({device.model for device in devices}),
         last_seen_at=node.last_seen_at,  # type: ignore[attr-defined]
@@ -169,10 +182,14 @@ async def list_resource_groups(
     rows = list((await session.scalars(stmt.offset(offset).limit(limit))).all())
 
     specs = await specs_for_groups(session, [group.id for group in rows])
+    counts = await node_counts_for_groups(session, [group.id for group in rows])
     return Page(
         items=[
             group_to_summary(
-                group, specs=specs.get(group.id, []), spec_count=len(specs.get(group.id, []))
+                group,
+                specs=specs.get(group.id, []),
+                spec_count=len(specs.get(group.id, [])),
+                node_count=counts.get(group.id, 0),
             )
             for group in rows
         ],
@@ -198,6 +215,22 @@ async def specs_for_groups(
     return grouped
 
 
+async def node_counts_for_groups(session: AsyncSession, group_ids: Sequence[int]) -> dict[int, int]:
+    """Node count per resource group, in one query rather than one per group."""
+    if not group_ids:
+        return {}
+    stmt = (
+        select(ComputeNode.resource_group_id, func.count())
+        .where(ComputeNode.resource_group_id.in_(group_ids))
+        .group_by(ComputeNode.resource_group_id)
+    )
+    return {
+        group_id: count
+        for group_id, count in (await session.execute(stmt)).all()
+        if group_id is not None
+    }
+
+
 async def get_resource_group(session: AsyncSession, actor: User, group_id: int) -> ResourceGroup:
     group = await session.get(ResourceGroup, group_id)
     if group is None:
@@ -213,20 +246,33 @@ async def create_resource_group(
     if await session.scalar(select(ResourceGroup).where(ResourceGroup.name == payload.name)):
         raise ConflictError(f"资源组 {payload.name} 已存在", code="resource_group_name_taken")
 
-    if payload.group_id is not None:
-        await _ensure_group_exists(session, payload.group_id)
+    # Resolve the parent up front and hold the object: see _resolve_owning_group
+    # for why the relationship, not the foreign key, is what gets assigned.
+    owning_group = await _resolve_owning_group(session, payload.group_id)
+
+    has_default = bool(
+        await session.scalar(
+            select(func.count())
+            .select_from(ResourceGroup)
+            .where(ResourceGroup.is_default.is_(True))
+        )
+    )
 
     group = ResourceGroup(
         name=payload.name,
         display_name=payload.display_name or payload.name,
         description=payload.description,
         kind=payload.kind,
-        group_id=payload.group_id,
+        group=owning_group,
         k8s_label_selector=payload.k8s_label_selector,
         k8s_tolerations=payload.k8s_tolerations,
         network_type=payload.network_type,
         max_runtime_seconds=payload.max_runtime_seconds,
         storage_class=payload.storage_class,
+        # The first pool becomes the default, because a pool set with no catch-all
+        # cannot hold the invariant that every node has a home. Restoring a lost
+        # default falls out of the same rule. An explicit request still wins.
+        is_default=payload.is_default or not has_default,
     )
     session.add(group)
     await session.flush()
@@ -244,11 +290,18 @@ async def update_resource_group(
     session: AsyncSession, actor: User, group: ResourceGroup, payload: ResourceGroupUpdate
 ) -> ResourceGroup:
     data = payload.model_dump(exclude_unset=True)
-    if data.get("group_id") is not None:
-        await _ensure_group_exists(session, data["group_id"])
+    # The owning group is assigned as a relationship, not as a foreign key. This
+    # object was loaded by a query, so ``group.group`` already holds the *previous*
+    # parent: writing only ``group_id`` would leave that stale value in place and
+    # the response would name the old group. Re-pointing the relationship also lets
+    # ``groupId: null`` mean "make this a cluster-wide pool".
+    if "group_id" in data:
+        group.group = await _resolve_owning_group(session, data.pop("group_id"))
     for field, value in data.items():
         setattr(group, field, value)
     await session.flush()
+    if group.is_default:
+        await _demote_other_group_defaults(session, group)
     logger.info("resource_group_updated", resource_group=group.name, actor=actor.username)
     return group
 
@@ -274,9 +327,144 @@ async def delete_resource_group(session: AsyncSession, actor: User, group: Resou
             code="resource_group_in_use",
         )
 
+    nodes = (
+        await session.scalar(
+            select(func.count())
+            .select_from(ComputeNode)
+            .where(ComputeNode.resource_group_id == group.id)
+        )
+        or 0
+    )
+    if nodes:
+        # The foreign key would null these out, which would leave hardware that no
+        # workload can reach. Better to say so and let the operator move them, the
+        # same way grants are handled above.
+        raise ConflictError(
+            f"仍有 {nodes} 个节点属于该资源组，请先把节点移到其他资源组",
+            code="resource_group_has_nodes",
+        )
+
+    was_default = group.is_default
     await session.delete(group)
     await session.flush()
+    if was_default:
+        # Nothing is silently promoted: an operator picks the next catch-all, and
+        # until they do the node sync reports every new node as unpooled.
+        logger.warning("default_resource_group_deleted", resource_group=group.name)
     logger.info("resource_group_deleted", resource_group=group.name, actor=actor.username)
+
+
+async def _demote_other_group_defaults(session: AsyncSession, keep: ResourceGroup) -> None:
+    """Exactly one resource group may be the default."""
+    others = (
+        await session.scalars(
+            select(ResourceGroup).where(
+                ResourceGroup.id != keep.id, ResourceGroup.is_default.is_(True)
+            )
+        )
+    ).all()
+    for other in others:
+        other.is_default = False
+    await session.flush()
+
+
+async def default_resource_group(session: AsyncSession) -> ResourceGroup | None:
+    group: ResourceGroup | None = await session.scalar(
+        select(ResourceGroup).where(ResourceGroup.is_default.is_(True))
+    )
+    return group
+
+
+async def set_group_nodes(
+    session: AsyncSession,
+    actor: User,
+    group: ResourceGroup,
+    node_ids: Sequence[int],
+    gateway: K8sGateway,
+) -> NodeSyncOutcome:
+    """Replace which nodes belong to a resource group.
+
+    Nodes dropped from the list go to the default pool rather than becoming
+    unassigned: the partition has to stay total, and "I took it out of this pool"
+    is not the same statement as "nothing may ever schedule here again".
+
+    The default pool itself is not editable this way. Its membership is defined as
+    the complement — every node no named pool claims — so a list for it would be a
+    second source of truth for the same fact.
+    """
+    if group.is_default:
+        raise BadRequestError(
+            "默认资源组的节点范围由其他资源组决定，请改为把节点分配到其他资源组",
+            code="default_group_nodes_are_derived",
+        )
+
+    wanted = set(node_ids)
+    found = (
+        set((await session.scalars(select(ComputeNode.id).where(ComputeNode.id.in_(wanted)))).all())
+        if wanted
+        else set()
+    )
+    if found != wanted:
+        missing = sorted(wanted - found)
+        raise BadRequestError(f"节点不存在：{missing}", code="unknown_node")
+
+    fallback = await default_resource_group(session)
+    in_group = list(
+        (
+            await session.scalars(
+                select(ComputeNode).where(ComputeNode.resource_group_id == group.id)
+            )
+        ).all()
+    )
+    leaving = [node for node in in_group if node.id not in wanted]
+    if leaving and fallback is None:
+        raise BadRequestError(
+            "尚未设置默认资源组，无法安置被移出的节点",
+            code="no_default_resource_group",
+        )
+
+    outcome = NodeSyncOutcome()
+    moving = (
+        list((await session.scalars(select(ComputeNode).where(ComputeNode.id.in_(wanted)))).all())
+        if wanted
+        else []
+    )
+
+    for node in moving:
+        if node.resource_group_id != group.id:
+            await _file_node(session, node, group, gateway, outcome)
+    for node in leaving:
+        await _file_node(session, node, fallback, gateway, outcome)
+
+    await session.flush()
+    logger.info(
+        "resource_group_nodes_set",
+        resource_group=group.name,
+        held=len(moving),
+        moved_out=len(leaving),
+        labels_patched=outcome.labels_patched,
+        actor=actor.username,
+    )
+    return outcome
+
+
+async def _file_node(
+    session: AsyncSession,
+    node: ComputeNode,
+    pool: ResourceGroup | None,
+    gateway: K8sGateway,
+    outcome: NodeSyncOutcome,
+) -> None:
+    """Point a node's row and its cluster label at the same pool."""
+    node.resource_group_id = pool.id if pool is not None else None
+    if pool is None:
+        outcome.nodes_unpooled += 1
+        return
+    if (node.labels or {}).get(POOL_LABEL) != pool.name:
+        await run_gateway(gateway.patch_node_labels, node.name, {POOL_LABEL: pool.name})
+        outcome.labels_patched += 1
+        node.labels = {**(node.labels or {}), POOL_LABEL: pool.name}
+    await session.flush()
 
 
 async def update_group_limits(
@@ -486,61 +674,180 @@ async def _demote_other_defaults(session: AsyncSession, keep: RuntimeLimit) -> N
 # ---------------------------------------------------------------------------
 # Nodes
 # ---------------------------------------------------------------------------
+#: Node columns the sync owns. Compared before and after so ``nodes_updated``
+#: counts nodes that actually changed rather than nodes that were merely visited.
+_TRACKED_NODE_FIELDS = (
+    "status",
+    "schedulable",
+    "cpu_total_milli",
+    "memory_total_mb",
+    "cpu_allocatable_milli",
+    "memory_allocatable_mb",
+    "labels",
+    "hostname",
+    "resource_group_id",
+)
+
+
+@dataclass(slots=True)
+class NodeSyncOutcome:
+    """What one sync saw and changed.
+
+    Counters rather than a bare tuple: ``labels_patched`` and ``nodes_unpooled``
+    are the two numbers that tell an operator whether the partition still holds,
+    and a tuple of four anonymous integers is exactly how those get lost.
+    """
+
+    nodes_seen: int = 0
+    nodes_created: int = 0
+    nodes_updated: int = 0
+    devices_seen: int = 0
+    #: Nodes whose ``wl-pool`` label the sync had to correct.
+    labels_patched: int = 0
+    #: Nodes with no pool, because no default pool is configured. Should be zero
+    #: on any working install: a node in this state is hardware nothing can use.
+    nodes_unpooled: int = 0
+
+
+def _node_fingerprint(node: ComputeNode) -> tuple[object, ...]:
+    return tuple(getattr(node, field) for field in _TRACKED_NODE_FIELDS)
+
+
+def resolve_node_pool_id(
+    node: ComputeNode,
+    labels: dict[str, str],
+    pools_by_name: dict[str, ResourceGroup],
+    default_pool: ResourceGroup | None,
+) -> int | None:
+    """Decide which pool a node belongs to.
+
+    The database is the authority. The label is consulted **only** when the row
+    has nothing yet, which is how an operator pre-labels a batch of nodes before
+    the platform has ever seen them — and how a node whose pool was deleted gets
+    re-homed without anyone touching it.
+
+    Returns ``None`` only when the node has no pool and there is no default to
+    put it in, which is a configuration error rather than a state to settle into.
+    """
+    if node.resource_group_id is not None:
+        return node.resource_group_id
+    labelled = labels.get(POOL_LABEL)
+    if labelled is not None and labelled in pools_by_name:
+        return pools_by_name[labelled].id
+    return default_pool.id if default_pool is not None else None
+
+
 async def sync_nodes(
-    session: AsyncSession, actor: User, gateway: K8sGateway
-) -> tuple[int, int, int, int]:
+    session: AsyncSession, actor: User | None, gateway: K8sGateway
+) -> NodeSyncOutcome:
     """Reconcile ``compute_nodes`` / ``gpu_devices`` with the cluster.
 
-    Returns ``(seen, created, updated, devices)``.
+    Also the reconciliation point for pool membership: a node the database
+    already files somewhere keeps that pool, a node it has never seen is adopted
+    from its ``wl-pool`` label if that names a real pool, and anything left over
+    goes to the default pool. The label is then written back, so the cluster and
+    the database converge on the same answer.
+
+    Convergence is what makes this safe to run repeatedly: nothing is written
+    when the label already agrees, so a steady state produces no API traffic.
     """
     nodes: list[NodeInfo] = await run_gateway(gateway.list_nodes)
 
     existing = {node.name: node for node in (await session.scalars(select(ComputeNode))).all()}
+    pools = list((await session.scalars(select(ResourceGroup))).all())
+    pools_by_name = {pool.name: pool for pool in pools}
+    pools_by_id = {pool.id: pool for pool in pools}
+    default_pool = next((pool for pool in pools if pool.is_default), None)
 
-    created = updated = devices_seen = 0
+    outcome = NodeSyncOutcome(nodes_seen=len(nodes))
     seen: set[str] = set()
 
     for info in nodes:
         seen.add(info.name)
         node = existing.get(info.name)
+        is_new = node is None
         if node is None:
             node = ComputeNode(name=info.name)
             session.add(node)
-            created += 1
-        else:
-            updated += 1
+            outcome.nodes_created += 1
 
+        was = _node_fingerprint(node)
+        labels = dict(info.labels)
+
+        pool_id = resolve_node_pool_id(node, labels, pools_by_name, default_pool)
+        if pool_id is None:
+            outcome.nodes_unpooled += 1
+        else:
+            pool = pools_by_id[pool_id]
+            if labels.get(POOL_LABEL) != pool.name:
+                # Single-key patch, so the node is never briefly in two pools or
+                # in none — which is the whole reason the label is a single key.
+                await run_gateway(gateway.patch_node_labels, info.name, {POOL_LABEL: pool.name})
+                outcome.labels_patched += 1
+                labels[POOL_LABEL] = pool.name
+
+        node.resource_group_id = pool_id
         node.status = NodeStatus(info.status)
         node.schedulable = info.schedulable
         node.cpu_total_milli = info.cpu_total_milli
         node.memory_total_mb = info.memory_total_mb
         node.cpu_allocatable_milli = info.cpu_allocatable_milli
         node.memory_allocatable_mb = info.memory_allocatable_mb
-        node.labels = info.labels
-        node.hostname = info.labels.get("kubernetes.io/hostname")
+        node.labels = labels
+        node.hostname = labels.get("kubernetes.io/hostname")
         node.last_seen_at = datetime.now(UTC)
 
         await session.flush()
-        await _sync_devices(session, node, info)
-        devices_seen += len(info.gpu_devices)
+        await _sync_devices(session, node, info, is_new=is_new)
+        outcome.devices_seen += len(info.gpu_devices)
+
+        if not is_new and _node_fingerprint(node) != was:
+            outcome.nodes_updated += 1
 
     # A node that disappeared from the cluster must not keep looking schedulable.
+    # Its pool is left alone: the machine is expected back, and re-homing it would
+    # silently empty a pool every time a node reboots.
     for name, node in existing.items():
-        if name not in seen:
-            node.status = NodeStatus.UNKNOWN
-            node.schedulable = False
-            node.last_seen_at = datetime.now(UTC)
-            updated += 1
+        if name in seen:
+            continue
+        was = _node_fingerprint(node)
+        node.status = NodeStatus.UNKNOWN
+        node.schedulable = False
+        node.last_seen_at = datetime.now(UTC)
+        if _node_fingerprint(node) != was:
+            outcome.nodes_updated += 1
 
     await session.flush()
+    if outcome.nodes_unpooled:
+        logger.warning(
+            "nodes_without_a_pool",
+            count=outcome.nodes_unpooled,
+            hint="no resource group is marked as the default",
+        )
     logger.info(
-        "nodes_synced", seen=len(seen), created=created, updated=updated, actor=actor.username
+        "nodes_synced",
+        **{
+            "seen": outcome.nodes_seen,
+            "created": outcome.nodes_created,
+            "updated": outcome.nodes_updated,
+            "labels_patched": outcome.labels_patched,
+            "unpooled": outcome.nodes_unpooled,
+            "actor": actor.username if actor is not None else "scheduler",
+        },
     )
-    return len(seen), created, updated, devices_seen
+    return outcome
 
 
-async def _sync_devices(session: AsyncSession, node: ComputeNode, info: NodeInfo) -> None:
-    await session.refresh(node, ["gpu_devices"])
+async def _sync_devices(
+    session: AsyncSession, node: ComputeNode, info: NodeInfo, *, is_new: bool
+) -> None:
+    if is_new:
+        # ``gpu_devices`` is ``lazy="selectin"``, which loads the cards of nodes
+        # that came out of a *query*. A node created in this session never was one,
+        # so its collection is unloaded and touching it would attempt IO. One
+        # refresh for a node we have just discovered — never again — is cheaper
+        # than a query per node on every subsequent sweep.
+        await session.refresh(node, ["gpu_devices"])
     by_index = {device.index: device for device in node.gpu_devices}
 
     present: set[int] = set()
@@ -734,8 +1041,22 @@ async def get_quota(
     return result
 
 
-async def _ensure_group_exists(session: AsyncSession, group_id: int) -> None:
-    from app.models.group import Group
+async def _resolve_owning_group(session: AsyncSession, group_id: int | None) -> Group | None:
+    """Load the pool's owning group, or ``None`` for a cluster-wide pool.
 
-    if await session.get(Group, group_id) is None:
+    This returns the entity rather than only validating an id, and callers assign
+    the **relationship** instead of the raw foreign key. The difference is not
+    cosmetic: assigning ``group_id`` alone leaves ``ResourceGroup.group`` unloaded,
+    so rendering the group's name afterwards becomes a lazy load. Under async
+    SQLAlchemy that raises ``MissingGreenlet`` — unless the parent happens to
+    already sit in the session's identity map, in which case the lazy load is
+    answered from memory and nothing goes wrong. A correctness property that holds
+    only when some unrelated earlier query warmed a cache is a bug that surfaces
+    under load and reproduces nowhere.
+    """
+    if group_id is None:
+        return None
+    parent = await session.get(Group, group_id)
+    if parent is None:
         raise BadRequestError("指定的用户组不存在", code="unknown_group")
+    return parent

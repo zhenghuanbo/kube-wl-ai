@@ -61,6 +61,7 @@ from app.services.quota_guard import (
 )
 from app.services.workload_common import (
     Page,
+    pool_node_selector,
     resolve_owner,
     resolve_pool_and_spec,
     workspace_for_actor,
@@ -385,7 +386,7 @@ async def apply_cluster_state(
         storage_gb=instance.storage_gb,
         ssh_enabled=instance.ssh_enabled,
         authorized_keys=keys,
-        node_selector=dict(pool.k8s_label_selector or {}),
+        node_selector=pool_node_selector(pool),
         tolerations=tuple(pool.k8s_tolerations or ()),
         ingress_host=settings.instance_ingress_host,
         storage_class=pool.storage_class or settings.storage_class_home or None,

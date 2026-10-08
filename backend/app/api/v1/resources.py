@@ -122,7 +122,8 @@ async def get_resource_group(
 ) -> ResourceGroupDetail:
     group = await resource_service.get_resource_group(session, actor, group_id)
     specs = (await resource_service.specs_for_groups(session, [group.id])).get(group.id, [])
-    return resource_service.group_to_detail(group, specs)
+    counts = await resource_service.node_counts_for_groups(session, [group.id])
+    return resource_service.group_to_detail(group, specs, node_count=counts.get(group.id, 0))
 
 
 @router.patch("/resource-groups/{group_id}", response_model=ResourceGroupDetail)
@@ -136,7 +137,8 @@ async def update_resource_group(
     group = await resource_service.get_resource_group(session, actor, group_id)
     group = await resource_service.update_resource_group(session, actor, group, payload)
     specs = (await resource_service.specs_for_groups(session, [group.id])).get(group.id, [])
-    return resource_service.group_to_detail(group, specs)
+    counts = await resource_service.node_counts_for_groups(session, [group.id])
+    return resource_service.group_to_detail(group, specs, node_count=counts.get(group.id, 0))
 
 
 @router.delete("/resource-groups/{group_id}", response_model=ApiMessage)
@@ -176,6 +178,33 @@ async def set_resource_group_specs(
     group = await resource_service.get_resource_group(session, actor, group_id)
     specs = await resource_service.set_group_specs(session, actor, group, spec_ids)
     return [resource_service.spec_to_read(spec) for spec in specs]
+
+
+@router.put("/resource-groups/{group_id}/nodes", response_model=NodeSyncResult)
+async def set_resource_group_nodes(
+    session: DbSession,
+    actor: CurrentUser,
+    _: Annotated[PermissionCheck, CanManagePool],
+    group_id: int,
+    node_ids: list[int],
+) -> NodeSyncResult:
+    """Replace which nodes belong to a pool.
+
+    Nodes dropped from the list go to the default pool, and each move rewrites the
+    node's ``wl-pool`` label so the scheduler and the database agree. The response
+    reports how many labels had to change, which is the number worth showing an
+    operator after a bulk move.
+    """
+    group = await resource_service.get_resource_group(session, actor, group_id)
+    outcome = await resource_service.set_group_nodes(session, actor, group, node_ids, get_gateway())
+    return NodeSyncResult(
+        nodes_seen=len(node_ids),
+        nodes_created=0,
+        nodes_updated=0,
+        devices_seen=0,
+        labels_patched=outcome.labels_patched,
+        nodes_unpooled=outcome.nodes_unpooled,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -319,12 +348,19 @@ async def sync_nodes(
     actor: CurrentUser,
     _: Annotated[PermissionCheck, CanSyncNode],
 ) -> NodeSyncResult:
-    """Pull the node inventory from the cluster and reconcile it."""
-    seen, created, updated, devices = await resource_service.sync_nodes(
-        session, actor, get_gateway()
-    )
+    """Pull the node inventory from the cluster and reconcile it.
+
+    Also re-derives each node's pool and rewrites the ``wl-pool`` label to match,
+    so this is what keeps the cluster and the database telling the same story.
+    """
+    outcome = await resource_service.sync_nodes(session, actor, get_gateway())
     return NodeSyncResult(
-        nodes_seen=seen, nodes_created=created, nodes_updated=updated, devices_seen=devices
+        nodes_seen=outcome.nodes_seen,
+        nodes_created=outcome.nodes_created,
+        nodes_updated=outcome.nodes_updated,
+        devices_seen=outcome.devices_seen,
+        labels_patched=outcome.labels_patched,
+        nodes_unpooled=outcome.nodes_unpooled,
     )
 
 

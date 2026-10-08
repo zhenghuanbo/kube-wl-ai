@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import policy
 from app.core.errors import BadRequestError, NotFoundError
-from app.models.resource import ResourceGroup, ResourceGroupSpec, ResourceSpec
+from app.models.resource import POOL_LABEL, ResourceGroup, ResourceGroupSpec, ResourceSpec
 from app.models.user import User
 from app.models.workspace import Workspace, WorkspaceMember, WorkspaceResourceGrant
 
@@ -27,6 +27,24 @@ from app.models.workspace import Workspace, WorkspaceMember, WorkspaceResourceGr
 class Page[T]:
     items: Sequence[T]
     total: int
+
+
+def pool_node_selector(pool: ResourceGroup) -> dict[str, str]:
+    """The node selector that pins a workload to its resource pool.
+
+    ``wl-pool`` is what turns a pool from a suggestion into a partition: the node
+    sync writes that label on every node it manages, and this is the only thing
+    that reads it. Without it a pool would be a quota with a nice name, and a
+    workload could land on any hardware in the cluster.
+
+    The pool's own ``k8s_label_selector`` rides along as an *extra* constraint
+    (hardware properties such as "A100 only"), but the pool key is applied last so
+    it cannot be overridden. A pool able to select its way out of itself would not
+    be a partition.
+    """
+    selector = {key: str(value) for key, value in (pool.k8s_label_selector or {}).items()}
+    selector[POOL_LABEL] = pool.name
+    return selector
 
 
 async def workspace_for_actor(

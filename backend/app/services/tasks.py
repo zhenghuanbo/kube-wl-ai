@@ -44,6 +44,7 @@ from app.services import workload_events as events
 from app.services.quota_guard import check_quota, workspace_quotas, workspace_usage
 from app.services.workload_common import (
     Page,
+    pool_node_selector,
     resolve_owner,
     resolve_pool_and_spec,
     workspace_for_actor,
@@ -284,7 +285,7 @@ async def _apply(
         storage_gb=task.storage_gb,
         working_dir=task.working_dir,
         env=dict(task.env or {}),
-        node_selector=dict(pool.k8s_label_selector or {}),
+        node_selector=pool_node_selector(pool),
         tolerations=tuple(pool.k8s_tolerations or ()),
         max_runtime_seconds=task.max_runtime_seconds,
         ttl_seconds_after_finished=task.ttl_seconds_after_finished,

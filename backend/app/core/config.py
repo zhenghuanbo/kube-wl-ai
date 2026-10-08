@@ -56,6 +56,16 @@ class Settings(BaseSettings):
     #: "I pushed an image and cannot see it" is worth answering in minutes.
     image_sync_interval_seconds: float = 86400.0
 
+    #: How often the worker re-reads the cluster's nodes and re-derives their pools.
+    #:
+    #: Far more often than the image sync, because the node sync is not a cache
+    #: refresh: it is the thing that keeps a node's ``wl-pool`` label equal to the
+    #: pool the database files it in. A stale label is a workload that cannot be
+    #: scheduled at all, so the window between an administrator moving a node and
+    #: the scheduler agreeing should be seconds, not a day. A pass is one API call
+    #: plus at most one patch per node that actually moved.
+    node_sync_interval_seconds: float = 120.0
+
     # --- Authentication ------------------------------------------------------
     auth_providers: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["local"])
 

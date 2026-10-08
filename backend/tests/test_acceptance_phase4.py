@@ -526,17 +526,28 @@ async def test_a_task_job_name_cannot_collide_with_an_instance_deployment(
 async def test_a_task_is_pinned_by_its_pools_selector(
     client: AsyncClient, world: World, admin_client: AsyncClient, gateway: FakeK8sGateway
 ) -> None:
-    """Scheduling follows the pool, exactly as an instance does."""
+    """Scheduling follows the pool, exactly as an instance does.
+
+    Two constraints travel together and they are not interchangeable. ``wl-pool``
+    is the partition — written by the node sync, owned by the platform, and the
+    reason a workload cannot land on another pool's hardware. The pool's own
+    selector is an *extra* hardware filter on top of it. Note the second
+    assertion: a pool cannot use its selector to point somewhere other than
+    itself, because a partition with an escape hatch is not a partition.
+    """
     updated = await admin_client.patch(
         f"/api/v1/resource-groups/{world.pool_id}",
-        json={"k8sLabelSelector": {"wl-pool": "gpu"}},
+        json={"k8sLabelSelector": {"gpu-type": "a100", "wl-pool": "somewhere-else"}},
     )
     assert updated.status_code == 200, updated.text
 
     await act_as(client, "dana")
     await make_task(client, world)
 
-    assert gateway.jobs[job_name(gateway)].node_selector == {"wl-pool": "gpu"}
+    assert gateway.jobs[job_name(gateway)].node_selector == {
+        "gpu-type": "a100",
+        "wl-pool": "gpu-pool",
+    }
 
 
 async def test_the_runtime_cap_is_enforced_by_kubernetes(

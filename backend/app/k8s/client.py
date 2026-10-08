@@ -1097,3 +1097,24 @@ class RealK8sGateway:
                 )
             )
         return nodes
+
+    def patch_node_labels(self, name: str, labels: dict[str, str]) -> None:
+        """Merge ``labels`` into a node, leaving every other label alone.
+
+        A strategic-merge patch rather than a replace, deliberately: nodes carry
+        labels the platform has no business overwriting (``kubernetes.io/*``, the
+        device plugin's ``nvidia.com/*``, whatever the operator uses for their own
+        bookkeeping). Sending only the keys we own means a concurrent edit to an
+        unrelated label cannot be clobbered by a sync that read the node a moment
+        earlier.
+
+        This is the platform's only write to a cluster-scoped object other than a
+        namespace. It exists because pool membership has to be visible to the
+        scheduler, and the scheduler only reads node labels.
+        """
+        if not labels:
+            return
+        try:
+            self._core.patch_node(name, {"metadata": {"labels": labels}})
+        except ApiException as exc:
+            raise self._raise(f"patch labels on node {name}", exc) from exc

@@ -62,6 +62,15 @@ PAYLOAD_ALIASES = {
     "StorageUpdatePayload": "StorageUpdate",
     "ImageRegisterPayload": "ImageRegister",
     "ImageUpdatePayload": "ImageUpdate",
+    # Resource pools, specs and runtime limits. The request bodies are written out
+    # field by field on the frontend — for the three updates so that `name` (fixed
+    # at creation, refused by the update endpoint) cannot be sent, and for the pool
+    # create so that read-only fields cannot be. Checking them here is what keeps
+    # both properties from rotting.
+    "ResourceGroupCreatePayload": "ResourceGroupCreate",
+    "ResourceGroupUpdatePayload": "ResourceGroupUpdate",
+    "ResourceSpecUpdatePayload": "ResourceSpecUpdate",
+    "RuntimeLimitUpdatePayload": "RuntimeLimitUpdate",
     # Read models: the backend appends `Read` where the frontend does not.
     "WorkloadEvent": "WorkloadEventRead",
     "SshKey": "SshKeyRead",

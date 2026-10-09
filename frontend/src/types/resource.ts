@@ -77,11 +77,70 @@ export interface ResourceSpec {
   isActive: boolean
 }
 
+/** What `PATCH /resource-specs/{id}` accepts. `name` is fixed at creation. */
+export interface ResourceSpecUpdatePayload {
+  displayName?: string | null
+  description?: string | null
+  cpuMilli?: number | null
+  memoryMb?: number | null
+  gpuType?: string | null
+  gpuCount?: number | null
+  isActive?: boolean | null
+}
+
 export interface ResourceGroupDetail extends ResourceGroupSummary {
   k8sLabelSelector: Record<string, string>
   k8sTolerations: unknown[]
   limits: ResourceGroupLimits | null
   specs: ResourceSpec[]
+}
+
+/**
+ * What `PATCH /resource-groups/{id}` accepts.
+ *
+ * Written out rather than derived with `Partial<ResourceGroupDetail>` for one
+ * specific reason: `name` must not be in it. It is the pool's stable identifier,
+ * the backend's `ResourceGroupUpdate` omits it, and `ApiModel` forbids unknown
+ * fields — so sending it produced a 422 on every edit. `Partial<...Detail>`
+ * invited exactly that, because the detail type legitimately carries `name`.
+ */
+export interface ResourceGroupUpdatePayload {
+  displayName?: string | null
+  description?: string | null
+  kind?: ResourceGroupKind | null
+  groupId?: number | null
+  networkType?: NetworkType | null
+  maxRuntimeSeconds?: number | null
+  storageClass?: string | null
+  isActive?: boolean | null
+  isDefault?: boolean | null
+  // Non-nullable, unlike the backend's `dict | None`, where null simply means "not
+  // supplied". Keeping it non-null is also what lets one object be spread into a
+  // create body, which the backend requires to carry a real dict.
+  k8sLabelSelector?: Record<string, string>
+  k8sTolerations?: unknown[]
+}
+
+/**
+ * What `POST /resource-groups` accepts.
+ *
+ * Spelled out rather than `Partial<ResourceGroupDetail> & { name: string }`, which
+ * is what it was: that also permitted `id`, `nodeCount`, `groupName`, `createdAt`
+ * and every other read-only field — each of them a 422. A request type should
+ * describe what may be *sent*, not what comes back.
+ */
+export interface ResourceGroupCreatePayload {
+  name: string
+  displayName?: string
+  description?: string | null
+  kind?: ResourceGroupKind
+  groupId?: number | null
+  networkType?: NetworkType
+  maxRuntimeSeconds?: number | null
+  storageClass?: string | null
+  isDefault?: boolean
+  k8sLabelSelector?: Record<string, string>
+  k8sTolerations?: unknown[]
 }
 
 export interface RuntimeLimit {
@@ -91,6 +150,14 @@ export interface RuntimeLimit {
   maxRuntimeSeconds: number | null
   isDefault: boolean
   isActive: boolean
+}
+
+/** What `PATCH /runtime-limits/{id}` accepts. `name` is fixed at creation. */
+export interface RuntimeLimitUpdatePayload {
+  displayName?: string | null
+  maxRuntimeSeconds?: number | null
+  isDefault?: boolean | null
+  isActive?: boolean | null
 }
 
 export interface ComputeNode {

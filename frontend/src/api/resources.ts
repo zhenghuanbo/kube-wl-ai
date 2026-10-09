@@ -7,12 +7,16 @@ import type {
   NodeSyncResult,
   Quota,
   QuotaScope,
+  ResourceGroupCreatePayload,
   ResourceGroupDetail,
   ResourceGroupKind,
   ResourceGroupLimits,
   ResourceGroupSummary,
+  ResourceGroupUpdatePayload,
   ResourceSpec,
+  ResourceSpecUpdatePayload,
   RuntimeLimit,
+  RuntimeLimitUpdatePayload,
 } from '@/types/resource'
 
 // --- resource groups ---------------------------------------------------------
@@ -32,14 +36,14 @@ export function getResourceGroup(groupId: number): Promise<ResourceGroupDetail> 
 }
 
 export function createResourceGroup(
-  payload: Partial<ResourceGroupDetail> & { name: string },
+  payload: ResourceGroupCreatePayload,
 ): Promise<ResourceGroupDetail> {
   return api.post<ResourceGroupDetail>('/resource-groups', payload)
 }
 
 export function updateResourceGroup(
   groupId: number,
-  payload: Partial<ResourceGroupDetail>,
+  payload: ResourceGroupUpdatePayload,
 ): Promise<ResourceGroupDetail> {
   return api.patch<ResourceGroupDetail>(`/resource-groups/${groupId}`, payload)
 }
@@ -92,7 +96,7 @@ export function createResourceSpec(
 
 export function updateResourceSpec(
   specId: number,
-  payload: Partial<ResourceSpec>,
+  payload: ResourceSpecUpdatePayload,
 ): Promise<ResourceSpec> {
   return api.patch<ResourceSpec>(`/resource-specs/${specId}`, payload)
 }
@@ -119,7 +123,7 @@ export function createRuntimeLimit(payload: {
 
 export function updateRuntimeLimit(
   limitId: number,
-  payload: Partial<RuntimeLimit>,
+  payload: RuntimeLimitUpdatePayload,
 ): Promise<RuntimeLimit> {
   return api.patch<RuntimeLimit>(`/runtime-limits/${limitId}`, payload)
 }

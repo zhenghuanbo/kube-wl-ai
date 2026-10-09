@@ -11,6 +11,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '@/api/client'
 import { listGroups, type GroupSummary } from '@/api/groups'
+import type { FieldLabels } from '@/api/validation'
 import {
   createResourceGroup,
   createResourceSpec,
@@ -47,12 +48,52 @@ import {
   type GpuDevice,
   type GpuModel,
   type NetworkType,
+  type ResourceGroupCreatePayload,
   type ResourceGroupSummary,
   type ResourceSpec,
+  type ResourceSpecUpdatePayload,
   type RuntimeLimit,
+  type RuntimeLimitUpdatePayload,
 } from '@/types/resource'
 
 const { can, isGlobalAdmin, adminGroupIds } = usePermissions()
+
+/**
+ * Field labels, so a rejection reads 「标识：格式不正确」 instead of
+ * 「name: String should match pattern ...」.
+ *
+ * The API can only name a field by its wire name; the form is the only layer that
+ * knows it presents `name` as 标识. These exist because the wire names alone were
+ * not enough for anyone to act on.
+ */
+const POOL_FIELD_LABELS: FieldLabels = {
+  name: '标识',
+  displayName: '显示名称',
+  description: '描述',
+  kind: '类型',
+  groupId: '所属组',
+  networkType: '网络',
+  maxRuntimeSeconds: '最长运行时长',
+  storageClass: '存储类',
+  isDefault: '默认资源池',
+  k8sLabelSelector: '节点标签选择器',
+}
+
+const SPEC_FIELD_LABELS: FieldLabels = {
+  name: '标识',
+  displayName: '显示名称',
+  cpuMilli: 'CPU（milli）',
+  memoryMb: '内存（MB）',
+  gpuType: '加速卡型号',
+  gpuCount: '加速卡数量',
+}
+
+const LIMIT_FIELD_LABELS: FieldLabels = {
+  name: '标识',
+  displayName: '显示名称',
+  maxRuntimeSeconds: '最长运行时长',
+  isDefault: '默认时长',
+}
 const notifications = useNotificationStore()
 
 const tab = ref('pools')
@@ -173,8 +214,15 @@ async function submitPool(): Promise<void> {
   poolSaving.value = true
   poolError.value = null
   try {
-    const payload = {
-      name: poolForm.name,
+    // The half of the pool body that may change after creation, typed by the
+    // *create* payload minus `name`.
+    //
+    // Every field create permits is also valid on update, so one object serves both
+    // callers; and typing it here rather than at the call site is what makes
+    // TypeScript reject the literal if `name` — the pool's stable identifier, fixed
+    // at creation and refused outright by `ResourceGroupUpdate` — is added back.
+    // That omission is the fix for every pool edit returning 422.
+    const mutable: Omit<ResourceGroupCreatePayload, 'name'> = {
       displayName: poolForm.displayName || poolForm.name,
       description: poolForm.description || null,
       kind: poolForm.kind,
@@ -187,8 +235,8 @@ async function submitPool(): Promise<void> {
     }
 
     const saved = poolEditing.value
-      ? await updateResourceGroup(poolEditing.value.id, payload)
-      : await createResourceGroup(payload)
+      ? await updateResourceGroup(poolEditing.value.id, mutable)
+      : await createResourceGroup({ name: poolForm.name, ...mutable })
 
     await updateResourceGroupLimits(saved.id, poolForm.limits)
     await setResourceGroupSpecs(saved.id, poolForm.specIds)
@@ -197,7 +245,8 @@ async function submitPool(): Promise<void> {
     poolOpen.value = false
     await loadPools()
   } catch (error) {
-    poolError.value = error instanceof ApiError ? error.message : '保存失败'
+    poolError.value =
+      error instanceof ApiError ? error.display(POOL_FIELD_LABELS) : '保存失败'
   } finally {
     poolSaving.value = false
   }
@@ -257,7 +306,17 @@ async function submitSpec(): Promise<void> {
   specError.value = null
   try {
     if (specEditing.value) {
-      await updateResourceSpec(specEditing.value.id, specForm)
+      // `name` is fixed at creation and refused by the update endpoint, so the
+      // body carries the mutable fields only. Annotating the literal with the
+      // update payload type makes TypeScript reject it if `name` creeps back in.
+      const mutable: ResourceSpecUpdatePayload = {
+        displayName: specForm.displayName,
+        cpuMilli: specForm.cpuMilli,
+        memoryMb: specForm.memoryMb,
+        gpuType: specForm.gpuType,
+        gpuCount: specForm.gpuCount,
+      }
+      await updateResourceSpec(specEditing.value.id, mutable)
       notifications.success('规格已更新')
     } else {
       await createResourceSpec(specForm)
@@ -266,7 +325,8 @@ async function submitSpec(): Promise<void> {
     specOpen.value = false
     await loadSpecs()
   } catch (error) {
-    specError.value = error instanceof ApiError ? error.message : '保存失败'
+    specError.value =
+      error instanceof ApiError ? error.display(SPEC_FIELD_LABELS) : '保存失败'
   } finally {
     specSaving.value = false
   }
@@ -311,7 +371,14 @@ async function submitLimit(): Promise<void> {
   limitError.value = null
   try {
     if (limitEditing.value) {
-      await updateRuntimeLimit(limitEditing.value.id, limitForm)
+      // As with specs: `name` is fixed at creation, and sending it to the update
+      // endpoint is a 422 rather than a harmless extra.
+      const mutable: RuntimeLimitUpdatePayload = {
+        displayName: limitForm.displayName,
+        maxRuntimeSeconds: limitForm.maxRuntimeSeconds,
+        isDefault: limitForm.isDefault,
+      }
+      await updateRuntimeLimit(limitEditing.value.id, mutable)
       notifications.success('时长限制已更新')
     } else {
       await createRuntimeLimit(limitForm)
@@ -320,7 +387,8 @@ async function submitLimit(): Promise<void> {
     limitOpen.value = false
     await loadLimits()
   } catch (error) {
-    limitError.value = error instanceof ApiError ? error.message : '保存失败'
+    limitError.value =
+      error instanceof ApiError ? error.display(LIMIT_FIELD_LABELS) : '保存失败'
   } finally {
     limitSaving.value = false
   }
@@ -839,9 +907,10 @@ onMounted(async () => {
             type="error"
             variant="tonal"
             density="compact"
-            class="mb-4"
-            :text="poolError"
-          />
+            class="mb-4 wl-form-error"
+          >
+            {{ poolError }}
+          </v-alert>
 
           <v-text-field v-model="poolForm.name" label="标识 *" :disabled="!!poolEditing" class="mb-2" />
           <v-text-field v-model="poolForm.displayName" label="显示名称" class="mb-2" />
@@ -988,9 +1057,10 @@ onMounted(async () => {
             type="error"
             variant="tonal"
             density="compact"
-            class="mb-4"
-            :text="specError"
-          />
+            class="mb-4 wl-form-error"
+          >
+            {{ specError }}
+          </v-alert>
           <v-text-field v-model="specForm.name" label="标识 *" :disabled="!!specEditing" class="mb-2" />
           <v-text-field v-model="specForm.displayName" label="显示名称" class="mb-2" />
           <v-row dense>
@@ -1033,9 +1103,10 @@ onMounted(async () => {
             type="error"
             variant="tonal"
             density="compact"
-            class="mb-4"
-            :text="limitError"
-          />
+            class="mb-4 wl-form-error"
+          >
+            {{ limitError }}
+          </v-alert>
           <v-text-field v-model="limitForm.name" label="标识 *" :disabled="!!limitEditing" class="mb-2" />
           <v-text-field v-model="limitForm.displayName" label="显示名称" class="mb-2" />
           <v-text-field

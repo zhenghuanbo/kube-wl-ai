@@ -37,7 +37,9 @@ const meta = computed(() =>
     <div class="d-flex align-start ga-3">
       <v-icon :icon="meta.icon" size="22" class="mt-1" />
       <div class="flex-grow-1">
-        <div class="text-body-1 font-weight-medium">{{ notifications.current?.message }}</div>
+        <div class="text-body-1 font-weight-medium wl-snackbar__message">
+          {{ notifications.current?.message }}
+        </div>
         <div v-if="notifications.current?.detail" class="text-caption mt-1 wl-snackbar__detail">
           {{ notifications.current.detail }}
         </div>
@@ -51,6 +53,12 @@ const meta = computed(() =>
 </template>
 
 <style scoped lang="scss">
+// A validation failure appends its per-field reasons on their own lines; without
+// this they would collapse into one run-on sentence.
+.wl-snackbar__message {
+  white-space: pre-line;
+}
+
 .wl-snackbar__detail {
   opacity: 0.85;
   word-break: break-word;

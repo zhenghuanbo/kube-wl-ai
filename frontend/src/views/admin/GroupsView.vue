@@ -535,7 +535,7 @@ function formatDate(value: string): string {
             type="error"
             variant="tonal"
             density="comfortable"
-            class="mb-4"
+            class="mb-4 wl-form-error"
             rounded="lg"
           >
             {{ formError }}

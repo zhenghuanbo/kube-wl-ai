@@ -106,3 +106,11 @@
   max-width: 1600px;
   margin: 0 auto;
 }
+
+// A rejected form request appends one line per offending field (`ApiError.message`
+// is newline-separated for exactly this). `v-alert`'s `text` prop would collapse
+// them into a single run-on sentence, so those alerts render their slot instead —
+// and the whitespace has to be preserved here, once, rather than per view.
+.wl-form-error {
+  white-space: pre-line;
+}

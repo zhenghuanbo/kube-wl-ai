@@ -23,6 +23,7 @@ import axios, {
 } from 'axios'
 
 import type { ApiErrorEnvelope } from '@/types/api'
+import { withFieldDetails, type FieldLabels } from '@/api/validation'
 
 const BASE_URL: string = import.meta.env.VITE_API_BASE_URL ?? '/api/v1'
 
@@ -41,13 +42,36 @@ export class ApiError extends Error {
   readonly code: string
   readonly status: number
   readonly detail: Record<string, unknown>
+  /**
+   * The message exactly as the API sent it.
+   *
+   * `message` is the *display* form: for a validation failure the server's text
+   * is identical for every rejection ("Request validation failed"), so the
+   * per-field reasons are appended to it here. That single choice is what makes
+   * all ~100 call sites readable without touching any of them — every one of
+   * them renders `error.message`.
+   */
+  readonly apiMessage: string
 
   constructor(message: string, options: { code: string; status: number; detail?: Record<string, unknown> }) {
-    super(message)
+    const detail = options.detail ?? {}
+    super(withFieldDetails(message, detail))
     this.name = 'ApiError'
+    this.apiMessage = message
     this.code = options.code
     this.status = options.status
-    this.detail = options.detail ?? {}
+    this.detail = detail
+  }
+
+  /**
+   * The display message with field labels this form recognises.
+   *
+   * `message` names fields by their API name (`name`, `cpuMilli`); a form knows
+   * it shows those as 标识 and CPU（milli）, so it passes its own mapping rather
+   * than making the user translate.
+   */
+  display(labels: FieldLabels = {}): string {
+    return withFieldDetails(this.apiMessage, this.detail, labels)
   }
 
   /** Whether the caller simply lacks the permission. */

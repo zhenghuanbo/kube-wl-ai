@@ -746,7 +746,7 @@ function eventTone(event: WorkloadEvent): string {
       <v-card>
         <v-card-title>提交自定义任务</v-card-title>
         <v-card-text>
-          <v-alert v-if="submitError" type="error" variant="tonal" class="mb-4">
+          <v-alert v-if="submitError" type="error" variant="tonal" class="mb-4 wl-form-error">
             {{ submitError }}
           </v-alert>
 

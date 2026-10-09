@@ -782,7 +782,7 @@ function mayEdit(summary: ApplicationSummary): boolean {
       <v-card>
         <v-card-title>{{ editingId === null ? '新建应用程序' : '编辑应用程序' }}</v-card-title>
         <v-card-text>
-          <v-alert v-if="editorError" type="error" variant="tonal" class="mb-4">
+          <v-alert v-if="editorError" type="error" variant="tonal" class="mb-4 wl-form-error">
             {{ editorError }}
           </v-alert>
 
@@ -1020,7 +1020,7 @@ function mayEdit(summary: ApplicationSummary): boolean {
       <v-card>
         <v-card-title>启动 {{ launchTarget?.displayName }}</v-card-title>
         <v-card-text>
-          <v-alert v-if="launchError" type="error" variant="tonal" class="mb-4">
+          <v-alert v-if="launchError" type="error" variant="tonal" class="mb-4 wl-form-error">
             {{ launchError }}
           </v-alert>
 

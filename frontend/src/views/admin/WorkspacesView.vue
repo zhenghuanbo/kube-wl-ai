@@ -496,9 +496,10 @@ onMounted(async () => {
             type="error"
             variant="tonal"
             density="compact"
-            class="mb-4"
-            :text="createError"
-          />
+            class="mb-4 wl-form-error"
+          >
+            {{ createError }}
+          </v-alert>
 
           <v-text-field
             v-model="createForm.name"
@@ -721,9 +722,10 @@ onMounted(async () => {
             type="error"
             variant="tonal"
             density="compact"
-            class="mb-4"
-            :text="memberError"
-          />
+            class="mb-4 wl-form-error"
+          >
+            {{ memberError }}
+          </v-alert>
           <p class="text-body-2 text-medium-emphasis mb-4">
             一名用户只能属于一个工作空间。
           </p>

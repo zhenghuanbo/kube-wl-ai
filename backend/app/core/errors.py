@@ -185,26 +185,66 @@ def _serialisable_errors(exc: RequestValidationError) -> list[dict[str, Any]]:
     return cleaned
 
 
+#: Longest reason recorded on an audit row. The column is free text, but a reason
+#: is meant to be read in a list, and an unbounded one invites dumping payloads.
+_AUDIT_REASON_LIMIT = 500
+
+
+def _field_error_summary(errors: list[dict[str, Any]]) -> str:
+    """``name: String should match pattern ...`` — field path and rule.
+
+    Deliberately built from ``loc`` and ``msg`` only. Pydantic also reports the
+    rejected ``input``, and a request carrying a bad password is a 422 like any
+    other; a rejection reason must never become a copy of what was submitted.
+    """
+    parts: list[str] = []
+    for error in errors:
+        location = [
+            str(part) for part in (error.get("loc") or ()) if part not in ("body", "query", "path")
+        ]
+        parts.append(f"{'.'.join(location) or '<body>'}: {error.get('msg', '')}")
+    return "; ".join(parts)
+
+
+def _record_for_audit(request: Request, reason: str) -> None:
+    """Hand the failure reason to ``AuditMiddleware`` for the audit row.
+
+    The middleware reads ``scope['state']`` *after* the response has been sent,
+    and exception handlers run inside it, so writing here is what fills in a row
+    that would otherwise record ``status='error'`` with no indication of why.
+    """
+    request.state.error_message = reason[:_AUDIT_REASON_LIMIT]
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     """Attach the unified error handlers to a FastAPI application."""
 
     @app.exception_handler(AppError)
-    async def _handle_app_error(_: Request, exc: AppError) -> JSONResponse:
+    async def _handle_app_error(request: Request, exc: AppError) -> JSONResponse:
         if exc.status_code >= 500:
             logger.error("app_error", code=exc.code, message=exc.message, detail=exc.detail)
+        _record_for_audit(request, exc.message)
         return exc.to_response()
 
     @app.exception_handler(RequestValidationError)
-    async def _handle_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+    async def _handle_validation_error(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        errors = _serialisable_errors(exc)
+        _record_for_audit(
+            request,
+            f"Request validation failed — {_field_error_summary(errors)}",
+        )
         return _envelope(
             HTTP_422_UNPROCESSABLE,
             "validation_failed",
             "Request validation failed",
-            {"errors": _serialisable_errors(exc)},
+            {"errors": errors},
         )
 
     @app.exception_handler(StarletteHTTPException)
-    async def _handle_http_error(_: Request, exc: StarletteHTTPException) -> JSONResponse:
+    async def _handle_http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        _record_for_audit(request, str(exc.detail))
         code_map = {
             400: "bad_request",
             401: "unauthorized",
@@ -221,8 +261,12 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(Exception)
-    async def _handle_unexpected(_: Request, exc: Exception) -> JSONResponse:
+    async def _handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
         logger.exception("unhandled_exception", error=str(exc))
+        # The class name, never the message: a traceback is already logged, and an
+        # exception message is the most likely place for credentials or internal
+        # detail to reach a table that is merely admin-readable.
+        _record_for_audit(request, f"unhandled {type(exc).__name__}")
         return _envelope(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             "internal_error",

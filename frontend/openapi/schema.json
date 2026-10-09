@@ -6379,7 +6379,7 @@
           "storage"
         ],
         "summary": "Delete Storage",
-        "description": "Retire a volume and delete its claim.\n\nReturns the row rather than 204: the record is kept as history, and the\ncaller needs its new status to redraw without a second request.",
+        "description": "Retire a volume: delete its cluster objects, keep the row as history.\n\nReturns the row rather than 204, because the record is kept and the caller needs\nits new status to redraw without a second request. The directory and everything\nin it is left alone.",
         "operationId": "delete_storage_api_v1_storages__storage_id__delete",
         "security": [
           {
@@ -6427,6 +6427,7 @@
           "storage"
         ],
         "summary": "Resize Storage",
+        "description": "Change the capacity the platform accounts for.\n\nNo cluster call: a statically provisioned claim cannot be expanded, so this\nmoves the record and nothing else. See the service for why that is the honest\nbehaviour rather than a gap.",
         "operationId": "resize_storage_api_v1_storages__storage_id__resize_post",
         "security": [
           {
@@ -13489,18 +13490,7 @@
           },
           "kind": {
             "$ref": "#/components/schemas/StorageKind",
-            "default": "personal_data"
-          },
-          "workspaceId": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Workspaceid"
+            "default": "user_volume"
           },
           "ownerUserId": {
             "anyOf": [
@@ -13512,6 +13502,40 @@
               }
             ],
             "title": "Owneruserid"
+          },
+          "groupId": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Groupid"
+          },
+          "dirName": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dirname"
+          },
+          "workspaceId": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspaceid"
           },
           "capacityGb": {
             "type": "integer",
@@ -13531,18 +13555,6 @@
               }
             ],
             "title": "Accessmode"
-          },
-          "storageClass": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 64
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Storageclass"
           },
           "isReadOnly": {
             "anyOf": [
@@ -13566,17 +13578,6 @@
               }
             ],
             "title": "Source"
-          },
-          "groupId": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Groupid"
           }
         },
         "additionalProperties": false,
@@ -13584,7 +13585,8 @@
         "required": [
           "name"
         ],
-        "title": "StorageCreate"
+        "title": "StorageCreate",
+        "description": "Register a directory as a managed volume.\n\nThe directory is computed from the kind and these coordinates rather than being\naccepted from the caller: the layout is fixed, and a caller-chosen path would be\na way to point a volume at a directory that is not theirs."
       },
       "StorageDetail": {
         "properties": {
@@ -13628,8 +13630,35 @@
             ],
             "title": "Statusmessage"
           },
+          "hostPath": {
+            "type": "string",
+            "title": "Hostpath"
+          },
+          "dirName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dirname"
+          },
+          "isGroupLevel": {
+            "type": "boolean",
+            "title": "Isgrouplevel",
+            "default": false
+          },
           "workspaceId": {
-            "type": "integer",
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Workspaceid"
           },
           "workspaceName": {
@@ -13716,17 +13745,6 @@
               }
             ],
             "title": "Accessmode"
-          },
-          "storageClass": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Storageclass"
           },
           "defaultMountPath": {
             "type": "string",
@@ -13783,17 +13801,6 @@
             ],
             "title": "K8Snamespace"
           },
-          "sizeBytes": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Sizebytes"
-          },
           "checkedAt": {
             "anyOf": [
               {
@@ -13829,7 +13836,7 @@
           "displayName",
           "kind",
           "status",
-          "workspaceId",
+          "hostPath",
           "capacityGb",
           "usedGb",
           "defaultMountPath",
@@ -13844,14 +13851,12 @@
       "StorageKind": {
         "type": "string",
         "enum": [
-          "personal_home",
-          "personal_data",
+          "user_volume",
           "group_share",
-          "dataset",
-          "object"
+          "global_share"
         ],
         "title": "StorageKind",
-        "description": "What a volume is *for*. The kind decides who may own it and how it mounts.\n\nThis is not cosmetic taxonomy. A ``dataset`` is read-only everywhere it\nappears — enforced at the mount, not merely in the UI — because the one\nthing worse than an unreadable dataset is a dataset that a training job\nsilently overwrote. ``PERSONAL_HOME`` is the volume that makes an instance\ndisposable: it is what survives when the container is deleted."
+        "description": "What a managed volume *is*, which fixes who owns it and where it lives.\n\nNot taxonomy: the kind determines two things at once — what the volume must\nbe bound to, and which directory under ``settings.storage_root`` it maps to.\n\n``USER_VOLUME``\n    One per user, at ``{root}/{group}/{username}``. Every workload the user\n    starts mounts it, so it is where their code, environments and results\n    actually live — which is what makes a container disposable.\n``GROUP_SHARE``\n    Belongs to a group. With a directory name it is\n    ``{root}/{group}/{dir_name}``; **without one it is the group's own\n    directory** ``{root}/{group}``, which exposes every member's home and is\n    therefore mountable only by a group administrator.\n``GLOBAL_SHARE``\n    Belongs to nobody, at ``{root}/_global/{name}``, for data shared across\n    the whole installation."
       },
       "StorageResize": {
         "properties": {
@@ -13868,11 +13873,12 @@
           "capacityGb"
         ],
         "title": "StorageResize",
-        "description": "Grow a volume.\n\nOnly the target size is accepted. There is no `shrink` flag, because\nKubernetes cannot do it and offering the option would produce a form that\nfails on submit."
+        "description": "Raise a volume's recorded capacity.\n\nOnly the target size is accepted, and only upward. This changes the number the\nplatform accounts for, not the cluster: a statically provisioned claim cannot be\nexpanded at all, and a hostPath volume's size is not enforced by anything."
       },
       "StorageStatus": {
         "type": "string",
         "enum": [
+          "available",
           "pending",
           "bound",
           "resizing",
@@ -13881,7 +13887,7 @@
           "deleting"
         ],
         "title": "StorageStatus",
-        "description": "Lifecycle of a volume.\n\n``PENDING`` and ``BOUND`` mirror the PersistentVolumeClaim phases rather\nthan inventing a parallel vocabulary, so an operator reading\n``kubectl get pvc`` and the UI see the same word."
+        "description": "Lifecycle of a volume.\n\nThese mirror the PersistentVolume and PersistentVolumeClaim phases rather\nthan inventing a parallel vocabulary, so an operator reading\n``kubectl get pv,pvc`` and the UI see the same words.\n\n``AVAILABLE`` is the one value the cluster does not have a claim-side word\nfor: it means the directory is registered and ready, and nothing has claimed\nit yet. A global share sits here until the first workload mounts it, because\na claim lives in a namespace and a global share belongs to none."
       },
       "StorageSummary": {
         "properties": {
@@ -13925,8 +13931,35 @@
             ],
             "title": "Statusmessage"
           },
+          "hostPath": {
+            "type": "string",
+            "title": "Hostpath"
+          },
+          "dirName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dirname"
+          },
+          "isGroupLevel": {
+            "type": "boolean",
+            "title": "Isgrouplevel",
+            "default": false
+          },
           "workspaceId": {
-            "type": "integer",
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Workspaceid"
           },
           "workspaceName": {
@@ -14014,17 +14047,6 @@
             ],
             "title": "Accessmode"
           },
-          "storageClass": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Storageclass"
-          },
           "defaultMountPath": {
             "type": "string",
             "title": "Defaultmountpath"
@@ -14067,7 +14089,7 @@
           "displayName",
           "kind",
           "status",
-          "workspaceId",
+          "hostPath",
           "capacityGb",
           "usedGb",
           "defaultMountPath",

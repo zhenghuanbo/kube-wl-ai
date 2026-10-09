@@ -125,6 +125,21 @@ def storage_pvc_name(storage_id: int, storage_name: str) -> str:
     return truncate_name(f"{WORKLOAD_PREFIX}-vol-{slug(storage_name)}-{storage_id}")
 
 
+def storage_pv_name(storage_id: int, storage_name: str, *, namespace: str | None = None) -> str:
+    """PersistentVolume name for a managed directory.
+
+    A PersistentVolume binds to exactly one claim, and a claim lives in exactly
+    one namespace — so a directory reached from two namespaces needs two
+    PersistentVolumes. That is why the namespace is part of the name: the two
+    objects are genuinely different objects and must not collide on one name.
+
+    ``namespace=None`` gives the unsuffixed name, which is what a volume reached
+    from only its own namespace gets.
+    """
+    base = storage_pvc_name(storage_id, storage_name)
+    return base if not namespace else truncate_name(f"{base}-{slug(namespace)}")
+
+
 def is_managed_workload(name: str) -> bool:
     """Whether a workload object belongs to this platform."""
     return name.startswith(f"{WORKLOAD_PREFIX}-")

@@ -1,19 +1,20 @@
 <script setup lang="ts">
 /**
- * Persistent storage.
+ * Managed storage: one directory, one volume.
  *
- * The page is built around one idea: a volume is a thing in its own right. It
- * exists before any instance mounts it and outlives every instance that did, so
- * the primary list is volumes, not attachments, and nothing here is created as
- * a side effect of creating a container.
+ * The page is built around one idea: a volume is a *directory the platform names*,
+ * not space it allocates. It exists before any instance mounts it and outlives
+ * every instance that did, and its identity is the path — so the path is a column
+ * rather than a detail.
  *
- * What each caller sees is decided on the server — a personal volume is private,
- * a group share is visible to its group — so this page never has to work out
- * who may see what. It decides what is worth showing.
+ * Every mutation needs `storage:manage`, because the layout is provisioned outside
+ * the platform. A user reads their own volume and their group's shares; an
+ * administrator places them.
  */
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '@/api/client'
+import { listGroups, type GroupSummary } from '@/api/groups'
 import {
   createStorage,
   deleteStorage,
@@ -25,6 +26,7 @@ import {
   resizeStorage,
   updateStorage,
 } from '@/api/storages'
+import { listUsers, type UserSummary } from '@/api/users'
 import { getMyWorkspace, listWorkspaces } from '@/api/workspaces'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
@@ -52,14 +54,7 @@ import type { WorkspaceSummary } from '@/types/resource'
 const { can, isAdmin } = usePermissions()
 const notifications = useNotificationStore()
 
-const canCreate = computed(() => can('storage:create'))
-const canManageShared = computed(() => can('storage:manage'))
-const canDelete = computed(() => can('storage:delete'))
-
-/** Kinds this caller may actually publish. */
-const creatableKinds = computed(() =>
-  STORAGE_KINDS.filter((kind) => kind.selfService || canManageShared.value),
-)
+const canManage = computed(() => can('storage:manage'))
 
 // --- listing -----------------------------------------------------------------
 const rows = ref<StorageSummary[]>([])
@@ -132,7 +127,7 @@ watch(
 )
 
 onMounted(async () => {
-  await Promise.all([load(), loadUsage(), loadWorkspaces()])
+  await Promise.all([load(), loadUsage(), loadWorkspaces(), loadBindings()])
 })
 
 // --- workspace lookups -------------------------------------------------------
@@ -152,10 +147,15 @@ async function loadWorkspaces(): Promise<void> {
   }
 }
 
-const workspaceName = (id: number): string =>
-  workspaces.value.find((row) => row.id === id)?.displayName ||
-  (myWorkspace.value?.id === id ? myWorkspace.value.displayName : '') ||
-  `#${id}`
+/** A global share has no workspace at all, which is a real answer and not a gap. */
+const workspaceName = (id?: number | null): string => {
+  if (id === null || id === undefined) return '—'
+  return (
+    workspaces.value.find((row) => row.id === id)?.displayName ||
+    (myWorkspace.value?.id === id ? myWorkspace.value.displayName : '') ||
+    `#${id}`
+  )
+}
 
 // --- create / edit dialog ----------------------------------------------------
 const dialogOpen = ref(false)
@@ -166,8 +166,10 @@ const form = reactive({
   name: '',
   displayName: '',
   description: '',
-  kind: 'personal_data' as StorageKind,
-  workspaceId: null as number | null,
+  kind: 'user_volume' as StorageKind,
+  ownerUserId: null as number | null,
+  groupId: null as number | null,
+  dirName: '',
   capacityGb: 20,
   source: '',
   isReadOnly: false,
@@ -176,11 +178,33 @@ const form = reactive({
 const selectedKind = computed(() => storageKindMeta(form.kind))
 const isEditing = computed(() => editing.value !== null)
 
+// --- who a volume is bound to ------------------------------------------------
+//
+// Loaded only for a caller who may create, because the pickers only exist in that
+// dialog. A page that fetched every user for a reader would be disclosing the
+// roster to somebody who has no use for it.
+const groups = ref<GroupSummary[]>([])
+const users = ref<UserSummary[]>([])
+
+async function loadBindings(): Promise<void> {
+  if (!canManage.value) return
+  try {
+    const [groupPage, userPage] = await Promise.all([
+      listGroups({ pageSize: 200 }),
+      listUsers({ pageSize: 200 }),
+    ])
+    groups.value = groupPage.items
+    users.value = userPage.items
+  } catch (error) {
+    if (error instanceof ApiError) notifications.error(error.message)
+  }
+}
+
 /**
  * The name is fixed after creation.
  *
- * It is part of the PVC's name in the cluster, so changing it here would either
- * rename nothing or orphan the claim — and a volume whose record and whose
+ * It is part of the PV and PVC names in the cluster, so changing it here would
+ * either rename nothing or orphan the claim — and a volume whose record and whose
  * claim disagree is worse than one with an awkward name.
  */
 const nameEditable = computed(() => !isEditing.value)
@@ -191,8 +215,10 @@ function openCreate(): void {
     name: '',
     displayName: '',
     description: '',
-    kind: creatableKinds.value[0]?.value ?? 'personal_data',
-    workspaceId: myWorkspace.value?.id ?? null,
+    kind: 'user_volume' as StorageKind,
+    ownerUserId: null,
+    groupId: groups.value[0]?.id ?? null,
+    dirName: '',
     capacityGb: 20,
     source: '',
     isReadOnly: false,
@@ -209,7 +235,9 @@ async function openEdit(row: StorageSummary): Promise<void> {
       displayName: detail.displayName,
       description: detail.description ?? '',
       kind: detail.kind,
-      workspaceId: detail.workspaceId,
+      ownerUserId: detail.ownerUserId ?? null,
+      groupId: detail.groupId ?? null,
+      dirName: detail.dirName ?? '',
       capacityGb: detail.capacityGb,
       source: detail.source ?? '',
       isReadOnly: detail.isReadOnly,
@@ -223,11 +251,11 @@ async function openEdit(row: StorageSummary): Promise<void> {
 const formValid = computed(() => {
   if (form.capacityGb < MIN_CAPACITY_GB || form.capacityGb > MAX_CAPACITY_GB) return false
   if (!nameEditable.value) return true
-  if (isAdmin.value && workspaces.value.length && form.workspaceId === null) return false
   if (!/^[a-z0-9][a-z0-9-]*$/.test(form.name)) return false
-  // A dataset without provenance cannot be judged by the next person, so the
-  // server refuses it; say so here rather than after a round trip.
-  if (selectedKind.value.requiresSource && !form.source.trim()) return false
+  // The directory is derived from these, so a missing one is not a preference the
+  // server could default — it is a volume with no path to point at.
+  if (selectedKind.value.binding === 'user' && form.ownerUserId === null) return false
+  if (selectedKind.value.binding === 'group' && form.groupId === null) return false
   return true
 })
 
@@ -240,9 +268,7 @@ async function save(): Promise<void> {
         displayName: form.displayName || form.name,
         description: form.description || null,
         source: form.source || null,
-        // A dataset is always read-only; offering to change that would be a
-        // control that does nothing.
-        isReadOnly: selectedKind.value.readOnly ? undefined : form.isReadOnly,
+        isReadOnly: form.isReadOnly,
       })
       notifications.success('已保存')
     } else {
@@ -251,9 +277,14 @@ async function save(): Promise<void> {
         displayName: form.displayName || form.name,
         description: form.description || null,
         kind: form.kind,
-        workspaceId: form.workspaceId,
+        // Only the field the kind actually uses. Sending the others would create a
+        // volume whose record disagrees with its directory.
+        ownerUserId: selectedKind.value.binding === 'user' ? form.ownerUserId : null,
+        groupId: selectedKind.value.binding === 'group' ? form.groupId : null,
+        // Empty means "the group's own directory", which is a real choice and not
+        // an omission, so it is sent as null rather than as an empty string.
+        dirName: selectedKind.value.hasDirName ? form.dirName.trim() || null : null,
         capacityGb: form.capacityGb,
-        source: form.source || null,
         isReadOnly: form.isReadOnly || undefined,
       })
       notifications.success(`存储 ${created.displayName} 已创建`)
@@ -398,19 +429,33 @@ interface Column {
 }
 
 /**
- * Declared explicitly. Left to itself, `v-data-table` builds one column per
- * field of the first row, which puts `pvcName`, `k8sNamespace` and `workspaceId`
- * on screen and leaves the `capacity` and `owner` slots with no column to render
- * into — so the table silently showed raw values instead of the intended cells.
+ * Declared explicitly. Left to itself, `v-data-table` builds one column per field
+ * of the first row, which puts `pvcName`, `k8sNamespace` and `hostPath` on screen
+ * as raw values and leaves the `capacity` and `owner` slots with no column to
+ * render into.
+ *
+ * The directory gets its own column because it *is* the volume: two rows that
+ * differ only in `hostPath` are two different volumes, and that is the fastest
+ * thing for an administrator to check.
+ *
+ * The actions column is dropped for a reader. Every mutation needs
+ * `storage:manage`, so a reader's row of buttons could only ever produce a 403 —
+ * and a visible control that refuses is worse than no control.
  */
-const headers: Column[] = [
-  { title: '存储', key: 'name' },
-  { title: '类型', key: 'kind', width: '150px' },
-  { title: '容量', key: 'capacity', width: '170px' },
-  { title: '状态', key: 'status', width: '150px' },
-  { title: '拥有者', key: 'owner', width: '170px' },
-  { title: '操作', key: 'actions', align: 'end', width: '180px' },
-]
+const headers = computed<Column[]>(() => {
+  const columns: Column[] = [
+    { title: '存储', key: 'name' },
+    { title: '目录', key: 'hostPath' },
+    { title: '类型', key: 'kind', width: '140px' },
+    { title: '容量', key: 'capacity', width: '150px' },
+    { title: '状态', key: 'status', width: '150px' },
+    { title: '拥有者', key: 'owner', width: '160px' },
+  ]
+  if (canManage.value) {
+    columns.push({ title: '操作', key: 'actions', align: 'end', width: '180px' })
+  }
+  return columns
+})
 
 // --- helpers -----------------------------------------------------------------
 function percentUsed(row: StorageSummary): number {
@@ -423,18 +468,6 @@ function usedTone(row: StorageSummary): string {
   if (used >= 90) return 'error'
   if (used >= 75) return 'warning'
   return 'primary'
-}
-
-function formatBytes(bytes?: number | null): string {
-  if (!bytes || bytes <= 0) return '—'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let value = bytes
-  let unit = 0
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024
-    unit += 1
-  }
-  return `${value.toFixed(value >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`
 }
 
 function formatTime(value?: string | null): string {
@@ -468,7 +501,7 @@ function onRowClick(_event: unknown, row: unknown): void {
     <PageHeader title="存储" subtitle="独立于容器的持久化卷：容器可以随时删掉，数据不会跟着走">
       <template #actions>
         <v-btn
-          v-if="canCreate"
+          v-if="canManage"
           color="primary"
           variant="flat"
           prepend-icon="mdi-plus"
@@ -525,9 +558,9 @@ function onRowClick(_event: unknown, row: unknown): void {
       <v-select
         v-model="filters.status"
         :items="[
-          { title: '已就绪', value: 'bound' },
-          { title: '等待中', value: 'pending' },
-          { title: '扩容中', value: 'resizing' },
+          { title: '已绑定', value: 'bound' },
+          { title: '待绑定', value: 'pending' },
+          { title: '目录已登记', value: 'available' },
           { title: '失败', value: 'failed' },
           { title: '已释放', value: 'released' },
         ]"
@@ -572,9 +605,9 @@ function onRowClick(_event: unknown, row: unknown): void {
           <EmptyState
             icon="mdi-harddisk-plus-outline"
             title="还没有存储卷"
-            description="建一个个人数据盘，容器删掉之后里面的数据还会在。"
+            description="存储卷把一个存储目录登记到系统里。用户卷由管理员按「组/用户名」创建，创建后会自动挂载到容器的 /home/用户名。"
           >
-            <v-btn v-if="canCreate" color="primary" variant="flat" @click="openCreate">
+            <v-btn v-if="canManage" color="primary" variant="flat" @click="openCreate">
               新建存储
             </v-btn>
           </EmptyState>
@@ -587,6 +620,15 @@ function onRowClick(_event: unknown, row: unknown): void {
               <div class="font-weight-medium">{{ item.displayName }}</div>
               <div class="text-caption text-medium-emphasis wl-mono">{{ item.name }}</div>
             </div>
+          </div>
+        </template>
+
+        <template #item.hostPath="{ item }">
+          <div class="wl-mono text-caption" style="word-break: break-all">
+            {{ item.hostPath }}
+          </div>
+          <div v-if="item.isGroupLevel" class="text-caption text-warning">
+            组本级目录 · 仅组管理员可挂载
           </div>
         </template>
 
@@ -631,7 +673,7 @@ function onRowClick(_event: unknown, row: unknown): void {
         <template #item.owner="{ item }">
           <div>{{ item.ownerDisplayName || item.ownerUsername || '—' }}</div>
           <div class="text-caption text-medium-emphasis">
-            {{ workspaceName(item.workspaceId) }}
+            {{ item.groupName || workspaceName(item.workspaceId) }}
           </div>
         </template>
 
@@ -680,7 +722,7 @@ function onRowClick(_event: unknown, row: unknown): void {
                   size="small"
                   variant="text"
                   color="error"
-                  :disabled="!canDelete || !item.isActive"
+                  :disabled="!item.isActive"
                   @click="openDelete(item)"
                 />
               </template>
@@ -709,7 +751,7 @@ function onRowClick(_event: unknown, row: unknown): void {
             <v-col cols="12">
               <v-select
                 v-model="form.kind"
-                :items="creatableKinds"
+                :items="STORAGE_KINDS"
                 item-title="title"
                 item-value="value"
                 label="类型 *"
@@ -781,34 +823,74 @@ function onRowClick(_event: unknown, row: unknown): void {
             </v-col>
 
             <!--
-              Required for an administrator creating a volume: a global admin is
-              a member of no workspace, so the server has nothing to infer and
-              would answer with a bare "no workspace" 400.
+              The directory is derived, never typed. Which field is required
+              depends on the kind, and the backend takes the group from the user
+              for a user volume, so only a group share asks for one.
+
+              The workspace is not asked for at all: one group has exactly one, so
+              a picker would offer a choice that does not exist.
             -->
-            <v-col v-if="isAdmin && workspaces.length" cols="12" sm="6">
+            <v-col v-if="selectedKind.binding === 'user' && !isEditing" cols="12" sm="6">
               <v-select
-                v-model="form.workspaceId"
-                :items="workspaces"
+                v-model="form.ownerUserId"
+                :items="users"
                 item-title="displayName"
                 item-value="id"
-                label="工作空间 *"
+                label="用户 *"
                 density="comfortable"
                 variant="outlined"
                 hide-details="auto"
-                :disabled="isEditing"
-                :rules="[(v: number | null) => v !== null || '请选择工作空间']"
+                :rules="[(v: number | null) => v !== null || '请选择用户']"
+              >
+                <template #item="{ props: itemProps, item }">
+                  <v-list-item
+                    v-bind="itemProps"
+                    :subtitle="item.username"
+                    :title="item.displayName || item.username"
+                  />
+                </template>
+              </v-select>
+              <div class="text-caption text-medium-emphasis mt-1">
+                目录取自该用户所在组：
+                <span class="wl-mono">/storage/kube-wl/{组}/{用户名}</span>
+              </div>
+            </v-col>
+
+            <v-col v-if="selectedKind.binding === 'group' && !isEditing" cols="12" sm="6">
+              <v-select
+                v-model="form.groupId"
+                :items="groups"
+                item-title="displayName"
+                item-value="id"
+                label="用户组 *"
+                density="comfortable"
+                variant="outlined"
+                hide-details="auto"
+                :rules="[(v: number | null) => v !== null || '请选择用户组']"
               />
             </v-col>
 
-            <v-col v-if="selectedKind.requiresSource" cols="12">
+            <v-col v-if="selectedKind.hasDirName && !isEditing" cols="12">
               <v-text-field
-                v-model="form.source"
-                label="数据来源 *"
+                v-model="form.dirName"
+                label="目录名"
                 density="comfortable"
                 variant="outlined"
                 hide-details="auto"
-                placeholder="https://example.edu/datasets/imagenet"
-                hint="数据集必须写清来源：下一个人要靠它判断这份数据能不能用、可不可信。"
+                placeholder="留空则登记整个组目录"
+                hint="留空会创建「组本级存储卷」，即整个组目录 —— 它包含每个成员的个人目录，因此只有组管理员可以挂载。"
+                persistent-hint
+              />
+            </v-col>
+
+            <v-col v-if="isEditing" cols="12">
+              <v-text-field
+                v-model="form.source"
+                label="备注"
+                density="comfortable"
+                variant="outlined"
+                hide-details="auto"
+                hint="只对人有用，不参与任何目录推导。"
                 persistent-hint
               />
             </v-col>
@@ -825,7 +907,7 @@ function onRowClick(_event: unknown, row: unknown): void {
               />
             </v-col>
 
-            <v-col v-if="!selectedKind.readOnly" cols="12">
+            <v-col cols="12">
               <v-switch
                 v-model="form.isReadOnly"
                 label="只读挂载"
@@ -837,12 +919,6 @@ function onRowClick(_event: unknown, row: unknown): void {
               <div class="text-caption text-medium-emphasis">
                 开启后容器只能读取。这是挂载级别的限制，不是界面上的提示。
               </div>
-            </v-col>
-            <v-col v-else cols="12">
-              <v-alert type="info" variant="tonal" density="compact">
-                数据集始终以只读方式挂载 —— 否则「只读」只是接口响应里的一句话，
-                训练任务照样能写穿它。
-              </v-alert>
             </v-col>
           </v-row>
         </v-card-text>
@@ -948,42 +1024,59 @@ function onRowClick(_event: unknown, row: unknown): void {
         <v-list density="compact" class="wl-detail-list">
           <v-list-item>
             <template #prepend><v-icon icon="mdi-folder-outline" /></template>
-            <v-list-item-title>挂载点</v-list-item-title>
+            <v-list-item-title>存储目录</v-list-item-title>
+            <v-list-item-subtitle class="wl-mono">{{ detail.hostPath }}</v-list-item-subtitle>
+          </v-list-item>
+          <v-list-item>
+            <template #prepend><v-icon icon="mdi-arrow-right-thin" /></template>
+            <v-list-item-title>容器内挂载点</v-list-item-title>
             <v-list-item-subtitle class="wl-mono">{{ detail.defaultMountPath }}</v-list-item-subtitle>
           </v-list-item>
           <v-list-item>
             <template #prepend><v-icon icon="mdi-harddisk" /></template>
-            <v-list-item-title>容量</v-list-item-title>
-            <v-list-item-subtitle>{{ detail.capacityGb }} GB</v-list-item-subtitle>
+            <v-list-item-title>容量（账面）</v-list-item-title>
+            <v-list-item-subtitle>
+              {{ detail.capacityGb }} GB
+              <span class="text-medium-emphasis">
+                · hostPath 不强制容量，这个数字只用于统计
+              </span>
+            </v-list-item-subtitle>
           </v-list-item>
-          <v-list-item>
-            <template #prepend><v-icon icon="mdi-database-outline" /></template>
-            <v-list-item-title>实际占用</v-list-item-title>
-            <v-list-item-subtitle>{{ formatBytes(detail.sizeBytes) }}</v-list-item-subtitle>
+          <v-list-item v-if="detail.isGroupLevel">
+            <template #prepend><v-icon icon="mdi-shield-account-outline" /></template>
+            <v-list-item-title>组本级目录</v-list-item-title>
+            <v-list-item-subtitle>
+              这就是整个组目录（{{ detail.groupName || '—' }}），包含每个成员的个人目录。
+              普通成员看不到它，只有组管理员可以挂载。
+            </v-list-item-subtitle>
+          </v-list-item>
+          <v-list-item v-else-if="detail.dirName">
+            <template #prepend><v-icon icon="mdi-folder-multiple-outline" /></template>
+            <v-list-item-title>组内目录名</v-list-item-title>
+            <v-list-item-subtitle class="wl-mono">{{ detail.dirName }}</v-list-item-subtitle>
           </v-list-item>
           <v-list-item>
             <template #prepend><v-icon icon="mdi-account-outline" /></template>
             <v-list-item-title>拥有者</v-list-item-title>
             <v-list-item-subtitle>
               {{ detail.ownerDisplayName || detail.ownerUsername || '—' }} ·
-              {{ workspaceName(detail.workspaceId) }}
+              {{ detail.groupName || workspaceName(detail.workspaceId) }}
             </v-list-item-subtitle>
           </v-list-item>
-          <v-list-item v-if="detail.pvcName">
+          <v-list-item>
             <template #prepend><v-icon icon="mdi-kubernetes" /></template>
             <v-list-item-title>集群对象</v-list-item-title>
             <v-list-item-subtitle class="wl-mono">
-              {{ detail.k8sNamespace }} / {{ detail.pvcName }}
+              <template v-if="detail.pvcName">{{ detail.k8sNamespace }} / {{ detail.pvcName }}</template>
+              <template v-else>
+                尚无存储声明 —— 全局共享卷在每个挂载它的命名空间各需要一个，
+                因此要等到第一次被挂载时才创建。
+              </template>
             </v-list-item-subtitle>
-          </v-list-item>
-          <v-list-item v-if="detail.storageClass">
-            <template #prepend><v-icon icon="mdi-layers-outline" /></template>
-            <v-list-item-title>StorageClass</v-list-item-title>
-            <v-list-item-subtitle class="wl-mono">{{ detail.storageClass }}</v-list-item-subtitle>
           </v-list-item>
           <v-list-item v-if="detail.source">
             <template #prepend><v-icon icon="mdi-link-variant" /></template>
-            <v-list-item-title>来源</v-list-item-title>
+            <v-list-item-title>备注</v-list-item-title>
             <v-list-item-subtitle class="wl-mono">{{ detail.source }}</v-list-item-subtitle>
           </v-list-item>
           <v-list-item>

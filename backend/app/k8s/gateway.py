@@ -217,15 +217,27 @@ class SecretSpec:
 
 @dataclass(frozen=True, slots=True)
 class PvcSpec:
-    """A PersistentVolumeClaim for an instance home directory."""
+    """A PersistentVolumeClaim.
+
+    Used for two unrelated things: a managed volume's claim, which is bound to a
+    statically created PersistentVolume, and an instance's scratch claim, which
+    relies on dynamic provisioning. ``volume_name`` is what tells them apart.
+    """
 
     name: str
     namespace: str
     size_gb: int
-    #: None means "whatever the cluster's default StorageClass is".
+    #: ``None`` means "whatever the cluster's default StorageClass is"; the empty
+    #: string means "no StorageClass at all", which is how a claim against a
+    #: statically created volume is asked for. The two are not interchangeable:
+    #: an empty string is a decision, and leaving the field out is not.
     storage_class: str | None = None
     access_modes: tuple[str, ...] = ("ReadWriteOnce",)
     labels: dict[str, str] = field(default_factory=dict)
+    #: Pre-bind this claim to one specific volume. Required for a static volume:
+    #: without it the claim waits for a provisioner that will never run, which is
+    #: the "Pending forever" failure this whole layer exists to avoid.
+    volume_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,17 +245,18 @@ class VolumeMountSpec:
     """An additional volume attached to a workload.
 
     ``read_only`` is applied to both the volume and the mount. Setting only the
-    mount leaves the volume writable, and a process that opens the device node
-    or remounts can then write to a dataset the platform promised was
-    immutable.
+    mount leaves the volume writable, and a process that opens the device node or
+    remounts can then write to a share the platform promised was read-only.
+
+    There is deliberately no ``sub_path``: one directory is one volume, so selecting
+    part of a volume is not something the platform needs to express. Where several
+    shares of one kind are attached at once, each gets its own mount point instead —
+    see ``storages.resolve_mount_paths``.
     """
 
     pvc_name: str
     mount_path: str
     read_only: bool = False
-    #: Mount a sub-directory of the volume rather than its root, so a shared
-    #: volume can hold per-user folders without exposing them all.
-    sub_path: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,6 +274,47 @@ class PvcInfo:
     #: pod schedules, which is normal and must not be reported as a failure.
     message: str | None = None
     access_modes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PvSpec:
+    """A statically provisioned PersistentVolume backed by a host directory.
+
+    Static because the directory already exists and already holds the user's
+    data. There is no provisioner to run and nothing to create: the volume's only
+    job is to make an existing path mountable under a name the platform controls.
+
+    Because that directory is also where the data actually lives, the reclaim
+    policy is fixed at ``Retain`` — see the client, which does not take it from
+    the caller. A volume whose deletion would delete the directory is not a
+    lifecycle choice worth offering.
+    """
+
+    name: str
+    host_path: str
+    #: Bookkeeping, not enforcement. A hostPath volume cannot limit anything, so
+    #: this exists so the claim's request can be satisfied at bind time and so the
+    #: platform can account for what it has handed out. It is not a quota.
+    capacity_gb: int
+    access_modes: tuple[str, ...] = ("ReadWriteMany",)
+    labels: dict[str, str] = field(default_factory=dict)
+    #: Pre-bind to one claim, so this volume cannot be taken by another. Set
+    #: together with ``claim_name`` or not at all.
+    claim_namespace: str | None = None
+    claim_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PvInfo:
+    """The observed state of a PersistentVolume."""
+
+    name: str
+    #: ``Available`` | ``Bound`` | ``Released`` | ``Failed``
+    phase: str
+    host_path: str | None = None
+    capacity_gb: int | None = None
+    claim_namespace: str | None = None
+    claim_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -437,18 +491,39 @@ class K8sGateway(Protocol):
         """Create or replace a Secret."""
 
     def apply_pvc(self, spec: PvcSpec) -> None:
-        """Create the claim if absent; never expand it either.
+        """Create the claim if absent; never rewrite one that exists.
 
-        Growth is a separate call on purpose: Kubernetes permits expansion but
-        never shrinkage, so a resize that silently failed to grow would leave
-        the row and the cluster disagreeing.
+        A bound claim is not re-specified. Its size, its access modes and — above
+        all — the volume it is pinned to are what make it mean one specific
+        directory, and rewriting any of them underneath a running pod repoints that
+        pod's data. Expansion in particular is not merely unwise here but
+        impossible: the API server refuses it for a statically provisioned claim.
         """
 
     def read_pvc(self, namespace: str, name: str) -> PvcInfo | None:
         """Read one claim; ``None`` when it does not exist."""
 
-    def resize_pvc(self, namespace: str, name: str, size_gb: int) -> None:
-        """Grow a claim. Shrinking is rejected by Kubernetes and by this method."""
+    # --- statically provisioned volumes ------------------------------------
+    #: Cluster-scoped, and created by the platform rather than by a provisioner.
+    #: They exist because the directory they point at already exists: a managed
+    #: volume is a way of naming a path, not a way of allocating one.
+    def apply_pv(self, spec: PvSpec) -> None:
+        """Create the volume if absent; never rewrite one that exists.
+
+        Not a replace: the claim reference and the host path are what make this
+        volume mean one specific directory, and rewriting either underneath a
+        bound claim would repoint somebody's mounted data at a different place.
+        """
+
+    def read_pv(self, name: str) -> PvInfo | None:
+        """Read one volume; ``None`` when it does not exist."""
+
+    def delete_pv(self, name: str) -> None:
+        """Delete a volume object.
+
+        Deletes the *object*. With the reclaim policy this layer pins, the
+        directory behind it is never touched — which is the point.
+        """
 
     def scale_deployment(self, namespace: str, name: str, replicas: int) -> None:
         """Start (1) or stop (0) a workload by scaling it."""
@@ -536,6 +611,10 @@ class FakeK8sGateway:
         #: scripted state reports ``Bound`` at its requested size, because that
         #: is what a working cluster does and what most tests mean.
         self.pvc_states: dict[str, PvcInfo] = {}
+        #: Statically provisioned volumes. Cluster-scoped, so keyed by name alone
+        #: — unlike claims, which are only unique inside a namespace.
+        self.pvs: dict[str, PvSpec] = {}
+        self.pv_states: dict[str, PvInfo] = {}
         self.pods: dict[str, PodInfo] = {}
         #: Scripted log output per ``"namespace/pod"``.
         self.pod_logs: dict[str, str] = {}
@@ -658,16 +737,38 @@ class FakeK8sGateway:
             access_modes=spec.access_modes,
         )
 
-    def resize_pvc(self, namespace: str, name: str, size_gb: int) -> None:
-        self._record("resize_pvc", namespace, name, size_gb)
-        key = f"{namespace}/{name}"
-        existing = self.pvcs.get(key)
-        if existing is None:
-            raise K8sError(f"cannot resize missing claim {key}")
-        if size_gb < existing.size_gb:
-            # Mirrors the API server: PVCs may grow, never shrink.
-            raise K8sError(f"cannot shrink claim {key} from {existing.size_gb} to {size_gb}")
-        self.pvcs[key] = replace(existing, size_gb=size_gb)
+    def apply_pv(self, spec: PvSpec) -> None:
+        self._record("apply_pv", spec.name)
+        # Never rewrite: the host path and the claim reference are what make this
+        # volume mean one specific directory. Re-applying over a bound volume
+        # would repoint somebody's mounted data at a different place.
+        if spec.name not in self.pvs:
+            self.pvs[spec.name] = spec
+
+    def read_pv(self, name: str) -> PvInfo | None:
+        self._record("read_pv", name)
+        scripted = self.pv_states.get(name)
+        if scripted is not None:
+            return scripted
+        spec = self.pvs.get(name)
+        if spec is None:
+            return None
+        # A volume with a claim reference is Bound to it and nothing else; one
+        # without is still Available. Reporting "Bound" unconditionally would
+        # hide the case the platform most needs to notice.
+        return PvInfo(
+            name=name,
+            phase="Bound" if spec.claim_name else "Available",
+            host_path=spec.host_path,
+            capacity_gb=spec.capacity_gb,
+            claim_namespace=spec.claim_namespace,
+            claim_name=spec.claim_name,
+        )
+
+    def delete_pv(self, name: str) -> None:
+        self._record("delete_pv", name)
+        self.pvs.pop(name, None)
+        self.pv_states.pop(name, None)
 
     def scale_deployment(self, namespace: str, name: str, replicas: int) -> None:
         self._record("scale_deployment", namespace, name, replicas)

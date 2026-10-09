@@ -273,30 +273,44 @@ class UsageKind(StrEnum):
 
 
 class StorageKind(StrEnum):
-    """What a volume is *for*. The kind decides who may own it and how it mounts.
+    """What a managed volume *is*, which fixes who owns it and where it lives.
 
-    This is not cosmetic taxonomy. A ``dataset`` is read-only everywhere it
-    appears — enforced at the mount, not merely in the UI — because the one
-    thing worse than an unreadable dataset is a dataset that a training job
-    silently overwrote. ``PERSONAL_HOME`` is the volume that makes an instance
-    disposable: it is what survives when the container is deleted.
+    Not taxonomy: the kind determines two things at once — what the volume must
+    be bound to, and which directory under ``settings.storage_root`` it maps to.
+
+    ``USER_VOLUME``
+        One per user, at ``{root}/{group}/{username}``. Every workload the user
+        starts mounts it, so it is where their code, environments and results
+        actually live — which is what makes a container disposable.
+    ``GROUP_SHARE``
+        Belongs to a group. With a directory name it is
+        ``{root}/{group}/{dir_name}``; **without one it is the group's own
+        directory** ``{root}/{group}``, which exposes every member's home and is
+        therefore mountable only by a group administrator.
+    ``GLOBAL_SHARE``
+        Belongs to nobody, at ``{root}/_global/{name}``, for data shared across
+        the whole installation.
     """
 
-    PERSONAL_HOME = "personal_home"
-    PERSONAL_DATA = "personal_data"
+    USER_VOLUME = "user_volume"
     GROUP_SHARE = "group_share"
-    DATASET = "dataset"
-    OBJECT = "object"
+    GLOBAL_SHARE = "global_share"
 
 
 class StorageStatus(StrEnum):
     """Lifecycle of a volume.
 
-    ``PENDING`` and ``BOUND`` mirror the PersistentVolumeClaim phases rather
+    These mirror the PersistentVolume and PersistentVolumeClaim phases rather
     than inventing a parallel vocabulary, so an operator reading
-    ``kubectl get pvc`` and the UI see the same word.
+    ``kubectl get pv,pvc`` and the UI see the same words.
+
+    ``AVAILABLE`` is the one value the cluster does not have a claim-side word
+    for: it means the directory is registered and ready, and nothing has claimed
+    it yet. A global share sits here until the first workload mounts it, because
+    a claim lives in a namespace and a global share belongs to none.
     """
 
+    AVAILABLE = "available"
     PENDING = "pending"
     BOUND = "bound"
     RESIZING = "resizing"
@@ -308,6 +322,7 @@ class StorageStatus(StrEnum):
 #: Statuses in which a volume still occupies its capacity.
 LIVE_STORAGE_STATUSES: frozenset[StorageStatus] = frozenset(
     {
+        StorageStatus.AVAILABLE,
         StorageStatus.PENDING,
         StorageStatus.BOUND,
         StorageStatus.RESIZING,

@@ -20,7 +20,7 @@
 | **容器实例** | 选镜像 + 资源组 + 规格 + 存储 → K8s Deployment/Service/Ingress/PVC，支持 SSH、终端、Jupyter、VSCode |
 | **应用程序** | 带介绍信息的可复用实例形态 |
 | **自定义任务** | 直接运行 shell 命令，结束即退出（K8s Job） |
-| **存储** | 文件存储 / 公共数据集 / 对象存储，基于 PV/PVC |
+| **存储** | **一个存储目录 = 一个存储卷**。静态 `hostPath` PV + 显式绑定的 PVC；三种粒度：用户卷 / 组共享 / 全局共享。增删改查只给全局管理员，普通用户只读 |
 | **镜像** | 对接 Harbor；一个用户组一个 project，个人镜像用用户名作仓库前缀；区分个人 / 官方 / 共享 |
 | **用量中心** | 统计用量（**不计费**），管理员可跨用户/组查询导出 |
 | **监控中心** | **只集成**集群侧既有的 Prometheus + Grafana |
@@ -244,18 +244,50 @@ max_runtime_seconds)` · `resource_specs(cpu_milli, memory_mb, gpu_type, gpu_cou
 
 ### 5.4 存储
 
-`storages(kind=personal_home|personal_data|group_share|dataset|object, capacity_gb, used_gb,
-storage_class, access_mode, medium, pvc_name, k8s_namespace, source, size_bytes, is_read_only,
-status, status_message, checked_at, workspace_id, group_id, owner_user_id, created_by, is_active)`
+`storages(kind=user_volume|group_share|global_share, host_path, dir_name, capacity_gb, used_gb,
+access_mode, pvc_name, k8s_namespace, source, status, status_message, checked_at, workspace_id,
+group_id, owner_user_id, created_by, is_active)`
+
+**卷的同一性就是目录**，不是分配出来的空间。`host_path` 是唯一键（部分唯一索引，只约束
+`is_active` 的行），所以"一个目录只能有一个卷"是数据库层面的事实，而不是服务层的约定；
+退休的行保留自己的路径，不挡住重新登记。
+
+目录全部由 `Settings.storage_root`（默认 `/storage/kube-wl`）推导，不接受手填：
+
+| 类型 | 目录 | 绑定 |
+| --- | --- | --- |
+| 用户存储卷 | `{root}/{组}/{用户名}` | `owner_user_id` 必填，组由该用户推导 |
+| 组共享卷（指定目录名） | `{root}/{组}/{dir_name}` | `group_id` 必填 |
+| 组本级卷（`dir_name` 为空） | `{root}/{组}` | 同上；整个组目录，**只有组管理员能挂载** |
+| 全局共享卷 | `{root}/_global/{name}` | 两者都不绑，`workspace_id` 为 NULL |
 
 `instance_storages(instance_id, storage_id, mount_path, is_read_only)` —— 挂载关系是显式的
 多对多，因为一个卷可以同时被多个实例挂载，而挂载点随实例而变。
 
-> `medium` **只是记录**，永远不发给集群：`PersistentVolumeClaim` 没有这个字段（那是
-> `emptyDir` 的）。它留着是为了让界面能提示某个 StorageClass 是 tmpfs —— 那种卷重启即
-> 清空，而且占用的是内存、不计入配额。`K8s` 层的 `PvcSpec` 上确实没有它。
+> 集群侧是**静态** `hostPath` PV + 显式绑定的 PVC（`storageClassName: ""` + `volumeName`），
+> 回收策略 `Retain`，容量**只是账面数字** —— `hostPath` 和 `local` 都不强制容量，PVC 也
+> **不能扩容**（`only dynamically provisioned pvc can be resized`）。所以 `resize_storage`
+> 只改记录，不调集群。
 >
-> `access_mode` 对 `dataset`/`group_share` 默认 `ReadWriteMany`，其余默认 `ReadWriteOnce`。
+> hostPath 的 type 是 **`DirectoryOrCreate`**：登记一个卷就够了，目录由 kubelet 在第一次挂载
+> 时创建，不需要单独的供给步骤。**代价是写错路径也会"成功"** —— kubelet 会把错的目录建出来，
+> 容器带着一个空目录起来，用户看到的是"我的数据没了"而不是一个错误。`type="Directory"` 会把
+> 它变成一次响亮的挂载失败。这是**有意识地选了前者**（用户明确确认）；缓解手段是只有管理员
+> 能登记卷（`storage:manage`），路径是手写一次而不是由租户能控制的东西推导出来的。
+>
+> **目录必须落在节点本地**：`hostPath` 是节点路径，不是网络存储。所以这套模型只在单节点或
+> 每个节点都有同一份目录时才成立；等 GPFS/Lustre 阶段到来时，`storage_root` 指向它们的挂载点，
+> 而 PV 类型要从 `hostPath` 换成对应的 CSI/local 卷 —— 那时才需要考虑 StorageClass 与配额。
+>
+> `access_mode` 对 `group_share`/`global_share` 默认 `ReadWriteMany`，`user_volume` 默认
+> `ReadWriteOnce`（它是单用户的）。
+>
+> 全局共享卷**没有 PVC**：claim 是命名空间级的，一个全局卷在每个挂载它的命名空间各需要一个，
+> 因此按需创建（名字里带命名空间后缀）。这也是它 `pvc_name` 为空、PV 停在 `Available` 的原因。
+>
+> 挂载点：用户卷 → `/home/{用户名}`（所有工作负载**隐式**挂载）；组共享 → `/mnt/group_shared`；
+> 全局共享 → `/mnt/global_shared`。共享卷**默认不挂**，由用户在创建工作负载时选择；同类多选时
+> 第一个占基础路径，后续的挂在 `{基础路径}/{卷名}` 下。
 
 ### 5.5 镜像
 
@@ -685,6 +717,18 @@ npm run build
 ./scripts/migrate.sh upgrade head
 ```
 
+> **想拿副本试迁移时注意**：`alembic/env.py` 的 URL 来自 `get_settings().database_url`，
+> **不读 `-x db_url=...`** —— 那个参数会被静默忽略，于是"在 `.smoke/` 的副本上先试一下"
+> 实际动的是 `backend/app.db`（工作目录下的真实开发库）。正确做法是把 `DATABASE_URL`
+> 环境变量指到副本：
+>
+> ```bash
+> cd backend
+> DATABASE_URL=sqlite+aiosqlite:///./.smoke/try.db .venv/bin/alembic upgrade head
+> ```
+>
+> `app.db` 已被 gitignore，误操作不会进提交，但里面可能是别人正在用的开发数据。
+
 CI（`.github/workflows/ci.yml`）对以上全部内容做门禁，并额外验证两个 Docker 镜像可构建。
 **任何一项红灯都不得合并。**
 
@@ -946,6 +990,11 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 | 验收测试 | `tests/test_acceptance_phase5.py`（**33** 项）、`tests/test_acceptance_phase5_images.py`（**36** 项） |
 | 冒烟脚本 | `scripts/smoke_phase5.py`（**65** 项，可重复执行） |
 
+> **注**：本表是 Phase 5 当时的交付记录。其中**存储**部分此后被
+> 「后续增量 — 存储卷重构（第一步）」重写：`StorageKind` 由五种收敛为三种，
+> `resize_pvc` 与 `storage:create/resize/delete` 已删除，卷的身份改由 `host_path` 承担。
+> 以 §5.4 与那个条目为准；这里保留原文是为了让"当时决定了什么"仍然可查。
+
 **交付（前端）**
 
 | 交付物 | 位置 |
@@ -975,20 +1024,21 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 1. **存储不再从属于实例**。`Storage` 是独立实体，PVC 名 `wl-vol-{name}-{id}`
    **不含实例信息** —— 否则删除那个恰好挂了它的实例就会把数据一起带走。
 2. **可见性按 *类型* 分叉**，这是 `visible_condition()` 返回裸条件而非
-   `policy.scope_filter()` 的原因：个人盘只有本人可见，而 `group_share`/`dataset`
-   对全组可见 —— 同一张表上两类行的可见规则不同，行级 scope 表达不了。
+   `policy.scope_filter()` 的原因：用户卷只有本人可见，而 `group_share`/`global_share`
+   的可见范围不同 —— 同一张表上三类行的可见规则不同，行级 scope 表达不了。
 3. **附加存储不重复计配额**。容量在**创建存储时**结算一次；实例挂载它时不再计入
    `storage_gb`，否则同一个 GB 会被收两次费，工作空间会莫名撞上配额上限。
-4. **失败的操作 ≠ 失败的卷**。扩容被集群拒绝时，容量与**状态都保持原样**，
-   不标记 `FAILED` —— 卷仍然是 Bound、仍然可用，把它标红会让用户去追一个不存在的问题。
-5. **数据集强制只读，且只读落在挂载点上**。`read_only` 同时写在 volume 和 mount 两处，
-   否则「只读」只是 API 响应里的一句话，训练任务照样能写穿。
-   数据集还必须有 `source`（`dataset_source_required`）：没有来源，下一个人无法判断能不能用。
+4. **失败的操作 ≠ 失败的卷**。核对失败时容量与**状态都保持原样**，不标记 `FAILED` ——
+   卷仍然可用，把它标红会让用户去追一个不存在的问题。
+5. **只读同时落在 volume 和 mount 两处**，否则「只读」只是 API 响应里的一句话，
+   训练任务照样能写穿。
 6. **先查可见性，再描述对象**。`resolve_attachments()` 把可见性检查放在最前面：
    「该存储属于其他工作空间」「该存储已停用」这类消息都在确认对象存在，
    而看不见它的人不该知道它存在（对普通用户是 404，对管理员才是解释性的 400）。
+   组本级卷是这条规则最尖锐的例子：它对普通成员**完全不可见**，正是因为它挂着每个人的
+   个人目录 —— 报 403 就等于确认了它存在。
 7. **`usage_by_owner` 统计的是「你被收费的」，不是「你能看见的」**。二者必须分开：
-   一个组共享数据集对五十个成员都可见、却不属于任何人，按可见性统计会让每个人都
+   一个组共享卷对五十个成员都可见、却不属于任何人，按可见性统计会让每个人都
    被告知自己占用了那 100 GB。全局管理员拿到的是全站总量（个人总量对他们没有意义）。
 
 8. **镜像目录是 Harbor 的缓存，不是真相**。同步可以回收仓库不再报告的条目 ——
@@ -1056,7 +1106,7 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 16. **删除被拒绝时，把实例名一起显示**。接口返回 409 并点名仍挂载它的实例，
    界面只显示「使用中」就把唯一有用的信息丢掉了 —— 用户需要知道的是**该去关哪个**。
 17. **两个页面的统计卡都是「我被收费的」，不是「我能看见的」**（后端已如此实现，
-    前端如实呈现）：组共享数据集对五十个成员都可见却不属于任何人。
+    前端如实呈现）：组共享卷对五十个成员都可见却不属于任何人。
 
 **本期踩到的坑**
 
@@ -1068,7 +1118,9 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
   `async def` 服务函数会返回协程而不执行 —— 扩容/删除会「成功」但什么都没发生。
   正确做法是服务内部**只**把阻塞的 gateway 调用丢进 `run_gateway`。
   （`mypy` 的 `unused-coroutine` 抓到了它。）
-- `PvcSpec.medium` 不存在：PVC 没有 medium 字段（那是 emptyDir 的），已移除。
+- `PvcSpec.medium` 从来就不该存在：PVC 没有 medium 字段（那是 emptyDir 的），已移除。
+  同一次收敛里，`VolumeMountSpec.sub_path` 也删了 —— 「一个目录一个卷」之后挂载不再需要
+  切分，留着它只会让两条路径可以表达同一件事（见「后续增量 — 存储卷重构」）。
 - **自定义校验器会让请求变成 500**：Pydantic 在 `ctx` 里挂的是原始异常对象，
   `ValueError` 无法 JSON 序列化，于是**任何** `field_validator` 拒绝取值时都会 500 ——
   而这恰恰是最需要一条清晰 422 的场合。现已在 `_handle_validation_error` 里把异常
@@ -1666,6 +1718,124 @@ Phase 8 结束时，`config/navigation.ts` 里还有两个入口指向 `Placehol
 另外**不引入 taint**：硬隔离会把"标签短暂落后"从"任务 Pending 但可自愈"变成"卡死"，
 而它防住的情况本来就不该发生。
 
+### ✅ 后续增量 — 存储卷重构（第一步，已完成）
+
+把存储从「按需分配的空间」改成「**登记一个已经存在的目录**」。
+
+**为什么是重写而不是补丁**：需求是每个组一个存储目录、每人在其下一个子目录、组另有共享目录，
+即 `/storage/kube-wl/{组}/{用户名}` 与 `/storage/kube-wl/{组}/{共享名}`。原实现里 `Storage`
+是一块平台**动态**申请的 PVC（`storage_class` + `medium` + `size_bytes`），**没有任何字段能
+表达"这个卷对应哪个目录"** —— 系统里并不存在"用户的存储目录"这个概念。这不是实现差异，是
+模型错误。
+
+**新模型**（详见 §5.4）：
+
+- 三种粒度：`user_volume` / `group_share` / `global_share`。旧的 `personal_home` /
+  `personal_data` / `dataset` / `object` 删除 —— 它们的区别是**用途**，而用途不是存储的属性。
+- `host_path` 是身份，`dir_name` 区分「组共享目录」与「组本级目录」（`dir_name IS NULL`）。
+- 目录由 `Settings.storage_root` 推导，**不接受手填**：手填意味着两行可以指向同一个目录，
+  而"两行同一个目录"在集群里表现出来就是 Pod 挂到别人的数据上。
+- 集群侧是**静态** `hostPath` PV + 显式绑定的 PVC（`storageClassName: ""` + `volumeName`），
+  回收策略 `Retain`。已在真实集群验证：PV 与 PVC **立即** `Bound`。
+- 容量**不再承诺**：`hostPath` 不强制容量，静态 PVC 也**不能扩容**
+  （实测报 `only dynamically provisioned pvc can be resized`）。所以 `resize_storage`
+  只改账面，并且界面上这么写。
+
+**权限收敛**：`storage:create|resize|delete` 三个码删除，只留 `storage:read` 与
+`storage:manage`，后者**只给全局管理员**。普通用户（含组管理员）只有读 —— 目录布局是安装级的
+决定，而且写错目录不会被自动纠正，"谁能用哪个目录"不是组管理员能决定的事。角色 × 权限矩阵
+已在测试里钉死。
+
+前端也跟着收：存储页的"操作"列对读者**整列不渲染**（不是禁用按钮），并且视图冒烟脚本新增
+`VIEW_PERMISSIONS_ABSENT` —— 它以**读者**身份再挂载一次这个页面，断言"新建存储"与"操作"
+都不在 DOM 里。只测管理员形态会漏掉这类缺陷：界面上的禁用按钮和会 403 的按钮，对用户是同一
+件事。
+
+**顺带修掉的一个既有缺陷**：`seed_rbac()` 过去只**新增和更新**权限行，从不删除。于是删掉的
+权限码会永远留在 `permissions` 表里，而**两处都读这张表** —— `GET /rbac/permissions` 用它
+渲染管理员的权限矩阵，`effective_permissions()` 用它解析用户实际持有的权限码。也就是说一个
+已废弃的码仍然可以被授予、被持有，而**没有任何端点再要求它**：看着像一个能力，实际什么都不
+给。现在会删除目录里已经不存在的权限行（`Permission` 只由 `seed_rbac` 创建，`/rbac/permissions`
+是只读的，所以这不是谁的手工扩展），并计数进 `SyncResult.permissions_removed`。存储这次
+实测清掉了 3 行（`storage:create/resize/delete`），权限总数 70 → 67。
+
+**踩到的坑**（都是新测试翻出来的，不是新引入的）：
+
+1. **PV 的 `Bound` 早于 PVC 的 `Bound`**。volume controller 先把 PV 标 Bound，claim 自己的
+   `.status.phase` 随后才追上。单次读会看到 `PV=Bound` + `PVC=Pending` 并误判成失败，必须轮询。
+2. **一个 PV 只能绑一个 PVC，而 claim 是命名空间级的** —— 所以**全局共享卷需要每个命名空间
+   一对 PV/PVC**。没有引入子表：PV 名按 `storage_pv_name(..., namespace=ns)` 确定性推导，
+   配 `wl-managed` 标签即可枚举；多一张表只会多一份可能与集群不一致的真相。
+3. **退休的卷会永久占用自己的目录**。最初 `host_path` 是普通唯一约束，于是删掉的卷仍然挡着
+   同一目录重新登记 —— 而"释放后重建同一个用户卷"是最正常的操作。改为**部分**唯一索引
+   （只约束 `is_active` 的行）。
+4. **`resize_pvc` 从来没有调用者，而且只可能失败**（静态卷不允许扩容）。删掉，而不是留着。
+5. **`str.format` 会把中文占位符当成字段名**：自检信息里的布局写成
+   `"…{root}/{组}…".format(root=…)`，`{组}` 被解析成字段 → `/api/v1/system/info` 直接 500。
+   改成 f-string 并把字面花括号写成 `{{组}}`。**这条是 pytest 抓出来的**（Phase 9 全红）。
+6. **「组管理员」有两个来源，只用了一个**。`resolve_scope()` 的 docstring 写得很清楚：组管理员
+   权限来自**两处** —— 成员关系上的 `role_in_group` 标志，以及 group 作用域的 `group_admin`
+   **角色授予** —— 并且有意取**并集**。可见性规则（`visible_condition`）用的是它，而我写的
+   挂载规则 `_administers()` 只查了 `actor.admin_group_ids`（仅成员标志）。后果很具体：
+   靠角色授予当上组管理员的账号**能在列表里看见**组本级卷，点挂载却 400，而消息里没有一个字
+   解释这个差别。现已改为两条规则都读 `resolve_scope()` —— "组管理员"在可见性和挂载里必须是
+   同一个集合。**这条是子代理审查时发现的**，我的测试只覆盖了成员标志那条路径。
+
+**交付物**：迁移 `a1c4e7f90b23`（加 `host_path` + `dir_name`，`workspace_id` 改可空，
+删 `storage_class`/`medium`/`size_bytes` 与 `instance_storages.sub_path`，建两个部分唯一索引；
+**表里已有行时拒绝执行**并打印导出指引 —— 旧行无法推断目录，硬凑只会指向错误的数据）·
+`app/services/storage_paths.py`（唯一的目录推导处）· `K8sGateway.apply_pv/read_pv/delete_pv` ·
+`PvSpec`/`PvInfo` · 前端存储页（目录成为独立一列、表单按类型收窄、只有 `storage:manage`
+才显示写操作）。
+
+**尚未做（第二步，等确认）**：用户卷默认挂进三类工作负载（`/home/{用户名}`）、实例自身临时
+PVC 的去留（倾向取消，用户卷即家目录）、全局共享卷按命名空间补齐 claim，以及
+**用户存储卷不存在时硬失败**。最后一条是这一轮唯一明确"没做完"的地方：现在缺卷会静默返回空
+挂载列表，而"看不到自己的数据"不该表现为一个空目录 —— 它应该让工作负载起不来。真实集群 E2E
+里这两项标为 `PENDING`。
+
+**三个已知的不一致，都已用测试钉住、本轮没改**：
+
+1. **`GET /storages/attachable` 会向所有人推荐全局共享卷，但挂载必然 400**。全局共享的
+   `k8s_namespace` 是 `None`（claim 还没按命名空间建），所以"推荐"和"能用"目前不一致 ——
+   要等第二步把每个命名空间的 claim 补齐。用例：
+   `test_a_global_share_cannot_be_mounted_until_it_has_a_claim`。
+2. **`storage_group_level_requires_admin` 这个分支当前不可达**（`_administers` 收窄到
+   `scope.group_ids` 之后，它和可见性读的是同一个集合，能过可见性的必定能过它）。按"防御性
+   第二道防线"保留，并在代码里写明了它不可达、以及**如果你放宽了 `visible_condition` 就是它
+   救你**。见 `resolve_attachments` 里那段注释。
+3. **`smoke_phase5.py` 的镜像段会崩，卡在 `KeyError: 'id'`**。根因是环境：Harbor 的 `library`
+   项目里只有 `library/python`，`library/base-notebook:latest` 不存在 → `image_not_found_upstream`，
+   脚本随后直接取 `['id']` 就抛 `KeyError`。**这个坑以前被掩盖着** —— 存储段一失败就
+   `return 1`，根本走不到镜像段，所以存储重构反而把它暴露了出来。它不在存储范围内，本轮没动；
+   真正的修法是**把官方基础镜像推到 `library/`**（这是早就记在案的待办），顺带让脚本的失败
+   路径不崩、而是报出上游缺镜像。
+
+**质量门禁**（本轮实测，全部在 `backend/` 下按 CI 口径跑）：
+
+- `ruff check .` → All checks passed；`ruff format --check .` → **159 files already formatted**；
+  `mypy app` → **Success: no issues found in 131 source files**。
+- `pytest -q` → **686 passed, 0 failed, 0 errors**（15:19）。基线是 640 例（592 passed + 48 failed），
+  本轮 phase5 从 33 例扩到 78 例、`test_cli` 加 1 例，640 + 45 + 1 = 686。
+- `alembic heads` → `a1c4e7f90b23 (head)`；`alembic check` → No new upgrade operations detected；
+  10 个迁移文件 `ruff format --check --no-force-exclude` 全过（`alembic/versions` 被 CI 排除，
+  所以这条得单独跑）。
+- 真实集群存储 E2E：**51 PASS / 0 FAIL / 2 PENDING**（2 项 PENDING 就是第二步的缺卷硬失败）。
+- 前端：`vue-tsc --noEmit` 与 `vite build` 均 0 退出、`smoke_frontend_views.mjs` **19/19** 视图
+  真实挂载并断言到内容（其中 StorageView 以**读者**身份再挂一次，证明"新建存储"与"操作"不在
+  DOM 里）、`check-frontend-types.py` 报 "OK — every declared field exists in the API schema"、
+  `openapi/schema.json` 重新生成后**无漂移**。
+
+> **跑测试时的环境坑（这个沙箱特有，值得记一笔）**：`/tmp` 是**每次 bash 调用一个全新的
+> tmpfs** —— 上一次调用里 pytest 建的 `/tmp/pytest-of-root`，下一次调用就已经不存在。
+> 于是**两个 pytest 同时跑**会互相删对方的 `tmp_path`，SQLite 报
+> `attempt to write a readonly database`，并连带产生假的 FAILED / ERROR。
+> 实测：并发跑得到 `604 passed, 2 failed, 2 errors`，把受影响的 4 个用例单独重跑
+> **4 passed**；换成给 pytest 一个独占的 `--basetemp` 后，同样的代码
+> **686 passed, 0 failed, 0 errors**。所以在本机验证时：**一次只跑一个 pytest**，
+> 并显式给 basetemp，例如
+> `pytest -q --basetemp=/root/project/kube-wl-ai/.smoke/bt`。
+
 ### 有意推迟（非遗漏）
 
 - **OIDC** 仅预留扩展点：`OidcProvider.exchange_code()` 明确抛错说明。大学的统一身份是
@@ -1773,13 +1943,16 @@ Vuex `namespace: true` 拼写错误、`Admin/User.vue` 为 0 字节、
 
 ### 14.4 待外部确认（阻塞后续阶段，不是缺陷）
 
-这三项都不是代码问题，但**都必须先有答案再写代码**，否则写出来的是不可验证的实现：
+这几项都不是代码问题，但**都必须先有答案再写代码**，否则写出来的是不可验证的实现：
 
 1. **既有的 Prometheus 是否带 `namespace` / `pod` 标签？** 没有这两个标签就无法把指标
    归到租户上，"用量按 Prometheus 记账"就无从谈起。这是 Phase 7 的前置问题（详见 §10）。
-2. **集群里是否存在 RWX 的 StorageClass？** `_default_access_mode()` 对
-   `dataset` / `group_share` 返回 `ReadWriteMany`。若不存在，这两类卷会一直 Pending，
-   而症状是"数据集创建成功但不能挂载"，排查起来离原因很远。
+2. ~~**集群里是否存在 RWX 的 StorageClass？**~~ **已不再是阻塞项**：托管存储卷改用静态
+   `hostPath` PV（`storageClassName: ""` + `volumeName`），完全不经过 StorageClass，而
+   `hostPath` 本来就可以声明 `ReadWriteMany` —— 已在真实集群上验证组共享/全局共享卷能
+   `Bound`。**仍然相关的是**实例与任务的临时盘：它们走
+   `STORAGE_CLASS_HOME`/`DATA`/`SHARE`，三者在 `.env` 里都是空的，所以扩容与共享行为
+   仍取决于集群是否有默认可用的 StorageClass。
 3. **LDAP 服务账号凭据**：目录同步需要一个可绑定账号；没有它，`group:sync` 只能跑假实现。
 4. **kubeconfig token 轮换**：`legacy/` 里泄漏的那个（见 14.1）必须在集群侧吊销。
 
@@ -1825,7 +1998,7 @@ Vuex `namespace: true` 拼写错误、`Admin/User.vue` 为 0 字节、
 | API 契约 | `frontend/openapi/schema.json`（由 `./scripts/gen-openapi.sh` 生成） |
 | 工作空间与资源前端 | `frontend/src/views/MyWorkspaceView.vue`、`frontend/src/views/admin/WorkspacesView.vue`、`frontend/src/views/admin/ResourcesView.vue` |
 | 前端资源/工作空间类型与 API | `frontend/src/types/resource.ts`、`frontend/src/api/workspaces.ts`、`frontend/src/api/resources.ts` |
-| **持久化存储（后端）** | `backend/app/services/storages.py`、`backend/app/api/v1/storages.py` |
+| **持久化存储（后端）** | `backend/app/services/storages.py`、`backend/app/services/storage_paths.py`（目录推导的唯一来源）、`backend/app/api/v1/storages.py` |
 | **镜像目录（后端）** | `backend/app/services/images.py`、`backend/app/api/v1/images.py` |
 | **镜像仓库客户端** | `backend/app/registries/`（`registry.py` 协议 / `harbor.py` 真实 / `fake.py` 测试） |
 | 存储与镜像前端 | `frontend/src/views/StorageView.vue`、`frontend/src/views/ImagesView.vue` |

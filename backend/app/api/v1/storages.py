@@ -1,10 +1,10 @@
 """Storage endpoints.
 
-Reading needs ``storage:read``; what each caller sees is decided by the
-visibility rule in the service. Creating and deleting a personal volume needs
-only ``storage:create`` — a user's own scratch space is theirs to manage — while
-publishing a group share or a dataset needs ``storage:manage``, because those
-are claims about what the whole lab may rely on.
+Reading needs ``storage:read``; what each caller sees is decided by the visibility
+rule in the service. Everything that *changes* a volume needs ``storage:manage``,
+which only a global administrator holds — placing a directory is not a tenant's
+decision. A user's own volume appears in their list and is mounted into everything
+they run, but they never create it, rename it, resize it or delete it.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, Query
 from app.core.deps import AppSettings, CurrentUser, DbSession, require
 from app.k8s import get_gateway
 from app.models.enums import StorageKind, StorageStatus, WorkloadKind
+from app.models.storage import Storage
 from app.schemas.application import WorkloadEventRead
 from app.schemas.common import Page, PageMeta
 from app.schemas.storage import (
@@ -32,21 +33,22 @@ from app.services import workload_events as event_service
 router = APIRouter(tags=["storage"])
 
 CanRead = Depends(require("storage:read"))
-CanCreate = Depends(require("storage:create"))
-CanDelete = Depends(require("storage:delete"))
+#: One guard for every mutation. There is deliberately no narrower one: the
+#: directory layout is provisioned outside the platform, so a mistake in it is not
+#: self-correcting, and no per-user rule would make it safer.
+CanManage = Depends(require("storage:manage"))
 
 
 def _pages(total: int, page_size: int) -> int:
     return (total + page_size - 1) // page_size if page_size else 0
 
 
-async def _detail(session: DbSession, actor: CurrentUser, storage: object) -> StorageDetail:
-    attachments = await storage_service.list_attachments(session, storage.id)  # type: ignore[attr-defined]
+async def _detail(session: DbSession, actor: CurrentUser, storage: Storage) -> StorageDetail:
+    attachments = await storage_service.list_attachments(session, storage.id)
     detail = StorageDetail(**StorageSummary.from_storage(storage).model_dump())
-    detail.pvc_name = storage.pvc_name  # type: ignore[attr-defined]
-    detail.k8s_namespace = storage.k8s_namespace  # type: ignore[attr-defined]
-    detail.size_bytes = storage.size_bytes  # type: ignore[attr-defined]
-    detail.checked_at = storage.checked_at  # type: ignore[attr-defined]
+    detail.pvc_name = storage.pvc_name
+    detail.k8s_namespace = storage.k8s_namespace
+    detail.checked_at = storage.checked_at
     detail.attached_instance_ids = [row.instance_id for row in attachments]
     return detail
 
@@ -125,7 +127,7 @@ async def create_storage(
     session: DbSession,
     actor: CurrentUser,
     settings: AppSettings,
-    _: Annotated[None, CanCreate],
+    _: Annotated[None, CanManage],
 ) -> StorageDetail:
     storage = await storage_service.create_storage(
         session,
@@ -140,10 +142,10 @@ async def create_storage(
         owner_user_id=payload.owner_user_id,
         capacity_gb=payload.capacity_gb,
         access_mode=payload.access_mode,
-        storage_class=payload.storage_class,
         is_read_only=payload.is_read_only,
         source=payload.source,
         group_id=payload.group_id,
+        dir_name=payload.dir_name,
     )
     await session.commit()
     return await _detail(session, actor, storage)
@@ -155,7 +157,7 @@ async def update_storage(
     payload: StorageUpdate,
     session: DbSession,
     actor: CurrentUser,
-    _: Annotated[None, CanCreate],
+    _: Annotated[None, CanManage],
 ) -> StorageDetail:
     storage = await storage_service.get_storage(session, actor, storage_id)
     await storage_service.update_storage(
@@ -178,15 +180,16 @@ async def resize_storage(
     payload: StorageResize,
     session: DbSession,
     actor: CurrentUser,
-    settings: AppSettings,
-    _: Annotated[None, CanCreate],
+    _: Annotated[None, CanManage],
 ) -> StorageDetail:
+    """Change the capacity the platform accounts for.
+
+    No cluster call: a statically provisioned claim cannot be expanded, so this
+    moves the record and nothing else. See the service for why that is the honest
+    behaviour rather than a gap.
+    """
     storage = await storage_service.get_storage(session, actor, storage_id)
-    # The service is async and dispatches its own blocking cluster calls through
-    # `run_gateway`; wrapping the service itself would hand back a coroutine.
-    await storage_service.resize_storage(
-        session, actor, storage, get_gateway(settings), capacity_gb=payload.capacity_gb
-    )
+    await storage_service.resize_storage(session, actor, storage, capacity_gb=payload.capacity_gb)
     await session.commit()
     return await _detail(session, actor, storage)
 
@@ -211,12 +214,13 @@ async def delete_storage(
     session: DbSession,
     actor: CurrentUser,
     settings: AppSettings,
-    _: Annotated[None, CanDelete],
+    _: Annotated[None, CanManage],
 ) -> StorageDetail:
-    """Retire a volume and delete its claim.
+    """Retire a volume: delete its cluster objects, keep the row as history.
 
-    Returns the row rather than 204: the record is kept as history, and the
-    caller needs its new status to redraw without a second request.
+    Returns the row rather than 204, because the record is kept and the caller needs
+    its new status to redraw without a second request. The directory and everything
+    in it is left alone.
     """
     storage = await storage_service.get_storage(session, actor, storage_id)
     await storage_service.delete_storage(session, actor, storage, get_gateway(settings))

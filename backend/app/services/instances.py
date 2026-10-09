@@ -360,14 +360,23 @@ async def apply_cluster_state(
     attachments = await storage_service.list_attachments(session, instance.id)
     extra_mounts = tuple(
         VolumeMountSpec(
-            pvc_name=row.storage.pvc_name or "",
+            pvc_name=row.storage.pvc_name,
             mount_path=row.mount_path,
             read_only=row.is_read_only,
-            sub_path=row.sub_path,
         )
         for row in attachments
         if row.storage is not None and row.storage.pvc_name
     )
+    if len(extra_mounts) != len(attachments):
+        # Not silent. An attachment whose claim has gone would otherwise just stop
+        # being mounted, and the user would see an empty directory rather than a
+        # failure — which is the worst possible way to lose access to data.
+        logger.warning(
+            "instance_attachment_skipped",
+            instance=instance.id,
+            attached=len(attachments),
+            mounted=len(extra_mounts),
+        )
 
     objects = build_instance_objects(
         instance_id=instance.id,

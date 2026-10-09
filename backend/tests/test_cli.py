@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app import cli
 from app.auth.passwords import verify_password
 from app.models.enums import UserSource
-from app.models.rbac import Role, UserRole
+from app.models.rbac import Permission, Role, RolePermission, UserRole
 from app.models.user import User
 from tests import factories
 
@@ -110,3 +110,51 @@ async def test_sync_rbac_is_idempotent(cli_session: None, seeded: AsyncSession) 
         "group_admin",
         "global_admin",
     }
+
+
+async def test_sync_rbac_drops_a_permission_the_catalogue_no_longer_has(
+    cli_session: None, seeded: AsyncSession
+) -> None:
+    """A retired code must stop being offerable, not linger as an inert grant.
+
+    Two things read this table: `GET /rbac/permissions` builds the administrator's
+    permission matrix from it, and `effective_permissions()` resolves a user's
+    codes from it. So a leftover row is a permission an administrator can still
+    hand out, and the holder really would hold it — while no endpoint requires it
+    any more, so it would grant nothing. That combination is worse than either
+    half: it looks like a capability and silently is not one.
+    """
+    retired = Permission(code="storage:obsolete", category="storage", description="已废弃")
+    seeded.add(retired)
+    await seeded.flush()
+
+    role = await seeded.scalar(select(Role).where(Role.code == "user"))
+    assert role is not None
+    seeded.add(RolePermission(role_id=role.id, permission_id=retired.id))
+    await seeded.commit()
+    retired_id, role_id = retired.id, role.id
+
+    assert await cli._sync_rbac() == 0
+
+    # Queried, not `session.get`: the prune runs as a Core `DELETE`, which the
+    # identity map does not observe, so `get()` would hand back the cached object
+    # and the test would fail while the row is in fact gone.
+    leftover = list(
+        (await seeded.scalars(select(Permission).where(Permission.id == retired_id))).all()
+    )
+    assert leftover == []
+    # The grant has to go with it. In Postgres the FK cascades; SQLite needs
+    # `PRAGMA foreign_keys`, which the test engine does not set — so this also
+    # pins the reconciliation, which removes the grant because the catalogue no
+    # longer names it.
+    grant = list(
+        (
+            await seeded.scalars(
+                select(RolePermission).where(
+                    RolePermission.role_id == role_id,
+                    RolePermission.permission_id == retired_id,
+                )
+            )
+        ).all()
+    )
+    assert grant == []

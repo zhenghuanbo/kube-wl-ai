@@ -74,16 +74,19 @@ const STORAGE = {
   name: 'my-data',
   displayName: '我的数据盘',
   description: '训练数据',
-  kind: 'personal_data',
+  kind: 'user_volume',
   status: 'bound',
   statusMessage: null,
+  // The directory *is* the volume now, so it is the field the table has to show.
+  // Left as `undefined` by an out-of-date fixture, it renders an empty cell that
+  // still passes every "did not throw" check — hence it is in `EXPECTS` below.
+  hostPath: '/storage/kube-wl/nlp/zhangsan',
+  dirName: null,
+  isGroupLevel: false,
   capacityGb: 50,
   usedGb: 12,
-  sizeBytes: 12884901888,
-  defaultMountPath: '/mnt/data',
+  defaultMountPath: '/home/zhangsan',
   accessMode: 'ReadWriteOnce',
-  storageClass: 'ceph-rbd',
-  medium: null,
   pvcName: 'wl-vol-my-data-7',
   k8sNamespace: 'wl-nlp-nlp',
   source: null,
@@ -92,6 +95,7 @@ const STORAGE = {
   workspaceId: 1,
   workspaceName: '自然语言处理',
   groupId: 1,
+  groupName: 'nlp',
   ownerUserId: 2,
   ownerUsername: 'zhangsan',
   ownerDisplayName: '张三',
@@ -717,7 +721,7 @@ const RETURNS = {
   fetchCurrentUser: USER,
   fetchPermissions: {
     permissions: [
-      'storage:read', 'storage:create', 'storage:resize', 'storage:delete', 'storage:manage',
+      'storage:read', 'storage:manage',
       'image:read', 'image:create', 'image:share', 'image:delete',
       'instance:read', 'instance:create', 'application:read', 'application:create',
       'task:read', 'task:create',
@@ -787,7 +791,16 @@ const NEVER_RENDER = ['undefined', 'NaN', '[object Object]']
 const EXPECTS = {
   // `/mnt/data` and the attached-instance list live in the detail drawer, which
   // is closed on first paint; the table is what this asserts.
-  StorageView: ['我的数据盘', 'my-data', '50 GB', '24%', '已就绪', '个人数据盘', '张三'],
+  StorageView: [
+    '我的数据盘',
+    'my-data',
+    '/storage/kube-wl/nlp/zhangsan',
+    '50 GB',
+    '24%',
+    '已就绪',
+    '用户存储卷',
+    '张三',
+  ],
   // The table carries the reference and the kind chip; the framework chips it
   // used to show are gone with the columns behind them.
   ImagesView: [
@@ -908,6 +921,9 @@ const EXPECTS_ABSENT = {
     '没有登记的加速卡',
     '没有同步到节点',
   ],
+  // Mounted as a reader (see `VIEW_PERMISSIONS_ABSENT`). The one row in the
+  // fixture is still there — what must be gone is every control that would 403.
+  StorageView: ['新建存储', '操作'],
 }
 
 /**
@@ -929,6 +945,25 @@ const VIEW_PERMISSIONS = {
   // The one code `ComputeView` gates on. A group administrator holds it; a plain
   // user does not, and the API refuses the call either way.
   ComputeView: ['node:read'],
+}
+
+/**
+ * Codes *withheld* for one view — the mirror of `VIEW_PERMISSIONS`.
+ *
+ * The baseline is an administrator, which is the right default (a view that only
+ * ever renders its read-only form is barely tested). But the opposite mistake is
+ * just as easy and much harder to see: a screen that shows a plain user controls
+ * the API will refuse. Nothing throws, nothing looks broken, and the failure only
+ * surfaces when somebody clicks.
+ *
+ * So a view whose read-only form is a requirement in its own right gets mounted
+ * a second time here.
+ */
+const VIEW_PERMISSIONS_ABSENT = {
+  // 「普通用户只需要看到自己的存储卷和组共享存储卷」— every storage mutation needs
+  // `storage:manage`, which only a global administrator holds. Mounting as a
+  // reader is what proves the page does not advertise the rest.
+  StorageView: ['storage:manage'],
 }
 
 // ---------------------------------------------------------------------------
@@ -1268,13 +1303,16 @@ try {
 
       // Seed the store so `can()` answers true and the admin-only branches
       // render. A view that only ever renders its read-only form is barely
-      // tested.
+      // tested — except where `VIEW_PERMISSIONS_ABSENT` deliberately withholds a
+      // code, so that the read-only form is tested too.
       const auth = bundle.useAuthStore()
       auth.user = USER
-      auth.permissions = new Set([
-        ...RETURNS.fetchPermissions.permissions,
-        ...(VIEW_PERMISSIONS[label] ?? []),
-      ])
+      auth.permissions = new Set(
+        [
+          ...RETURNS.fetchPermissions.permissions,
+          ...(VIEW_PERMISSIONS[label] ?? []),
+        ].filter((code) => !(VIEW_PERMISSIONS_ABSENT[label] ?? []).includes(code)),
+      )
       auth.scopeKind = 'group'
       auth.scopeGroupIds = [1]
       auth.scopeWorkspaceIds = [1]

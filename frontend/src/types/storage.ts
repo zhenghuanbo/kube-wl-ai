@@ -1,23 +1,24 @@
 /**
  * Storage wire types.
  *
- * Mirrors `backend/app/schemas/storage.py`. The shape that matters: a volume is
- * a thing in its own right, not a property of an instance. It exists before
- * anything mounts it and outlives every instance that did, which is why this
- * page has no instance in its primary key.
+ * Mirrors `backend/app/schemas/storage.py`. Two things shape this file.
+ *
+ * A volume is a *directory*, not something the platform allocated: `hostPath` is
+ * the identity, and the unique constraint on it is the rule "one directory, one
+ * volume". So the path is part of the read model — it is what an administrator
+ * checks by eye — rather than an internal detail.
+ *
+ * And a volume is not per-user, per-group or per-workspace: it is per *directory*,
+ * with the binding decided by the kind. That is why the create form's fields are
+ * driven by `binding` below rather than by a fixed set of inputs.
  */
 
-export type StorageKind =
-  | 'personal_home'
-  | 'personal_data'
-  | 'group_share'
-  | 'dataset'
-  | 'object'
+export type StorageKind = 'user_volume' | 'group_share' | 'global_share'
 
 export type StorageStatus =
   | 'pending'
+  | 'available'
   | 'bound'
-  | 'resizing'
   | 'released'
   | 'failed'
   | 'deleting'
@@ -30,17 +31,27 @@ export interface StorageSummary {
   kind: StorageKind
   status: StorageStatus
   statusMessage?: string | null
-  workspaceId: number
+
+  /** The directory this volume is. */
+  hostPath: string
+  /** The named directory inside a group's own directory; null is the group root. */
+  dirName?: string | null
+  /** True when this volume *is* a group's directory, mountable only by its admins. */
+  isGroupLevel: boolean
+
+  /** Null for a global share: it belongs to no workspace. */
+  workspaceId?: number | null
   workspaceName?: string | null
   groupId?: number | null
   groupName?: string | null
   ownerUserId?: number | null
   ownerUsername?: string | null
   ownerDisplayName?: string | null
+
   capacityGb: number
   usedGb: number
   accessMode?: string | null
-  storageClass?: string | null
+  /** Where a container sees it by default, resolved by the backend. */
   defaultMountPath: string
   isReadOnly: boolean
   isActive: boolean
@@ -50,9 +61,9 @@ export interface StorageSummary {
 }
 
 export interface StorageDetail extends StorageSummary {
+  /** Both null for a global share until something mounts it in a namespace. */
   pvcName?: string | null
   k8sNamespace?: string | null
-  sizeBytes?: number | null
   checkedAt?: string | null
   attachedInstanceIds: number[]
   attachedInstanceNames: string[]
@@ -63,16 +74,21 @@ export interface StorageCreatePayload {
   displayName?: string | null
   description?: string | null
   kind?: StorageKind
-  workspaceId?: number | null
-  /** Only honoured for administrators; defaults to the caller. */
+  /** Required for a user volume. */
   ownerUserId?: number | null
+  /** Required for a group share. */
+  groupId?: number | null
+  /**
+   * For a group share: the directory inside the group's own directory. Omit it to
+   * make the group's own directory the volume.
+   */
+  dirName?: string | null
+  /** Taken from the group's single workspace; only sent when overriding. */
+  workspaceId?: number | null
   capacityGb?: number
   accessMode?: string | null
-  storageClass?: string | null
   isReadOnly?: boolean | null
-  /** Required for a dataset: without provenance nobody can judge it. */
   source?: string | null
-  groupId?: number | null
 }
 
 /** Only the fields that can honestly change after creation. */
@@ -90,101 +106,67 @@ export interface StorageUsage {
 }
 
 /**
- * What each kind of volume is for.
+ * What each kind of volume is, and what it takes to create one.
  *
- * `selfService` is the important field: it decides whether the create dialog
- * offers the kind at all. A dataset is a claim about what the whole lab may
- * rely on, so it is not something every user gets to publish.
+ * `binding` is the field the create dialog branches on: a user volume needs a
+ * user, a group share needs a group, and a global share needs neither. Nothing
+ * here says whether the *caller* may create it — that is `storage:manage`, a
+ * permission, and it is the same for every kind.
  */
 export interface StorageKindMeta {
   value: StorageKind
   title: string
   description: string
   icon: string
-  /** Mount path the platform assigns. `null` means the platform chooses. */
-  mountPath: string | null
-  /** Whether an ordinary user may create one. */
-  selfService: boolean
-  /** Whether the volume is always mounted read-only. */
-  readOnly: boolean
-  /** Whether a source URL is mandatory. */
-  requiresSource: boolean
-  /** True when a user may have only one, per workspace. */
-  unique: boolean
+  /** Where a container sees it by default. */
+  mountPath: string
+  /** What the directory is derived from. */
+  binding: 'user' | 'group' | 'none'
+  /** Whether `dirName` applies (only a group share has one). */
+  hasDirName: boolean
 }
 
 export const STORAGE_KINDS: readonly StorageKindMeta[] = [
   {
-    value: 'personal_home',
-    title: '个人主目录',
-    description: '容器里的 /home/jovyan。每人每工作空间一个，实例会自动挂载，不需要手动选择。',
-    icon: 'mdi-home-account',
-    mountPath: '/home/jovyan',
-    selfService: true,
-    readOnly: false,
-    requiresSource: false,
-    unique: true,
-  },
-  {
-    value: 'personal_data',
-    title: '个人数据盘',
-    description: '挂在 /mnt/data 的持久化空间，用来放代码、数据集和训练输出。可以挂到多个实例。',
-    icon: 'mdi-harddisk',
-    mountPath: '/mnt/data',
-    selfService: true,
-    readOnly: false,
-    requiresSource: false,
-    unique: false,
+    value: 'user_volume',
+    title: '用户存储卷',
+    description:
+      '一个用户一目录，形如 /storage/kube-wl/{组}/{用户名}。用户数据的主体，后续开发实例、个人应用、自定义任务都会默认挂载到容器的 /home/{用户名}。',
+    icon: 'mdi-account',
+    mountPath: '/home/{用户名}',
+    binding: 'user',
+    hasDirName: false,
   },
   {
     value: 'group_share',
-    title: '课题组建共享盘',
-    description: '整个用户组都能挂载的共享空间，挂在 /mnt/share。由管理员发布。',
+    title: '组共享存储卷',
+    description:
+      '组目录下的一个共享目录，形如 /storage/kube-wl/{组}/{目录名}。目录名留空则创建组本级存储卷，即整个组目录——它包含每个成员的个人目录，因此只有组管理员可以挂载。默认不挂载，由用户在创建业务时选择，挂到 /mnt/group_shared。',
     icon: 'mdi-account-group-outline',
-    mountPath: '/mnt/share',
-    selfService: false,
-    readOnly: false,
-    requiresSource: false,
-    unique: false,
+    mountPath: '/mnt/group_shared',
+    binding: 'group',
+    hasDirName: true,
   },
   {
-    value: 'dataset',
-    title: '只读数据集',
-    description: '公共数据集，强制只读地挂在 /mnt/dataset。必须填写来源，方便他人判断是否可信。',
-    icon: 'mdi-database-eye-outline',
-    mountPath: '/mnt/dataset',
-    selfService: false,
-    readOnly: true,
-    requiresSource: true,
-    unique: false,
-  },
-  {
-    value: 'object',
-    title: '对象存储挂载',
-    description: '对象存储桶的挂载点。需要集群侧先配好 CSI 驱动。',
-    icon: 'mdi-cloud-outline',
-    mountPath: null,
-    selfService: false,
-    readOnly: false,
-    requiresSource: false,
-    unique: false,
+    value: 'global_share',
+    title: '全局共享存储卷',
+    description:
+      '与任何组无关的公共目录，形如 /storage/kube-wl/_global/{名称}。所有组都可以在创建业务时选择挂载到 /mnt/global_shared。',
+    icon: 'mdi-earth',
+    mountPath: '/mnt/global_shared',
+    binding: 'none',
+    hasDirName: false,
   },
 ]
 
 export function storageKindMeta(kind: StorageKind): StorageKindMeta {
-  return STORAGE_KINDS.find((entry) => entry.value === kind) ?? STORAGE_KINDS[1]
+  return STORAGE_KINDS.find((entry) => entry.value === kind) ?? STORAGE_KINDS[0]
 }
-
-/** Kinds an ordinary user may create. */
-export const SELF_SERVICE_KINDS: readonly StorageKind[] = STORAGE_KINDS.filter(
-  (kind) => kind.selfService,
-).map((kind) => kind.value)
 
 /** Statuses worth showing a spinner for. */
 export const LIVE_STORAGE_STATUSES: readonly StorageStatus[] = [
   'pending',
   'bound',
-  'resizing',
   'deleting',
 ]
 

@@ -165,6 +165,24 @@ class Settings(BaseSettings):
     ssh_nodeport_range: str = "30000-32767"
 
     # --- Storage -------------------------------------------------------------
+    #: Root directory the platform carves volumes out of, on the node that backs
+    #: them. Every managed directory lives underneath it:
+    #:
+    #:     {storage_root}/{group}/{username}      用户存储卷
+    #:     {storage_root}/{group}/{dir_name}      组共享卷（指定目录名）
+    #:     {storage_root}/{group}                 组本级卷（目录名留空）
+    #:     {storage_root}/_global/{name}          全局共享卷
+    #:
+    #: Configurable rather than hard-coded because the real layout is decided by
+    #: whoever provisions the filesystem, and because the GPFS/Lustre phase will
+    #: point it at a mount that already exists.
+    storage_root: str = "/storage/kube-wl"
+    #: Prefix reserved for global shares, so a global share can never be named
+    #: after a group and land on that group's directory.
+    storage_global_segment: str = "_global"
+
+    # Scratch volumes for instances and tasks. Unrelated to the managed volumes
+    # above: these are per-workload and are deleted with it.
     storage_class_home: str = ""
     storage_class_data: str = ""
     storage_class_share: str = ""

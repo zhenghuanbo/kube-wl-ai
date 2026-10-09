@@ -82,10 +82,10 @@ PERMISSIONS: tuple[PermissionSpec, ...] = (
     PermissionSpec("image:delete", "image", "删除镜像"),
     # Storage -----------------------------------------------------------------
     PermissionSpec("storage:read", "storage", "查看存储"),
-    PermissionSpec("storage:create", "storage", "创建存储"),
-    PermissionSpec("storage:resize", "storage", "扩容存储"),
-    PermissionSpec("storage:delete", "storage", "删除存储"),
-    PermissionSpec("storage:manage", "storage", "管理共享存储与数据集（发布、改归属）"),
+    #: One code for every mutation. There is deliberately no per-user storage code
+    #: any more: a volume is a directory in an installation-wide layout provisioned
+    #: outside the platform, so placing one is not something a tenant may do.
+    PermissionSpec("storage:manage", "storage", "创建、修改、删除存储卷"),
     # Instances ---------------------------------------------------------------
     PermissionSpec("instance:read", "instance", "查看容器实例"),
     PermissionSpec("instance:create", "instance", "创建容器实例"),
@@ -185,6 +185,10 @@ _OBSERVER = frozenset(
 
 # A normal user additionally sees the catalogue they need to build workloads
 # (resource groups / specs / limits are read-only for them).
+#
+# Storage is deliberately absent: they hold `storage:read` from `_OBSERVER` and
+# nothing more. Their own volume is mounted into everything they run, so they never
+# need to create one, and a group share is placed for them rather than by them.
 _USER = _OBSERVER | frozenset(
     _codes(
         """
@@ -193,13 +197,17 @@ _USER = _OBSERVER | frozenset(
         application:create application:update application:delete application:stop
         task:create task:cancel task:logs
         image:create image:delete
-        storage:create storage:resize storage:delete
         resource_group:read resource_spec:read runtime_limit:read
         quota:read
         """
     )
 )
 
+# A group administrator governs people, workspaces and their group's images — but
+# not storage. Even the group's *own* directory, which is the volume they exist to
+# be able to mount, is created for them by a global administrator: `storage:manage`
+# is deliberately not granted here, because the directory layout is provisioned
+# outside the platform and changing it is not a per-group decision.
 _GROUP_ADMIN = _USER | frozenset(
     _codes(
         """
@@ -207,7 +215,6 @@ _GROUP_ADMIN = _USER | frozenset(
         workspace:read workspace:create workspace:update
         workspace:assign_member workspace:grant_resource
         image:share
-        storage:manage
         resource_group:read resource_spec:read runtime_limit:read
         node:read quota:read
         usage:export monitor:read_group audit:read
@@ -230,13 +237,15 @@ class SyncResult:
     roles_updated: int = 0
     permissions_created: int = 0
     permissions_updated: int = 0
+    permissions_removed: int = 0
     grants_added: int = 0
     grants_removed: int = 0
 
     def __str__(self) -> str:
         return (
             f"roles +{self.roles_created}/~{self.roles_updated}, "
-            f"permissions +{self.permissions_created}/~{self.permissions_updated}, "
+            f"permissions +{self.permissions_created}/~{self.permissions_updated}"
+            f"/-{self.permissions_removed}, "
             f"grants +{self.grants_added}/-{self.grants_removed}"
         )
 
@@ -248,8 +257,9 @@ def seed_rbac(connection: Connection) -> SyncResult:
     code runs from the Alembic data migration and from the running application.
     It never commits: the caller owns the transaction.
 
-    Safe to run repeatedly — existing rows are updated in place, missing rows
-    are created, and grants no longer in the mapping are removed.
+    Safe to run repeatedly — existing rows are updated in place, missing rows are
+    created, grants no longer in the mapping are removed, and permissions retired
+    from the catalogue are deleted.
     """
     result = SyncResult()
 
@@ -326,6 +336,29 @@ def seed_rbac(connection: Connection) -> SyncResult:
                 .values(category=spec.category, description=spec.description)
             )
             result.permissions_updated += 1
+
+    # --- Retired permissions -------------------------------------------------
+    #
+    # The catalogue in this module is the source of truth for *which* codes exist;
+    # the table only records what they are called. Nothing else creates a
+    # `Permission` row — `GET /rbac/permissions` is read-only — so a row whose code
+    # is no longer in the catalogue is not somebody's extension, it is a leftover
+    # from a code that was deliberately removed.
+    #
+    # Leaving it would be worse than untidy: the admin permission matrix is built
+    # from this table, so a retired code keeps being offered for granting, and the
+    # API would honour it if it were granted — no endpoint requires it any more, so
+    # it would grant nothing. A code that can be handed out and does nothing is
+    # exactly the kind of quiet lie this catalogue exists to prevent.
+    #
+    # Grants are reconciled below and the FK cascades, so deleting the row also
+    # removes any grant of it.
+    retired_ids = [
+        row["id"] for code, row in existing_perms.items() if code not in ALL_PERMISSION_CODES
+    ]
+    if retired_ids:
+        connection.execute(delete(permissions_t).where(permissions_t.c.id.in_(retired_ids)))
+        result.permissions_removed = len(retired_ids)
 
     perm_ids: dict[str, int] = {
         row["code"]: row["id"] for row in connection.execute(select(permissions_t)).mappings()

@@ -31,6 +31,7 @@ from app.k8s.gateway import (
     IngressSpec,
     JobSpec,
     PvcSpec,
+    PvSpec,
     SecretSpec,
     ServicePort,
     ServiceSpec,
@@ -49,6 +50,7 @@ from app.k8s.naming import (
     TASK_ID_LABEL,
     TASK_LABEL,
     WORKSPACE_LABEL,
+    storage_pv_name,
     storage_pvc_name,
     task_job_name,
     workload_name,
@@ -413,10 +415,10 @@ def build_task_objects(
 # ---------------------------------------------------------------------------
 #: Access modes, by how many pods must share the volume at once.
 #:
-#: ``ReadWriteMany`` is not available from every CSI driver, and a dataset that
-#: silently falls back to ``ReadWriteOnce`` would work for the first user and
-#: fail for everyone else. The mode is therefore recorded on the row and
-#: reported honestly when the cluster refuses it, rather than downgraded.
+#: ``ReadWriteMany`` is not available from every CSI driver, and a share that
+#: silently fell back to ``ReadWriteOnce`` would work for the first user and fail
+#: for everyone else. The mode is recorded on the row and reported honestly when
+#: the cluster refuses it, rather than downgraded.
 STORAGE_ACCESS_MODES: dict[str, tuple[str, ...]] = {
     "ReadWriteOnce": ("ReadWriteOnce",),
     "ReadOnlyMany": ("ReadOnlyMany",),
@@ -427,29 +429,41 @@ STORAGE_ACCESS_MODES: dict[str, tuple[str, ...]] = {
 
 @dataclass(frozen=True, slots=True)
 class StorageObjects:
-    """The cluster objects behind one storage volume."""
+    """The cluster objects behind one storage volume.
+
+    ``pvc`` is optional because not every volume has a claim: a claim lives in a
+    namespace, and a global share belongs to no namespace until a workload mounts
+    it. The volume itself always exists — that is what registering a directory as
+    a managed volume means.
+    """
 
     refs: WorkloadRefs
-    pvc: PvcSpec
+    pv: PvSpec
+    pvc: PvcSpec | None = None
 
 
 def build_storage_objects(
     *,
     storage_id: int,
     storage_name: str,
-    namespace: str,
+    host_path: str,
+    namespace: str | None,
     workspace_labels: dict[str, str],
     size_gb: int,
-    storage_class: str | None,
     access_mode: str | None = None,
     kind: str | None = None,
 ) -> StorageObjects:
-    """Build the claim for a standalone volume.
+    """Build the volume for a managed directory, and its claim when one can exist.
 
-    No Deployment or Service: a volume exists whether or not anything is
-    attached to it, which is the entire point of separating it from an instance.
+    No Deployment or Service: a volume exists whether or not anything is attached
+    to it, which is the entire point of separating it from an instance.
+
+    Statically provisioned, not dynamic. The directory already exists and already
+    holds the data, so the volume's only job is to name it — which is also why the
+    claim is pinned to the volume by name. With no provisioner to satisfy an
+    unpinned claim, it waits forever, and "Pending" then means both "the cluster
+    is slow" and "this will never work".
     """
-    name = storage_pvc_name(storage_id, storage_name)
     labels = {
         **workspace_labels,
         MANAGED_LABEL: MANAGED_LABEL_VALUE,
@@ -459,12 +473,38 @@ def build_storage_objects(
     if kind:
         labels[STORAGE_KIND_LABEL] = kind
 
-    pvc = PvcSpec(
-        name=name,
-        namespace=namespace,
-        size_gb=size_gb,
-        storage_class=storage_class,
-        access_modes=STORAGE_ACCESS_MODES.get(access_mode or "", ("ReadWriteOnce",)),
+    # One mode for both objects. Kubernetes binds a claim only to a volume that
+    # offers a mode the claim asked for, so a mismatch here is a claim that never
+    # binds and gives no reason why.
+    modes = STORAGE_ACCESS_MODES.get(access_mode or "", ("ReadWriteOnce",))
+    pv_name = storage_pv_name(storage_id, storage_name)
+
+    pvc = None
+    if namespace:
+        pvc = PvcSpec(
+            name=storage_pvc_name(storage_id, storage_name),
+            namespace=namespace,
+            size_gb=size_gb,
+            # Explicitly *no* StorageClass. A static volume has none, and leaving
+            # the field unset would silently mean "use the cluster default" — a
+            # dynamic provisioner this platform is deliberately not relying on.
+            storage_class="",
+            access_modes=modes,
+            labels=labels,
+            volume_name=pv_name,
+        )
+
+    pv = PvSpec(
+        name=pv_name,
+        host_path=host_path,
+        capacity_gb=size_gb,
+        access_modes=modes,
         labels=labels,
+        # Pre-bind where a claim exists, so the directory↔volume correspondence is
+        # exact and no other claim can take this volume by being large enough.
+        claim_namespace=pvc.namespace if pvc is not None else None,
+        claim_name=pvc.name if pvc is not None else None,
     )
-    return StorageObjects(refs=WorkloadRefs(pvc=name), pvc=pvc)
+    return StorageObjects(
+        refs=WorkloadRefs(pvc=pvc.name if pvc is not None else None), pv=pv, pvc=pvc
+    )

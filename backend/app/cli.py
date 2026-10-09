@@ -91,9 +91,9 @@ async def _sync_rbac() -> int:
         await session.commit()
         print(
             f"RBAC 同步完成：权限 {result.permissions_created} 新增 / "
-            f"{result.permissions_updated} 更新，角色 {result.roles_created} 新增 / "
-            f"{result.roles_updated} 更新，授权 {result.grants_added} 新增 / "
-            f"{result.grants_removed} 移除。"
+            f"{result.permissions_updated} 更新 / {result.permissions_removed} 移除，"
+            f"角色 {result.roles_created} 新增 / {result.roles_updated} 更新，"
+            f"授权 {result.grants_added} 新增 / {result.grants_removed} 移除。"
         )
     return 0
 

@@ -33,6 +33,8 @@ from app.k8s.gateway import (
     PodInfo,
     PvcInfo,
     PvcSpec,
+    PvInfo,
+    PvSpec,
     QuotaSpec,
     SecretSpec,
     ServiceSpec,
@@ -451,10 +453,9 @@ class RealK8sGateway:
                 k8s.V1VolumeMount(
                     name=f"attached-{index}",
                     mount_path=extra.mount_path,
-                    sub_path=extra.sub_path,
-                    # Read-only on the mount *and* on the volume below. Setting
-                    # only one leaves a path that a process can remount or write
-                    # through, which is not what "read-only dataset" means.
+                    # Read-only on the mount *and* on the volume below. Setting only
+                    # one leaves a path a process can remount or write through, which
+                    # is not what "read-only share" means.
                     read_only=extra.read_only or None,
                 )
             )
@@ -692,6 +693,10 @@ class RealK8sGateway:
             spec=k8s.V1PersistentVolumeClaimSpec(
                 access_modes=list(spec.access_modes),
                 storage_class_name=spec.storage_class,
+                # Set for a claim against a statically created volume. Without it
+                # the claim waits for a provisioner that will never run, and the
+                # only symptom is a claim that stays Pending forever.
+                volume_name=spec.volume_name,
                 resources=k8s.V1VolumeResourceRequirements(
                     requests={"storage": f"{spec.size_gb}Gi"}
                 ),
@@ -742,31 +747,101 @@ class RealK8sGateway:
             access_modes=access_modes,
         )
 
-    def resize_pvc(self, namespace: str, name: str, size_gb: int) -> None:
-        """Grow a claim in place.
+    def apply_pv(self, spec: PvSpec) -> None:
+        """Create a statically provisioned volume, or leave an existing one be.
 
-        Only ever an increase. Kubernetes rejects shrinkage at the API server,
-        and a patch that silently no-ops would leave the database claiming
-        capacity the volume does not have.
+        The reclaim policy is pinned to ``Retain`` here rather than taken from
+        the caller: this volume points at a directory that holds the platform's
+        users' data, and a ``Delete`` policy would eventually let Kubernetes
+        remove that directory. There is no case where the platform wants that, so
+        it is not offered as an option.
         """
-        current = self.read_pvc(namespace, name)
-        if current is None:
-            raise K8sError(f"cannot resize missing claim {namespace}/{name}")
-        if current.capacity_gb is not None and size_gb < current.capacity_gb:
-            raise K8sError(
-                f"cannot shrink claim {namespace}/{name} "
-                f"from {current.capacity_gb}Gi to {size_gb}Gi"
-            )
+        try:
+            self._core.read_persistent_volume(spec.name)
+            # Already there. Rewriting it could repoint a bound claim at a
+            # different directory, so an existing volume is authoritative.
+            return
+        except ApiException as exc:
+            if not self._is_not_found(exc):
+                raise self._raise(f"read pv {spec.name}", exc) from exc
 
-        body = k8s.V1PersistentVolumeClaim(
-            spec=k8s.V1PersistentVolumeClaimSpec(
-                resources=k8s.V1VolumeResourceRequirements(requests={"storage": f"{size_gb}Gi"})
+        claim_ref = None
+        if spec.claim_name and spec.claim_namespace:
+            claim_ref = k8s.V1ObjectReference(
+                kind="PersistentVolumeClaim",
+                namespace=spec.claim_namespace,
+                name=spec.claim_name,
             )
+        body = k8s.V1PersistentVolume(
+            metadata=k8s.V1ObjectMeta(name=spec.name, labels=spec.labels or None),
+            spec=k8s.V1PersistentVolumeSpec(
+                capacity={"storage": f"{spec.capacity_gb}Gi"},
+                access_modes=list(spec.access_modes),
+                persistent_volume_reclaim_policy="Retain",
+                volume_mode="Filesystem",
+                # `DirectoryOrCreate`, deliberately: registering a volume is then
+                # enough to make it usable, with no separate provisioning step and
+                # no way for a create to fail because a directory was not made yet.
+                #
+                # The sharp edge is that a mistyped `host_path` also succeeds — the
+                # kubelet creates the wrong directory and the container comes up
+                # with an empty one, which reads to the user as "my data is gone"
+                # rather than as an error. `type="Directory"` would turn that into a
+                # loud mount failure instead. This was chosen knowingly; the
+                # mitigation is that only an administrator can register a volume
+                # (`storage:manage`), so the path is written once, deliberately,
+                # rather than derived from anything a tenant controls.
+                host_path=k8s.V1HostPathVolumeSource(path=spec.host_path, type="DirectoryOrCreate"),
+                # Pre-binding is what makes the directory↔volume correspondence
+                # exact: without it the claim could be satisfied by any volume
+                # that happens to be large enough.
+                claim_ref=claim_ref,
+            ),
         )
         try:
-            self._core.patch_namespaced_persistent_volume_claim(name, namespace, body)
+            self._core.create_persistent_volume(body)
         except ApiException as exc:
-            raise self._raise(f"resize pvc {name}", exc) from exc
+            raise self._raise(f"create pv {spec.name}", exc) from exc
+
+    def read_pv(self, name: str) -> PvInfo | None:
+        try:
+            volume = self._core.read_persistent_volume(name)
+        except ApiException as exc:
+            if self._is_not_found(exc):
+                return None
+            raise self._raise(f"read pv {name}", exc) from exc
+
+        spec = getattr(volume, "spec", None)
+        status = getattr(volume, "status", None)
+        host_path = getattr(getattr(spec, "host_path", None), "path", None)
+        capacity = None
+        raw_capacity = (getattr(spec, "capacity", None) or {}).get("storage")
+        if raw_capacity:
+            capacity = parse_storage_gb(str(raw_capacity))
+        claim = getattr(spec, "claim_ref", None)
+        return PvInfo(
+            name=name,
+            phase=getattr(status, "phase", None) or "Available",
+            host_path=host_path,
+            capacity_gb=capacity,
+            claim_namespace=getattr(claim, "namespace", None),
+            claim_name=getattr(claim, "name", None),
+        )
+
+    def delete_pv(self, name: str) -> None:
+        """Delete the volume object, never the directory behind it.
+
+        Safe because the reclaim policy is ``Retain``: this removes the platform's
+        record of the directory, not the directory. A user's data surviving the
+        deletion of its volume record is the intended outcome, and is why
+        deletion is allowed to be this blunt.
+        """
+        try:
+            self._core.delete_persistent_volume(name)
+        except ApiException as exc:
+            if self._is_not_found(exc):
+                return
+            raise self._raise(f"delete pv {name}", exc) from exc
 
     def scale_deployment(self, namespace: str, name: str, replicas: int) -> None:
         try:

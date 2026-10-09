@@ -241,10 +241,30 @@ def _warnings(settings: Settings, counts: SystemCounts) -> list[SystemWarning]:
             "storage_class_missing",
             "warning",
             "有存储类型没有配置 StorageClass",
-            "对应的「创建数据盘」会在运行时才失败，报错是集群侧的 ProvisioningFailed，"
-            "看不出是配置缺失。",
+            "对应的实例/任务临时数据盘会在运行时才失败，报错是集群侧的 "
+            "ProvisioningFailed，看不出是配置缺失。"
+            "注意这与「存储卷」无关：托管存储卷是静态 hostPath PV，不需要 StorageClass。",
             "设置 " + "、".join(f"STORAGE_CLASS_{name}" for name in missing_classes),
         )
+
+    # The managed-volume layout. Reported as information rather than a warning: the
+    # default is a real path, and whether it exists on the node is a property of the
+    # filesystem provisioning rather than of this configuration. What an operator
+    # cannot discover for themselves is which directories the platform will hand
+    # out, and getting it wrong silently mounts the wrong data.
+    #
+    # Written as an f-string with the placeholders doubled, not `str.format`: the
+    # layout is full of braces, and `.format` reads `{组}` as a field name and
+    # raises `KeyError` — which is a 500 on the system-info endpoint.
+    root = settings.storage_root
+    add(
+        "storage_root",
+        "info",
+        f"托管存储卷目录根：{root}",
+        f"用户卷为 {root}/{{组}}/{{用户名}}，组共享为 {root}/{{组}}/{{目录名}}，"
+        f"组本级为 {root}/{{组}}，全局共享为 {root}/_global/{{名称}}。",
+        "如需修改，设置 STORAGE_ROOT；已创建的存储卷不会被移动",
+    )
 
     # `ssh_mode` is a single-member Literal today (nodeport), so this warns about
     # the address rather than about the mode. When a second mode is added, the

@@ -160,6 +160,42 @@ def error_code(body: object) -> str:
     return ""
 
 
+def ensure_home_volume(
+    admin: str, user_id: int, workspace_id: int, username: str
+) -> int | None:
+    """Register the user's home directory, or find the one already registered.
+
+    The task submitted below has no disk of its own: it mounts the *owner's* storage
+    volume at ``/home/{username}``, and submitting one without a volume is refused
+    with ``user_volume_missing``. So this is a prerequisite of making any usage.
+    """
+    status, body = call(
+        "POST",
+        "/storages",
+        token=admin,
+        body={
+            "name": f"p6-home-{username}",
+            "displayName": f"{username} 的主目录",
+            "kind": "user_volume",
+            "workspaceId": workspace_id,
+            "ownerUserId": user_id,
+            "capacityGb": 10,
+        },
+    )
+    if status == 201 and isinstance(body, dict):
+        return int(body["id"])
+    # A re-run collides on the directory, not the name: a user's directory is fixed
+    # by their group and username. Usernames here carry the run token, so this only
+    # fires for an identical re-run.
+    if status == 409 and error_code(body) == "storage_path_taken":
+        status, page = call("GET", "/storages?kind=user_volume&pageSize=200", token=admin)
+        if status == 200 and isinstance(page, dict):
+            for row in page.get("items", []):
+                if row.get("ownerUsername") == username:
+                    return int(row["id"])
+    return None
+
+
 def ensure_user(admin: str, username: str, group_id: int, role: str = "user") -> int | None:
     status, body = call(
         "POST",
@@ -317,6 +353,15 @@ def main() -> int:
     token_gazer = login(f"p6-gazer-{SUFFIX}-{RUN}", PASSWORD)
     check("四个账号均可登录", None not in (token_a, token_b, token_boss, token_gazer))
     if None in (token_a, token_b, token_boss, token_gazer):
+        return 1
+
+    # Dana's task below mounts her own volume, so it must exist first. She is the
+    # only account here that creates a workload.
+    home_a = ensure_home_volume(
+        admin, worker_a, workspace_ids["a"], f"p6-dana-{SUFFIX}-{RUN}"
+    )
+    check("为甲组用户登记主目录存储卷", home_a is not None, str(home_a))
+    if home_a is None:
         return 1
 
     # --- make some usage --------------------------------------------------

@@ -141,6 +141,42 @@ def ensure_user(admin: str, username: str, group_id: int | None = None) -> int |
     return None
 
 
+def ensure_home_volume(
+    admin: str, user_id: int, workspace_id: int, username: str
+) -> int | None:
+    """Register the user's home directory, or find the one already registered.
+
+    Neither an instance nor a task has a disk of its own: both mount the *owner's*
+    storage volume at ``/home/{username}``, and creating one without a volume is
+    refused with ``user_volume_missing``. Launching an application goes through
+    instance creation, so this is a prerequisite of everything below.
+    """
+    status, body = call(
+        "POST",
+        "/storages",
+        token=admin,
+        body={
+            "name": f"p4-home-{username}",
+            "displayName": f"{username} 的主目录",
+            "kind": "user_volume",
+            "workspaceId": workspace_id,
+            "ownerUserId": user_id,
+            "capacityGb": 10,
+        },
+    )
+    if status == 201 and isinstance(body, dict):
+        return int(body["id"])
+    # A re-run collides on the directory, not the name: a user's directory is fixed
+    # by their group and username.
+    if status == 409 and error_code(body) == "storage_path_taken":
+        status, page = call("GET", "/storages?kind=user_volume&pageSize=200", token=admin)
+        rows = page.get("items", []) if isinstance(page, dict) else []
+        for row in rows:
+            if row.get("ownerUsername") == username:
+                return int(row["id"])
+    return None
+
+
 def main() -> int:
     print("\n\033[1mPhase 4 — 应用程序与自定义任务\033[0m")
 
@@ -282,6 +318,13 @@ def main() -> int:
     )
     check("用户加入工作空间", status in (200, 201), str(status))
 
+    # Everything this script launches — via an application or directly — mounts the
+    # worker's own volume, so it has to exist before the first launch.
+    home_id = ensure_home_volume(admin, worker_id, workspace_id, f"p4-worker-{SUFFIX}")
+    check("为该用户登记主目录存储卷", home_id is not None, str(home_id))
+    if home_id is None:
+        return 1
+
     outsider_id = ensure_user(admin, f"p4-outsider-{SUFFIX}", other_group_id)
     check("建另一个实验室的用户", outsider_id is not None)
 
@@ -307,7 +350,6 @@ def main() -> int:
             "resourceSpecId": spec_id,
             "defaultCpuMilli": 2000,
             "defaultMemoryMb": 4096,
-            "defaultStorageGb": 10,
             "visibility": "workspace",
         },
     )

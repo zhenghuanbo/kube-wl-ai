@@ -259,7 +259,6 @@ const APPLICATION = {
   defaultMemoryMb: 32768,
   defaultGpuType: 'a100',
   defaultGpuCount: 1,
-  defaultStorageGb: 100,
   workspaceId: 1,
   isCurated: false,
   isActive: true,

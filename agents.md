@@ -1948,11 +1948,12 @@ claim 一消失 PV 就 `Released` 且不可重绑，用户的存储会永久挂�
 - 真集群 E2E（`.smoke/e2e_storage.py`，`K8S_ENABLED` 环境下的 `RealK8sGateway`）：
   **全部通过，0 失败，无 PENDING**。第七组"删除后无遗留 PV/PVC"是本步从 **FAIL 修到 PASS**
   的 —— 见下面第 6 条。
-- 真实后端冒烟（独立端口 + 一次性 SQLite，跑完即销毁）：`smoke_phase3.py` **50/50 通过**；
-  `smoke_phase5.py` **75 通过 / 1 失败**，唯一的失败是**本轮明确推迟的镜像问题**
-  （`library/base-notebook:latest` 不在 Harbor 的 `library` 项目里 → `image_not_found_upstream`），
-  存储相关全部通过，包括本步新增的三条：`user_volume_missing` 硬失败、建卷时校验每用户上限、
-  共享卷不受该上限约束。
+- 真实后端冒烟（独立端口 + 一次性 SQLite，跑完即销毁）：**7 个阶段共 377 项通过 / 1 项失败**。
+  `phase3` 50/50、`phase4` 62/62、`phase5` 75/1、`phase6` 62/62、`phase7` 45/45、`phase8` 60/60、
+  `phase9` 23/23（`phase9` 除了 `SMOKE_BASE` 还要 `SMOKE_HEALTH_URL` 指向同一端口）。唯一的失败是
+  **本轮明确推迟的镜像问题**（`library/base-notebook:latest` 不在 Harbor 的 `library` 项目里 →
+  `image_not_found_upstream`，随后脚本读 `body["id"]` 崩掉）。存储相关全过，包括本步新增的三条：
+  `user_volume_missing` 硬失败、建卷时校验每用户上限、共享卷不受该上限约束。
 
 **踩到的第 6 个坑：按需创建的跨命名空间 claim 没人回收。** 真集群 E2E 一开始报
 `集群中无遗留的托管 PV — 残留 ['wl-vol-vol3-4-wl-e2e6']`：`ensure_attachment_claims()` 给每个
@@ -1979,6 +1980,21 @@ claim 一消失 PV 就 `Released` 且不可重绑，用户的存储会永久挂�
 （校验它确实属于该组），只有在**没指定**时才退回"必须唯一"。这一步不动它 —— 那是第一步已经
 评审并写进验收用例 `test_a_group_with_two_workspaces_is_refused_rather_than_guessed_at`
 的行为，属于需要单独决策的改动，不该混在这次提交里。
+
+**踩到的第 8 个坑：冒烟脚本自己也会过期。** 上面这套"全绿"是补了 4 个脚本才得到的，每一个都是
+工作负载的**前置条件**变了：
+`phase3`/`phase4`/`phase6`/`phase7` 都要先为自己的用户登记主目录卷（否则第一次创建实例/应用/任务
+就 409 `user_volume_missing`），`phase4` 的应用创建体里还留着 `defaultStorageGb: 10` ——
+`ApplicationCreate` 是 `extra="forbid"`，所以那是一次 **422**，脚本会停在"创建应用程序"。
+`smoke_frontend_views.mjs` 的应用桩数据里也有同样的字段。
+
+这印证了一件事：**"字段删干净了"不能靠 grep 源码来确认，要靠把每个消费者真的跑一遍。** grep 只
+覆盖了 `backend/app`、`frontend/src` 和测试，`scripts/` 下的 7 个冒烟脚本是独立的一套调用方，它们
+和前端一样会 422。留下的 `storageGb` 命中项都已逐条核对过，全部是**同名不同物**，不是漏网：
+`ResourceGroupLimit.max_storage_gb_per_user`（资源池上限，本步改为在建卷时校验）、
+`QuotaResource.STORAGE` / `usage.storage_gb`（工作空间的存储**配额维度**，本步改为从卷汇总）、
+`parse_storage_gb()`（解析 K8s 容量字符串）、`workspaces.py` 里的命名空间 `requests.storage`
+ResourceQuota，以及若干断言"这个字段已被拒绝/不再回报"的测试与注释。
 
 **同一个 E2E 里还有一条是断言太严，不是产品问题**：`该 claim 已经 Bound` 一开始 FAIL。卷控制器
 先把 **PV** 标成 `Bound`，claim 自己的 `.status.phase` 落后一拍，所以紧跟

@@ -122,6 +122,42 @@ def error_code(body: object) -> str:
     return ""
 
 
+def ensure_home_volume(
+    admin: str, user_id: int, workspace_id: int, username: str
+) -> int | None:
+    """Register the user's home directory, or find the one already registered.
+
+    The instances watched below have no disk of their own: each mounts its *owner's*
+    storage volume at ``/home/{username}``, and creating one without a volume is
+    refused with ``user_volume_missing``. So this is a prerequisite of making
+    anything to monitor.
+    """
+    status, body = call(
+        "POST",
+        "/storages",
+        token=admin,
+        body={
+            "name": f"p7-home-{username}",
+            "displayName": f"{username} 的主目录",
+            "kind": "user_volume",
+            "workspaceId": workspace_id,
+            "ownerUserId": user_id,
+            "capacityGb": 10,
+        },
+    )
+    if status == 201 and isinstance(body, dict):
+        return int(body["id"])
+    # A re-run collides on the directory, not the name. Usernames here carry the run
+    # token, so this only fires for an identical re-run.
+    if status == 409 and error_code(body) == "storage_path_taken":
+        status, page = call("GET", "/storages?kind=user_volume&pageSize=200", token=admin)
+        if status == 200:
+            for row in rows_of(page):
+                if row.get("ownerUsername") == username:
+                    return int(row["id"])
+    return None
+
+
 def rows_of(page: object) -> list[dict]:
     if isinstance(page, list):
         return [row for row in page if isinstance(row, dict)]
@@ -306,6 +342,17 @@ def main() -> int:
     check("四个账号均可登录", None not in (token_a, token_b, token_boss, token_gazer))
     if None in (token_a, token_b, token_boss, token_gazer):
         return 1
+
+    # The two instances below mount their owners' volumes, so both must exist first.
+    # Dana (lab A) and Erin (lab B) are the only accounts that create a workload.
+    for worker, tag, username in (
+        (worker_a, "a", f"p7-dana-{SUFFIX}-{RUN}"),
+        (worker_b, "b", f"p7-erin-{SUFFIX}-{RUN}"),
+    ):
+        home = ensure_home_volume(admin, worker, workspace_ids[tag], username)
+        check(f"为用户 {username} 登记主目录存储卷", home is not None, str(home))
+        if home is None:
+            return 1
 
     # --- live containers to be watched ------------------------------------
     instance_names: dict[str, str] = {}

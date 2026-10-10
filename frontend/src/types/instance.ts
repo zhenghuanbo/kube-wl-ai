@@ -44,7 +44,6 @@ export interface InstanceSummary {
   memoryMb: number
   gpuType: string
   gpuCount: number
-  storageGb: number
   sshEnabled: boolean
   sshNodePort?: number | null
   nodeName?: string | null
@@ -83,13 +82,12 @@ export interface InstanceCreatePayload {
   resourceSpecId: number
   image: string
   ideType?: IdeType
-  storageGb?: number | null
   /**
-   * Persistent volumes to mount beyond the instance's own scratch claim.
+   * Extra volumes to mount, beyond the owner's home volume.
    *
-   * Attached capacity is not charged against `storageGb`: each volume settled
-   * its quota when it was created, and counting the same gigabyte twice would
-   * make a workspace hit its ceiling for no reason.
+   * The home volume is not chosen here: it is always mounted at `/home/{username}`,
+   * because an instance without it would have no home at all. Nothing listed here
+   * is charged to a quota — a volume settled its own when it was registered.
    */
   storageIds?: number[]
   sshEnabled?: boolean

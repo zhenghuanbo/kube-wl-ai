@@ -50,7 +50,6 @@ class InstanceSummary(ApiModel):
     memory_mb: int
     gpu_type: str
     gpu_count: int
-    storage_gb: int
     ssh_enabled: bool
     #: Present only once the Service has been allocated a port.
     ssh_node_port: int | None = None
@@ -87,7 +86,6 @@ class InstanceSummary(ApiModel):
             memory_mb=instance.memory_mb,  # type: ignore[attr-defined]
             gpu_type=instance.gpu_type,  # type: ignore[attr-defined]
             gpu_count=instance.gpu_count,  # type: ignore[attr-defined]
-            storage_gb=instance.storage_gb,  # type: ignore[attr-defined]
             ssh_enabled=instance.ssh_enabled,  # type: ignore[attr-defined]
             ssh_node_port=instance.ssh_node_port,  # type: ignore[attr-defined]
             node_name=instance.node_name,  # type: ignore[attr-defined]
@@ -129,17 +127,16 @@ class InstanceCreate(ApiModel):
     resource_spec_id: int
     image: str = Field(min_length=1, max_length=512)
     ide_type: IdeType = IdeType.NONE
-    #: Overrides the pool's storage allowance; capped by it.
-    storage_gb: int | None = Field(default=None, ge=1, le=10240)
     ssh_enabled: bool = True
     #: How long the instance may run. Omitted means "the pool's maximum", which
     #: is itself ``None`` for a pool that sets no limit. A value above the
     #: pool's cap is rejected rather than clamped: the options are offered by
     #: the UI, so exceeding the cap is an attempt to bypass it.
     max_runtime_seconds: int | None = Field(default=None, ge=60)
-    #: Persistent volumes to mount, beyond the instance's own scratch claim.
-    #: Attached capacity is *not* charged against `storage_gb`: each volume was
-    #: already accounted for when it was created.
+    #: Extra volumes to mount, beyond the owner's home volume — which is always
+    #: mounted and cannot be chosen, because an instance has no home without it.
+    #: Nothing here is charged to a quota: a volume was accounted for when it was
+    #: registered.
     storage_ids: list[int] = Field(default_factory=list, max_length=16)
 
     @field_validator("name")

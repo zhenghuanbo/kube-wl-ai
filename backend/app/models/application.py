@@ -94,7 +94,6 @@ class Application(Base, TimestampMixin):
     default_memory_mb: Mapped[int] = mapped_column(Integer, nullable=False, default=4096)
     default_gpu_type: Mapped[str] = mapped_column(String(32), nullable=False, default="none")
     default_gpu_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    default_storage_gb: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     #: Non-secret environment, e.g. ``{"OMP_NUM_THREADS": "8"}``. Secrets must go
     #: through a Secret, which this table deliberately has no way to express.
     env: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)

@@ -170,8 +170,7 @@ interface CreateForm {
   resourceSpecId: number | null
   image: string
   ideType: IdeType
-  storageGb: number | null
-  /** Persistent volumes to mount beyond the instance's own scratch claim. */
+  /** Extra volumes to mount, beyond the home volume that is always mounted. */
   storageIds: number[]
   sshEnabled: boolean
   maxRuntimeSeconds: number | null
@@ -188,7 +187,6 @@ const form = reactive<CreateForm>({
   resourceSpecId: null,
   image: '',
   ideType: 'jupyter',
-  storageGb: null,
   storageIds: [],
   sshEnabled: true,
   maxRuntimeSeconds: null,
@@ -215,8 +213,6 @@ const runtimeOptions = computed(() => {
     },
   ]
 })
-
-const storageCap = computed(() => selectedPool.value?.limits?.maxStorageGbPerUser ?? null)
 
 /**
  * Volumes this instance could mount.
@@ -283,7 +279,6 @@ function resetForm(): void {
     resourceSpecId: null,
     image: '',
     ideType: 'jupyter',
-    storageGb: null,
     storageIds: [],
     sshEnabled: true,
     maxRuntimeSeconds: null,
@@ -321,11 +316,8 @@ async function selectPool(resourceGroupId: number | null): Promise<void> {
 
   try {
     selectedPool.value = await getResourceGroup(resourceGroupId)
-    // Storage and runtime default to whatever the pool allows, so the common
-    // case is one click rather than three decisions.
-    form.storageGb = selectedPool.value.limits?.maxStorageGbPerUser
-      ? Math.min(10, selectedPool.value.limits.maxStorageGbPerUser)
-      : 10
+    // The pool no longer decides a storage size: an instance has no disk of its
+    // own and mounts the owner's home volume. Only the runtime default is left.
     form.maxRuntimeSeconds = null
     if (availableSpecs.value.length === 1) {
       form.resourceSpecId = availableSpecs.value[0].id
@@ -353,7 +345,6 @@ async function submitCreate(): Promise<void> {
       resourceSpecId: form.resourceSpecId!,
       image: form.image.trim(),
       ideType: form.ideType,
-      storageGb: form.storageGb,
       storageIds: form.storageIds,
       sshEnabled: form.sshEnabled,
       maxRuntimeSeconds: form.maxRuntimeSeconds,
@@ -687,7 +678,6 @@ const workspaceChoices = computed(() =>
 
         <template #item.shape="{ item }">
           <div>{{ shapeOf(item) }}</div>
-          <div class="text-caption text-medium-emphasis">{{ item.storageGb }} GB 存储</div>
         </template>
 
         <template #item.image="{ item }">
@@ -977,19 +967,6 @@ const workspaceChoices = computed(() =>
               />
             </v-col>
 
-            <v-col cols="12" sm="6">
-              <v-text-field
-                v-model.number="form.storageGb"
-                type="number"
-                label="主目录存储 (GB)"
-                density="comfortable"
-                variant="outlined"
-                hide-details="auto"
-                :max="storageCap ?? undefined"
-                :hint="storageCap ? `资源组上限 ${storageCap} GB` : undefined"
-                persistent-hint
-              />
-            </v-col>
             <v-col cols="12" sm="6" class="d-flex align-center">
               <v-switch
                 v-model="form.sshEnabled"
@@ -1077,8 +1054,10 @@ const workspaceChoices = computed(() =>
                   <td>{{ shapeOf(detail) }}</td>
                 </tr>
                 <tr>
-                  <th class="wl-key">存储</th>
-                  <td>{{ detail.storageGb }} GB</td>
+                  <th class="wl-key">主目录</th>
+                  <td class="wl-mono">
+                    {{ detail.ownerUsername ? `/home/${detail.ownerUsername}` : '—' }}
+                  </td>
                 </tr>
                 <tr>
                   <th class="wl-key">镜像</th>
@@ -1228,7 +1207,7 @@ const workspaceChoices = computed(() =>
       title="删除实例"
       :text="
         deleteTarget
-          ? `将删除实例 ${deleteTarget.name} 及其主目录数据（${deleteTarget.storageGb} GB）。此操作不可撤销。`
+          ? `将删除实例 ${deleteTarget.name}。存储卷与主目录数据不会被删除。此操作不可撤销。`
           : ''
       "
       confirm-text="删除"

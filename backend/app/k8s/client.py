@@ -209,6 +209,31 @@ class KubernetesExecSession:
             return True
 
 
+def _pv_info(volume: Any) -> PvInfo:
+    """Reduce a volume to the few facts the platform acts on.
+
+    Used by both ``read_pv`` and ``list_pvs`` so a volume read by name and the same
+    volume read from a list can never disagree — which matters because the cleanup
+    sweep trusts the list to decide what to delete.
+    """
+    spec = getattr(volume, "spec", None)
+    status = getattr(volume, "status", None)
+    host_path = getattr(getattr(spec, "host_path", None), "path", None)
+    capacity = None
+    raw_capacity = (getattr(spec, "capacity", None) or {}).get("storage")
+    if raw_capacity:
+        capacity = parse_storage_gb(str(raw_capacity))
+    claim = getattr(spec, "claim_ref", None)
+    return PvInfo(
+        name=getattr(getattr(volume, "metadata", None), "name", None) or "",
+        phase=getattr(status, "phase", None) or "Available",
+        host_path=host_path,
+        capacity_gb=capacity,
+        claim_namespace=getattr(claim, "namespace", None),
+        claim_name=getattr(claim, "name", None),
+    )
+
+
 def _pod_info(pod: Any) -> PodInfo:
     """Reduce a pod to the few facts the platform actually acts on."""
     statuses = pod.status.container_statuses or []
@@ -811,22 +836,15 @@ class RealK8sGateway:
                 return None
             raise self._raise(f"read pv {name}", exc) from exc
 
-        spec = getattr(volume, "spec", None)
-        status = getattr(volume, "status", None)
-        host_path = getattr(getattr(spec, "host_path", None), "path", None)
-        capacity = None
-        raw_capacity = (getattr(spec, "capacity", None) or {}).get("storage")
-        if raw_capacity:
-            capacity = parse_storage_gb(str(raw_capacity))
-        claim = getattr(spec, "claim_ref", None)
-        return PvInfo(
-            name=name,
-            phase=getattr(status, "phase", None) or "Available",
-            host_path=host_path,
-            capacity_gb=capacity,
-            claim_namespace=getattr(claim, "namespace", None),
-            claim_name=getattr(claim, "name", None),
-        )
+        return _pv_info(volume)
+
+    def list_pvs(self, label_selector: str) -> list[PvInfo]:
+        """Volumes matching a selector. See the protocol for why this is needed."""
+        try:
+            response = self._core.list_persistent_volume(label_selector=label_selector)
+        except ApiException as exc:
+            raise self._raise(f"list pvs ({label_selector})", exc) from exc
+        return [_pv_info(volume) for volume in response.items]
 
     def delete_pv(self, name: str) -> None:
         """Delete the volume object, never the directory behind it.
@@ -926,9 +944,20 @@ class RealK8sGateway:
         if spec.gpu_count > 0 and spec.gpu_type not in ("", "none"):
             resources.limits["nvidia.com/gpu"] = str(spec.gpu_count)
 
-        mounts = (
-            [k8s.V1VolumeMount(name="data", mount_path=spec.mount_path)] if spec.pvc_name else None
-        )
+        mounts: list[Any] = []
+        if spec.pvc_name:
+            mounts.append(k8s.V1VolumeMount(name="home", mount_path=spec.mount_path))
+        for index, extra in enumerate(spec.extra_mounts):
+            mounts.append(
+                k8s.V1VolumeMount(
+                    name=f"attached-{index}",
+                    mount_path=extra.mount_path,
+                    # Read-only on the mount *and* on the volume below. Setting only
+                    # one leaves a path a process can remount or write through, which
+                    # is not what "read-only share" means.
+                    read_only=extra.read_only or None,
+                )
+            )
         return k8s.V1Container(
             name="main",
             image=spec.image,
@@ -937,21 +966,32 @@ class RealK8sGateway:
             env=[k8s.V1EnvVar(name=k, value=v) for k, v in spec.env.items()] or None,
             working_dir=spec.working_dir,
             resources=resources,
-            volume_mounts=mounts,
+            volume_mounts=mounts or None,
         )
 
     @staticmethod
     def _job_volumes(spec: JobSpec) -> list[Any] | None:
-        if not spec.pvc_name:
-            return None
-        return [
-            k8s.V1Volume(
-                name="data",
-                persistent_volume_claim=k8s.V1PersistentVolumeClaimVolumeSource(
-                    claim_name=spec.pvc_name
-                ),
+        volumes: list[Any] = []
+        if spec.pvc_name:
+            volumes.append(
+                k8s.V1Volume(
+                    name="home",
+                    persistent_volume_claim=k8s.V1PersistentVolumeClaimVolumeSource(
+                        claim_name=spec.pvc_name
+                    ),
+                )
             )
-        ]
+        for index, extra in enumerate(spec.extra_mounts):
+            volumes.append(
+                k8s.V1Volume(
+                    name=f"attached-{index}",
+                    persistent_volume_claim=k8s.V1PersistentVolumeClaimVolumeSource(
+                        claim_name=extra.pvc_name,
+                        read_only=extra.read_only or None,
+                    ),
+                )
+            )
+        return volumes or None
 
     def read_job(self, namespace: str, name: str) -> JobInfo | None:
         try:

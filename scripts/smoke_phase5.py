@@ -279,6 +279,11 @@ def main() -> int:
     check("普通用户登录", token is not None)
     if token is None:
         return 1
+    # The second account is a member of the same workspace and is deliberately never
+    # given a directory, which makes it the account for every "no home" case below.
+    peer_token = login(f"p5-peer-{SUFFIX}", PASSWORD)
+    if peer_token is None:
+        return 1
 
     # --- the catalogue is reachable ---------------------------------------
     print("\n\033[1m列表与权限\033[0m")
@@ -559,16 +564,15 @@ def main() -> int:
             "image": "registry.local/base:1",
             "ideType": "none",
             "sshEnabled": False,
-            "storageGb": 5,
             "storageIds": [share_id],
         },
     )
     check("带共享存储创建实例", status == 201, str(instance))
     instance_id = int(instance["id"]) if isinstance(instance, dict) else 0
     check(
-        "附加存储不重复计入配额",
-        isinstance(instance, dict) and instance.get("storageGb") == 5,
-        str(instance.get("storageGb") if isinstance(instance, dict) else None),
+        "实例不再回报 storageGb（实例已不自带磁盘）",
+        isinstance(instance, dict) and "storageGb" not in instance,
+        str(sorted(instance) if isinstance(instance, dict) else instance),
     )
 
     status, body = call(
@@ -582,7 +586,6 @@ def main() -> int:
             "image": "registry.local/base:1",
             "ideType": "none",
             "sshEnabled": False,
-            "storageGb": 5,
             "storageIds": [home_id],
         },
     )
@@ -603,7 +606,6 @@ def main() -> int:
             "image": "registry.local/base:1",
             "ideType": "none",
             "sshEnabled": False,
-            "storageGb": 5,
             "storageIds": [root_volume_id],
         },
     )
@@ -624,13 +626,34 @@ def main() -> int:
             "image": "registry.local/base:1",
             "ideType": "none",
             "sshEnabled": False,
-            "storageGb": 5,
             "storageIds": [999999],
         },
     )
     check(
         "不存在的存储被拒（404）",
         status == 404 and error_code(body) == "storage_not_found",
+        f"{status} {body}",
+    )
+
+    # The peer is in the same workspace but was never given a directory. Starting an
+    # instance for them used to mean an empty scratch disk; now it means an empty
+    # *home*, so it has to be a refusal whose message says who can fix it.
+    status, body = call(
+        "POST",
+        "/instances",
+        token=peer_token,
+        body={
+            "name": sname("nohome"),
+            "resourceGroupId": pool_id,
+            "resourceSpecId": spec_id,
+            "image": "registry.local/base:1",
+            "ideType": "none",
+            "sshEnabled": False,
+        },
+    )
+    check(
+        "没有个人存储卷的用户不能创建工作负载（user_volume_missing）",
+        status == 400 and error_code(body) == "user_volume_missing",
         f"{status} {body}",
     )
 
@@ -757,6 +780,60 @@ def main() -> int:
         f"{before} -> {after_delete}",
     )
 
+    # --- the per-user ceiling, which moved here -----------------------------
+    print("\n\033[1m每用户存储上限（在登记时生效）\033[0m")
+    status, body = call(
+        "PUT",
+        f"/resource-groups/{pool_id}/limits",
+        token=admin,
+        body={"maxStorageGbPerUser": 20},
+    )
+    check("设置资源组每用户存储上限", status == 200, f"{status} {body}")
+
+    status, body = call(
+        "POST",
+        "/storages",
+        token=admin,
+        body={
+            "name": sname("toobig"),
+            "kind": "user_volume",
+            "workspaceId": workspace_id,
+            "ownerUserId": peer_id,
+            "capacityGb": 500,
+        },
+    )
+    check(
+        "登记超过每用户上限的个人卷被拒",
+        status == 400 and error_code(body) == "storage_exceeds_pool_limit",
+        f"{status} {body}",
+    )
+
+    # A share is not a personal home, so the per-user ceiling must not apply to it:
+    # sizing a group's shared directory by whichever member registered it would be
+    # meaningless.
+    status, body = call(
+        "POST",
+        "/storages",
+        token=admin,
+        body={"name": sname("wideshare"), "kind": "global_share", "capacityGb": 500},
+    )
+    check(
+        "共享卷不受每用户上限约束",
+        status in (200, 201),
+        f"{status} {body}",
+    )
+    if isinstance(body, dict) and "id" in body:
+        call("DELETE", f"/storages/{body['id']}", token=admin)
+
+    # Put the ceiling back to the schema default so a re-run is not affected by the
+    # deliberately tiny value used above.
+    call(
+        "PUT",
+        f"/resource-groups/{pool_id}/limits",
+        token=admin,
+        body={"maxStorageGbPerUser": 100},
+    )
+
     # --- the image catalogue -----------------------------------------------
     print("\n\033[1m镜像目录\033[0m")
     status, body = call("GET", "/images", token=token)
@@ -857,7 +934,6 @@ def main() -> int:
         f"{status} {body}",
     )
 
-    peer_token = login(f"p5-peer-{SUFFIX}", PASSWORD)
     status, _ = call("GET", f"/images/{image_id}", token=peer_token)
     check("同事看不到他人的私有镜像（404）", status == 404, str(status))
 

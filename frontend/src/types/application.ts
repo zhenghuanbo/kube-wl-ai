@@ -92,7 +92,6 @@ export interface ApplicationSummary {
   defaultMemoryMb: number
   defaultGpuType: string
   defaultGpuCount: number
-  defaultStorageGb: number
   visibility: ApplicationVisibility
   isCurated: boolean
   isActive: boolean
@@ -124,7 +123,6 @@ export interface ApplicationCreatePayload {
   defaultMemoryMb?: number
   defaultGpuType?: string
   defaultGpuCount?: number
-  defaultStorageGb?: number
   env?: Record<string, string>
   visibility?: ApplicationVisibility
 }
@@ -143,7 +141,6 @@ export interface ApplicationLaunchPayload {
   ownerUserId?: number | null
   resourceGroupId?: number | null
   resourceSpecId?: number | null
-  storageGb?: number | null
   maxRuntimeSeconds?: number | null
   sshEnabled?: boolean
 }

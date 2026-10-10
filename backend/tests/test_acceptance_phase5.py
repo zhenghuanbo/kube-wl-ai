@@ -43,6 +43,7 @@ from app.core.config import Settings
 from app.core.errors import BadRequestError
 from app.k8s import FakeK8sGateway
 from app.k8s.gateway import PvcInfo, PvInfo
+from app.k8s.naming import storage_pv_name, storage_pvc_name
 from app.models.enums import GroupKind, GroupRole, RoleScope, StorageKind
 from app.models.group import Group
 from app.models.storage import Storage
@@ -85,7 +86,7 @@ async def act_as(client: AsyncClient, username: str) -> AsyncClient:
     return client
 
 
-async def build_world(admin_client: AsyncClient, seeded: AsyncSession) -> World:
+async def build_world(admin_client: AsyncClient, seeded: AsyncSession, settings: Settings) -> World:
     lab_a = await factories.create_group(seeded, name="s5-lab-a", kind=GroupKind.LAB)
     lab_b = await factories.create_group(seeded, name="s5-lab-b", kind=GroupKind.LAB)
 
@@ -182,8 +183,57 @@ async def add_member(admin_client: AsyncClient, workspace_id: int, user_id: int)
 
 
 @pytest.fixture
-async def world(admin_client: AsyncClient, seeded: AsyncSession) -> World:
-    return await build_world(admin_client, seeded)
+async def world(admin_client: AsyncClient, seeded: AsyncSession, settings: Settings) -> World:
+    return await build_world(admin_client, seeded, settings)
+
+
+@pytest.fixture
+async def home(admin_client: AsyncClient, world: World) -> int:
+    """Register dana's own directory, the way an administrator would.
+
+    Opt-in rather than part of ``world``: most of this file is about registering and
+    inspecting volumes, and a pre-existing volume for dana would collide with the
+    tests that register hers themselves (``storage_path_taken``). Only the tests
+    that go as far as *starting a workload* need it — and those are exactly the ones
+    where the missing-home refusal would otherwise fire first.
+
+    Created through the API so the real registration path runs: directory
+    derivation, the PV/PVC pair, and the claim name the pod will mount.
+    """
+    response = await admin_client.post(
+        STORAGES,
+        json={
+            "name": "s5-dana-home",
+            "displayName": "Dana 的主目录",
+            "kind": "user_volume",
+            "workspaceId": world.workspace_id,
+            "ownerUserId": world.user_a.id,
+            "capacityGb": 10,
+        },
+    )
+    assert response.status_code == 201, response.text
+    return int(response.json()["id"])
+
+
+async def register_home(client: AsyncClient, world: World, name: str, owner_user_id: int) -> int:
+    """Register a home directory for ``owner_user_id``.
+
+    The caller must already be acting as a global admin. Used by the tests where the
+    *acting* account owns the instance, so `home` (dana's) is not the one needed.
+    """
+    response = await client.post(
+        STORAGES,
+        json={
+            "name": name,
+            "displayName": name,
+            "kind": "user_volume",
+            "workspaceId": world.workspace_id,
+            "ownerUserId": owner_user_id,
+            "capacityGb": 10,
+        },
+    )
+    assert response.status_code == 201, response.text
+    return int(response.json()["id"])
 
 
 def instance_payload(world: World, name: str, **overrides: object) -> dict[str, object]:
@@ -196,7 +246,6 @@ def instance_payload(world: World, name: str, **overrides: object) -> dict[str, 
         "image": "registry.local/base:1",
         "ideType": "none",
         "sshEnabled": False,
-        "storageGb": 5,
     }
     payload.update(overrides)
     return payload
@@ -487,7 +536,7 @@ async def test_a_plain_member_cannot_see_the_group_directory(
 
 
 async def test_a_plain_member_cannot_mount_the_group_directory(
-    client: AsyncClient, world: World
+    client: AsyncClient, world: World, home: int
 ) -> None:
     """Visibility is checked before anything that describes the volume."""
     await act_as(client, "s5-root")
@@ -526,7 +575,7 @@ async def test_a_plain_member_is_not_offered_the_group_directory(
 
 
 async def test_a_group_admin_can_see_and_mount_the_group_directory(
-    client: AsyncClient, world: World, gateway: FakeK8sGateway
+    client: AsyncClient, world: World, gateway: FakeK8sGateway, home: int
 ) -> None:
     """The group administrator is who the group's own directory exists for.
 
@@ -544,7 +593,7 @@ async def test_a_group_admin_can_see_and_mount_the_group_directory(
     assert detail.json()["isGroupLevel"] is True
 
     instance_id = await make_instance(
-        client, world, "audit", ownerUserId=world.admin_a.id, storageIds=[volume_id]
+        client, world, "audit", ownerUserId=world.user_a.id, storageIds=[volume_id]
     )
     deployment = gateway.deployments[f"{world.namespace}/wl-audit-{instance_id}"]
     assert [mount.mount_path for mount in deployment.extra_mounts] == ["/mnt/group_shared"]
@@ -552,7 +601,7 @@ async def test_a_group_admin_can_see_and_mount_the_group_directory(
 
 
 async def test_a_group_admin_by_role_grant_can_see_and_mount_the_group_directory(
-    client: AsyncClient, world: World, seeded: AsyncSession, admin_client: AsyncClient
+    client: AsyncClient, world: World, seeded: AsyncSession, admin_client: AsyncClient, home: int
 ) -> None:
     """Both sources of group-admin authority mean the same thing to storage.
 
@@ -572,6 +621,9 @@ async def test_a_group_admin_by_role_grant_can_see_and_mount_the_group_directory
     await add_member(admin_client, world.workspace_id, by_role.id)
 
     await act_as(client, "s5-root")
+    # The by-role administrator owns the instance it creates, so it needs a home of
+    # its own before the missing-home refusal would otherwise fire first.
+    await register_home(client, world, "s5-by-role-home", by_role.id)
     volume_id, _ = await make_storage(
         client, "s5-whole-group", kind="group_share", groupId=world.lab_a.id
     )
@@ -592,7 +644,7 @@ async def test_a_group_admin_by_role_grant_can_see_and_mount_the_group_directory
 
 
 async def test_a_member_with_neither_source_of_authority_is_refused(
-    client: AsyncClient, world: World
+    client: AsyncClient, world: World, home: int
 ) -> None:
     """The reverse of the rule above: no membership flag and no role grant means no access.
 
@@ -773,7 +825,7 @@ async def test_placing_a_volume_creates_no_workload(
 # Mount paths
 # ---------------------------------------------------------------------------
 async def test_the_first_share_of_a_kind_takes_the_default_mount_path(
-    client: AsyncClient, world: World, gateway: FakeK8sGateway
+    client: AsyncClient, world: World, gateway: FakeK8sGateway, home: int
 ) -> None:
     await act_as(client, "s5-root")
     share_id, _ = await make_storage(
@@ -788,7 +840,7 @@ async def test_the_first_share_of_a_kind_takes_the_default_mount_path(
 
 
 async def test_a_second_share_of_a_kind_is_mounted_under_the_first(
-    client: AsyncClient, world: World, gateway: FakeK8sGateway
+    client: AsyncClient, world: World, gateway: FakeK8sGateway, home: int
 ) -> None:
     """Two volumes cannot occupy one directory, so which gets the default path depends on the set.
 
@@ -980,36 +1032,37 @@ async def test_an_ordinary_user_is_not_offered_their_own_volume_to_attach(
 # Attachment rules
 # ---------------------------------------------------------------------------
 async def test_a_users_volume_cannot_be_mounted_explicitly(
-    client: AsyncClient, world: World
+    client: AsyncClient, world: World, home: int
 ) -> None:
-    await act_as(client, "s5-root")
-    volume_id, _ = await make_storage(
-        client, "home", kind="user_volume", ownerUserId=world.user_a.id
-    )
+    """The home is mounted for you, so asking for it is refused rather than doubled.
 
+    ``home`` is dana's registered directory; naming it in ``storageIds`` would put
+    the same claim at two mount paths.
+    """
     await act_as(client, "s5-dana")
     response = await client.post(
         "/api/v1/instances",
-        json=instance_payload(world, "explicit", storageIds=[volume_id]),
+        json=instance_payload(world, "explicit", storageIds=[home]),
     )
 
     assert response.status_code == 400, response.text
     assert error_code(response) == "storage_user_volume_implicit"
 
 
-async def test_a_global_share_cannot_be_mounted_until_it_has_a_claim(
-    client: AsyncClient, world: World
+async def test_a_global_share_is_mountable_and_gets_a_claim_on_demand(
+    client: AsyncClient, world: World, gateway: FakeK8sGateway, home: int
 ) -> None:
-    """The boundary the per-namespace claim work has to cross.
+    """The boundary the per-namespace claim work had to cross — now crossed.
 
-    A global share is offered in the picker — everybody can see it — but a claim
-    lives in exactly one namespace and this volume has none, so attaching it fails
-    before submission rather than producing a container stuck in
-    ``ContainerCreating`` with no useful message. Until claims are created per
-    namespace, the offer and the ability disagree.
+    A global share has no namespace of its own, so the claim is created the first
+    time somebody mounts it (one PV+PVC pair per namespace, because a PV binds to
+    exactly one claim). What used to be a 400 ``storage_claim_missing`` is now a
+    created claim: the offer in the picker and the ability to use it agree.
     """
     await act_as(client, "s5-root")
-    volume_id, _ = await make_storage(client, "public-data", kind="global_share")
+    volume_id, volume = await make_storage(client, "public-data", kind="global_share")
+    # A global share genuinely has no home namespace — that is why it needs this.
+    assert volume["k8sNamespace"] is None
 
     await act_as(client, "s5-dana")
     response = await client.post(
@@ -1017,17 +1070,78 @@ async def test_a_global_share_cannot_be_mounted_until_it_has_a_claim(
         json=instance_payload(world, "wide", storageIds=[volume_id]),
     )
 
-    assert response.status_code == 400, response.text
-    assert error_code(response) == "storage_claim_missing"
+    assert response.status_code == 201, response.text
+    # The claim is derived from the volume and the namespace, so it can be computed
+    # rather than discovered — which is the whole point of deriving it.
+    expected_claim = storage_pvc_name(volume_id, "public-data", namespace=world.namespace)
+    assert f"{world.namespace}/{expected_claim}" in gateway.pvcs, sorted(gateway.pvcs)
+    # And the pod mounts it at the global-share default path.
+    deployment = next(iter(gateway.deployments.values()))
+    assert [m.mount_path for m in deployment.extra_mounts] == ["/mnt/global_shared"]
+    assert [m.pvc_name for m in deployment.extra_mounts] == [expected_claim]
 
 
-async def test_a_volume_cannot_be_mounted_from_another_namespace(
-    client: AsyncClient, world: World, admin_client: AsyncClient
+async def test_retiring_a_global_share_removes_every_namespace_claim_it_created(
+    client: AsyncClient, world: World, gateway: FakeK8sGateway, home: int
 ) -> None:
-    """Caught before submission because the scheduler's version is invisible.
+    """The on-demand claims are recorded nowhere, so deleting must sweep by label.
 
-    A claim lives in one namespace and a pod can only mount claims from its own;
-    the symptom on the cluster is a container that never starts and says nothing.
+    A global share gets a PV+PVC pair per namespace that mounts it, and none of
+    those is written to the database — they are derivable, which is why there is no
+    child table. The cost of that choice is here: ``delete_storage`` knows only the
+    volume's own name, so without a label sweep every namespace that ever mounted
+    the share is left with an orphaned ``Retain`` volume. Nothing in the UI shows it
+    and nothing else will ever delete it.
+    """
+    await act_as(client, "s5-root")
+    volume_id, volume = await make_storage(client, "public-data", kind="global_share")
+
+    # Mount it from this workspace, which creates the extra pair.
+    await act_as(client, "s5-dana")
+    created = await client.post(
+        "/api/v1/instances",
+        json=instance_payload(world, "wide", storageIds=[volume_id]),
+    )
+    assert created.status_code == 201, created.text
+
+    extra_pv = storage_pv_name(volume_id, "public-data", namespace=world.namespace)
+    extra_claim = storage_pvc_name(volume_id, "public-data", namespace=world.namespace)
+    assert extra_pv in gateway.pvs, sorted(gateway.pvs)
+    assert f"{world.namespace}/{extra_claim}" in gateway.pvcs, sorted(gateway.pvcs)
+    # The volume's own PV, which has no claim (a global share belongs to no
+    # namespace), plus the one just created for this workspace.
+    assert volume["pvcName"] is None
+
+    # Retire the instance first: a volume still mounted cannot be deleted.
+    instance_id = created.json()["id"]
+    deleted = await client.delete(f"/api/v1/instances/{instance_id}")
+    assert deleted.status_code in (200, 204), deleted.text
+
+    await act_as(client, "s5-root")
+    retired = await client.delete(f"{STORAGES}/{volume_id}")
+    assert retired.status_code == 200, retired.text
+
+    # Both the volume's own object and the per-namespace pair are gone. The *home*
+    # claim legitimately remains — it belongs to a different volume, and home claims
+    # carry no namespace suffix because they live in their own volume's namespace.
+    assert extra_pv not in gateway.pvs, sorted(gateway.pvs)
+    assert f"{world.namespace}/{extra_claim}" not in gateway.pvcs, sorted(gateway.pvcs)
+    home_claim = storage_pvc_name(home, "s5-dana-home")
+    assert f"{world.namespace}/{home_claim}" in gateway.pvcs, sorted(gateway.pvcs)
+
+
+async def test_a_group_share_from_another_lab_stays_out_of_reach(
+    client: AsyncClient, world: World, admin_client: AsyncClient, home: int
+) -> None:
+    """A group share is bound to one workspace, so a foreign namespace has no claim.
+
+    The old blanket rule — refuse anything whose ``k8s_namespace`` differs — could not
+    survive the global share, which has *no* namespace and must be mountable. So the
+    global share gets a claim created per namespace instead. A **group** share does
+    not: it belongs to exactly one workspace, and reaching it from another namespace
+    would mean a second claim over another group's directory. Seeing it (as a global
+    admin can) is not a reason to mount it, so the refusal is explicit rather than a
+    silently missing claim.
     """
     beta = await admin_client.post(
         "/api/v1/workspaces",
@@ -1078,6 +1192,65 @@ async def test_a_group_share_must_name_its_group(client: AsyncClient, world: Wor
 
     assert response.status_code == 400, response.text
     assert error_code(response) == "storage_requires_group"
+
+
+async def test_the_per_user_storage_ceiling_is_checked_when_the_volume_is_registered(
+    client: AsyncClient, world: World, admin_client: AsyncClient
+) -> None:
+    """The `maxStorageGbPerUser` ceiling moved to where storage is actually created.
+
+    It used to cap each instance's ``storageGb``. Instances no longer have a disk, so
+    the only place a size is chosen is here — registering the directory. Left on the
+    old path it would have become a limit nobody could reach, which is worse than no
+    limit: the pool page would advertise a ceiling that never refused anything.
+    """
+    limited = await admin_client.put(
+        f"/api/v1/resource-groups/{world.pool_id}/limits",
+        json={"maxStorageGbPerUser": 20},
+    )
+    assert limited.status_code == 200, limited.text
+
+    await act_as(client, "s5-root")
+    too_big = await client.post(
+        STORAGES,
+        json={
+            "name": "huge-home",
+            "kind": "user_volume",
+            "workspaceId": world.workspace_id,
+            "ownerUserId": world.user_a.id,
+            "capacityGb": 500,
+        },
+    )
+
+    assert too_big.status_code == 400, too_big.text
+    assert error_code(too_big) == "storage_exceeds_pool_limit"
+    # The message names the binding pool, not just the number: a workspace can hold
+    # several grants and the reader has to know which one to raise.
+    assert "s5-pool" in too_big.json()["error"]["message"]
+
+    # Exactly at the ceiling is accepted: the rule is a maximum, not an exclusive
+    # bound. A different owner, so this does not trip over the directory-uniqueness
+    # rule instead.
+    at_limit = await client.post(
+        STORAGES,
+        json={
+            "name": "exact-home",
+            "kind": "user_volume",
+            "workspaceId": world.workspace_id,
+            "ownerUserId": world.observer.id,
+            "capacityGb": 20,
+        },
+    )
+    assert at_limit.status_code == 201, at_limit.text
+
+    # A *shared* volume is not per-user, so the per-user ceiling does not apply to it.
+    # Applying it would mean a group's shared directory were sized by whichever
+    # member happened to register it.
+    exempt = await client.post(
+        STORAGES,
+        json={"name": "shared-huge", "kind": "global_share", "capacityGb": 500},
+    )
+    assert exempt.status_code == 201, exempt.text
 
 
 async def test_a_group_with_no_workspace_cannot_own_a_volume(
@@ -1335,7 +1508,9 @@ async def test_reconcile_notices_a_volume_pointing_at_another_directory(
 # ---------------------------------------------------------------------------
 # Retirement
 # ---------------------------------------------------------------------------
-async def test_a_volume_in_use_cannot_be_retired(client: AsyncClient, world: World) -> None:
+async def test_a_volume_in_use_cannot_be_retired(
+    client: AsyncClient, world: World, home: int
+) -> None:
     """Deleting the claim would orphan the pods still mounting it."""
     await act_as(client, "s5-root")
     volume_id, _ = await make_storage(
@@ -1382,7 +1557,9 @@ async def test_retiring_a_volume_deletes_the_cluster_objects_and_keeps_the_row(
     assert "保留" in body["statusMessage"]
 
 
-async def test_a_retired_volume_can_no_longer_be_mounted(client: AsyncClient, world: World) -> None:
+async def test_a_retired_volume_can_no_longer_be_mounted(
+    client: AsyncClient, world: World, home: int
+) -> None:
     await act_as(client, "s5-root")
     volume_id, _ = await make_storage(
         client, "scratch", kind="group_share", groupId=world.lab_a.id, dirName="scratch"
@@ -1400,7 +1577,7 @@ async def test_a_retired_volume_can_no_longer_be_mounted(client: AsyncClient, wo
 
 
 async def test_a_set_containing_a_retired_volume_is_refused_before_anything_is_created(
-    client: AsyncClient, world: World, gateway: FakeK8sGateway
+    client: AsyncClient, world: World, gateway: FakeK8sGateway, home: int
 ) -> None:
     """Not half-applied: the whole request fails, so no pod is built with a missing mount."""
     await act_as(client, "s5-root")

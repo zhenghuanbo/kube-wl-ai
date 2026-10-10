@@ -26,7 +26,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.k8s.gateway import (
-    HOME_MOUNT_PATH,
     ContainerPort,
     IngressSpec,
     JobSpec,
@@ -130,7 +129,13 @@ def ingress_path(instance_id: int) -> str:
 
 @dataclass(frozen=True, slots=True)
 class InstanceObjects:
-    """Everything that has to exist in the cluster for one instance."""
+    """Everything that has to exist in the cluster for one instance.
+
+    No PVC: an instance owns no volume. Its home is the owner's *managed* storage
+    volume, which outlives the instance and is created from the storage page — so
+    deleting an instance must leave that claim alone, and the instance records no
+    claim it is responsible for deleting.
+    """
 
     refs: WorkloadRefs
     deployment: WorkloadSpec
@@ -139,7 +144,6 @@ class InstanceObjects:
     ssh_service: ServiceSpec | None = None
     ide_service: ServiceSpec | None = None
     ingress: IngressSpec | None = None
-    pvc: PvcSpec | None = None
     ssh_secret: SecretSpec | None = None
 
     @property
@@ -161,13 +165,13 @@ def build_instance_objects(
     memory_mb: int,
     gpu_type: str,
     gpu_count: int,
-    storage_gb: int,
+    home_pvc_name: str,
+    home_mount_path: str,
     ssh_enabled: bool,
     authorized_keys: str | None,
     node_selector: dict[str, str],
     tolerations: tuple[dict[str, object], ...],
     ingress_host: str,
-    storage_class: str | None,
     extra_mounts: tuple[VolumeMountSpec, ...] = (),
 ) -> InstanceObjects:
     """Build the full object set for an instance.
@@ -175,6 +179,11 @@ def build_instance_objects(
     ``authorized_keys`` may be ``None`` when the owner has registered no key; in
     that case no Secret is created and the volume is omitted, so the container
     starts with an sshd that accepts nothing rather than one with a stale key.
+
+    The home is the owner's managed storage volume, mounted at ``home_mount_path``
+    (``/home/{username}``) and named in ``HOME``. It is mounted here rather than
+    offered as a choice because there is no useful instance without it: the
+    caller refuses to get this far if the owner has no such volume.
     """
     base = workload_name(instance_id, instance_name)
     labels = {
@@ -197,7 +206,6 @@ def build_instance_objects(
         ports.append(ContainerPort(name=IDE_PORT_NAME, container_port=ide_port))
 
     ssh_secret_name = f"{base}-ssh" if ssh_enabled and authorized_keys else None
-    pvc_name = f"{base}-home"
 
     deployment = WorkloadSpec(
         name=base,
@@ -212,11 +220,11 @@ def build_instance_objects(
         env={
             "WL_INSTANCE_ID": str(instance_id),
             "WL_WORKSPACE": workspace_labels.get("wl-workspace", ""),
-            "HOME": HOME_MOUNT_PATH,
+            "HOME": home_mount_path,
         },
         ports=tuple(ports),
-        pvc_name=pvc_name,
-        mount_path=HOME_MOUNT_PATH,
+        pvc_name=home_pvc_name,
+        mount_path=home_mount_path,
         ssh_secret_name=ssh_secret_name,
         extra_mounts=extra_mounts,
         node_selector=node_selector,
@@ -269,14 +277,6 @@ def build_instance_objects(
             labels=labels,
         )
 
-    pvc = PvcSpec(
-        name=pvc_name,
-        namespace=namespace,
-        size_gb=storage_gb,
-        storage_class=storage_class,
-        labels=labels,
-    )
-
     ssh_secret = None
     if ssh_secret_name and authorized_keys:
         ssh_secret = SecretSpec(
@@ -292,7 +292,11 @@ def build_instance_objects(
             service.name for service in (ssh_service, ide_service) if service is not None
         ),
         ingress=f"{base}-ide" if ingress else None,
-        pvc=pvc_name,
+        # No `pvc`: the home claim belongs to the storage volume, not to this
+        # instance. Recording it here would be actively dangerous — the delete
+        # path removes the claims a workload lists, and deleting an instance must
+        # never delete the owner's storage.
+        pvc=None,
         secret=ssh_secret_name,
     )
 
@@ -302,7 +306,6 @@ def build_instance_objects(
         ssh_service=ssh_service,
         ide_service=ide_service,
         ingress=ingress,
-        pvc=pvc,
         ssh_secret=ssh_secret,
     )
 
@@ -310,9 +313,6 @@ def build_instance_objects(
 # ---------------------------------------------------------------------------
 # Tasks
 # ---------------------------------------------------------------------------
-#: Where a task's optional persistent volume is mounted.
-TASK_MOUNT_PATH = "/data"
-
 #: The interpreter a task's script is handed to.
 #:
 #: Three argv elements, of which the third is the user's text. The platform
@@ -324,11 +324,14 @@ TASK_SHELL: tuple[str, ...] = ("/bin/sh", "-lc")
 
 @dataclass(frozen=True, slots=True)
 class TaskObjects:
-    """The objects that realise one custom task."""
+    """The objects that realise one custom task.
+
+    No PVC: like an instance, a task owns no volume. Its home is the owner's
+    managed storage volume, which the task mounts and must not delete.
+    """
 
     refs: WorkloadRefs
     job: JobSpec
-    pvc: PvcSpec | None = None
 
 
 def build_task_objects(
@@ -343,16 +346,23 @@ def build_task_objects(
     memory_mb: int,
     gpu_type: str,
     gpu_count: int,
-    storage_gb: int,
+    home_pvc_name: str,
+    home_mount_path: str,
     working_dir: str | None,
     env: dict[str, str],
     node_selector: dict[str, str],
     tolerations: tuple[dict[str, object], ...],
     max_runtime_seconds: int | None,
     ttl_seconds_after_finished: int,
-    storage_class: str | None,
+    extra_mounts: tuple[VolumeMountSpec, ...] = (),
 ) -> TaskObjects:
-    """Build the Job (and optional scratch volume) for one task."""
+    """Build the Job for one task.
+
+    The home volume is always mounted, for the same reason as on an instance: the
+    caller refuses to get here if the owner has no storage volume. Anything else
+    (a group or global share) arrives in ``extra_mounts`` because the user chose
+    it — an opt-in, not a default.
+    """
     name = task_job_name(task_id, task_name)
     labels = {
         MANAGED_LABEL: MANAGED_LABEL_VALUE,
@@ -360,8 +370,6 @@ def build_task_objects(
         TASK_LABEL: task_name,
         TASK_ID_LABEL: str(task_id),
     }
-
-    pvc_name = f"{name}-data" if storage_gb > 0 else None
 
     job = JobSpec(
         name=name,
@@ -378,10 +386,12 @@ def build_task_objects(
             **env,
             "WL_TASK_ID": str(task_id),
             "WL_WORKSPACE": workspace_name,
+            "HOME": home_mount_path,
         },
         working_dir=working_dir,
-        pvc_name=pvc_name,
-        mount_path=TASK_MOUNT_PATH,
+        pvc_name=home_pvc_name,
+        mount_path=home_mount_path,
+        extra_mounts=extra_mounts,
         node_selector=node_selector,
         tolerations=tolerations,
         backoff_limit=0,
@@ -391,23 +401,7 @@ def build_task_objects(
         ttl_seconds_after_finished=ttl_seconds_after_finished,
     )
 
-    pvc = (
-        PvcSpec(
-            name=pvc_name,
-            namespace=namespace,
-            size_gb=storage_gb,
-            storage_class=storage_class,
-            labels=labels,
-        )
-        if pvc_name
-        else None
-    )
-
-    return TaskObjects(
-        refs=WorkloadRefs(job=name, pvc=pvc_name),
-        job=job,
-        pvc=pvc,
-    )
+    return TaskObjects(refs=WorkloadRefs(job=name), job=job)
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +446,7 @@ def build_storage_objects(
     size_gb: int,
     access_mode: str | None = None,
     kind: str | None = None,
+    extra_namespace: bool = False,
 ) -> StorageObjects:
     """Build the volume for a managed directory, and its claim when one can exist.
 
@@ -463,6 +458,12 @@ def build_storage_objects(
     claim is pinned to the volume by name. With no provisioner to satisfy an
     unpinned claim, it waits forever, and "Pending" then means both "the cluster
     is slow" and "this will never work".
+
+    ``extra_namespace`` says this claim is for a namespace that is *not* the
+    volume's home — a global share being mounted from some lab's workspace. Since
+    a PersistentVolume binds to exactly one claim, such a mount needs its own
+    volume, so both objects are named after the namespace
+    (:func:`app.k8s.naming.storage_pv_name`).
     """
     labels = {
         **workspace_labels,
@@ -477,12 +478,13 @@ def build_storage_objects(
     # offers a mode the claim asked for, so a mismatch here is a claim that never
     # binds and gives no reason why.
     modes = STORAGE_ACCESS_MODES.get(access_mode or "", ("ReadWriteOnce",))
-    pv_name = storage_pv_name(storage_id, storage_name)
+    name_suffix = namespace if extra_namespace else None
+    pv_name = storage_pv_name(storage_id, storage_name, namespace=name_suffix)
 
     pvc = None
     if namespace:
         pvc = PvcSpec(
-            name=storage_pvc_name(storage_id, storage_name),
+            name=storage_pvc_name(storage_id, storage_name, namespace=name_suffix),
             namespace=namespace,
             size_gb=size_gb,
             # Explicitly *no* StorageClass. A static volume has none, and leaving

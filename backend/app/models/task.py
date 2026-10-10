@@ -77,7 +77,6 @@ class Task(Base, TimestampMixin):
     memory_mb: Mapped[int] = mapped_column(Integer, nullable=False, default=2048)
     gpu_type: Mapped[str] = mapped_column(String(32), nullable=False, default="none")
     gpu_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    storage_gb: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     # --- what to run -------------------------------------------------------
     image: Mapped[str] = mapped_column(String(512), nullable=False)

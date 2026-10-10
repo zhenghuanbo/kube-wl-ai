@@ -289,6 +289,38 @@ group_id, owner_user_id, created_by, is_active)`
 > 全局共享 → `/mnt/global_shared`。共享卷**默认不挂**，由用户在创建工作负载时选择；同类多选时
 > 第一个占基础路径，后续的挂在 `{基础路径}/{卷名}` 下。
 
+**工作负载不自带磁盘（第二步已落地）。** 实例与任务都只挂属主的用户卷，`HOME` 指向它，
+容器里就是 `/home/{用户名}`。由此有三条硬性规则：
+
+1. **用户卷不存在 = 拒绝创建，而不是"少挂一个卷"。** `storages.require_user_volume()` 在实例、
+   应用、任务三条创建路径的最前面调用，抛 400 `user_volume_missing`。若改成静默跳过，容器会带着
+   一个空 `HOME` 起来，用户读到的是"我的文件没了"，然后往容器可写层写的新文件在负载停止时一起消失
+   —— 这是最坏的失败方式，所以宁可拒绝并说清怎么办。
+2. **实例/任务都不再创建自己的 PVC**，`instance.k8s_pvc` 因此恒为 `None`（老行仍保留该列，
+   删除老实例时还要靠它回收旧临时盘）。**绝不能把用户卷的 claim 记到这里**：删除路径会删掉
+   `k8s_pvc` 指向的 claim，而 PV 是 `Retain`，claim 一旦消失 PV 变 `Released` 且不可重绑，
+   用户的存储会**永久无法挂载**。
+3. **`WorkloadSpec.mount_path` / `JobSpec.mount_path` 没有默认值。** 原来的 `/home/dev` 只是个
+   占位路径，与其让调用方漏传后静默挂到一个没人拥有的目录，不如让它成为必填参数。
+
+**全局共享卷的按命名空间 claim** 由 `storages.ensure_attachment_claims()` 在挂载时补齐：
+`claim_name_for(storage, workspace)` 是纯函数（全局卷 → 带命名空间后缀的名字，其余 → `storage.pvc_name`），
+所以 pod spec 随时可以从零重建而不会与集群漂移。校验（可见性、种类、组本级权限）留在
+`resolve_attachments()`，它不碰集群；建对象需要 gateway，所以单独一步。
+
+**工作空间的存储用量来自卷，不来自工作负载。** `quota_guard.workspace_usage()` 汇总
+`Storage.capacity_gb`（同工作空间、`is_active`），不再累加 `instance.storage_gb`/`task.storage_gb`
+（两列已删）。同理 `check_quota()` 只在请求**自身消耗**该资源时才检查存储：注册卷时检查，
+启动工作负载时不检查 —— 实例只是挂一个已经计过费的卷，因为存储到顶就不让启动，是拿已经在盘上的
+数据卡人。
+
+**每用户存储上限（`ResourceGroupLimit.max_storage_gb_per_user`）现在校验的是存储卷容量**，
+在 `create_storage()` 里由 `_check_capacity_against_pools()` 执行。一个工作空间可以被授予多个资源组，
+而卷不属于其中任何一个（用户每次起负载时选），所以取**已授予资源组里最小的那个上限** ——
+只看最大的（或第一个）会登记出一个在更严格的池里用不了的卷，而且直到有人真去用才会发现。
+卷没有工作空间时无从比较，此时**记一条 warning 而不是静默放行**："没上限"和"通过了上限"在日志里
+必须长得不一样。共享卷不做这个校验：它不是个人主目录，按每用户上限去卡没有意义。
+
 ### 5.5 镜像
 
 `images(registry, project, repository, tag, digest, kind=personal|official|shared, visibility,
@@ -980,13 +1012,13 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 | 存储/镜像枚举 | `app/models/enums.py`（`StorageKind`、`StorageStatus`、`LIVE_STORAGE_STATUSES`、`ImageKind`、`ImageVisibility`） |
 | 数据模型 | `app/models/storage.py`（`Storage`、`InstanceStorage`）、`app/models/image.py` |
 | 迁移 | `alembic/versions/d0d900699fb4_*.py`（新增 3 张表，head 共 **30** 张，`downgrade base` 可往返） |
-| K8s 抽象 | `VolumeMountSpec`、`PvcInfo`、`read_pvc`、`resize_pvc`、`parse_storage_gb`、`build_storage_objects` |
+| K8s 抽象 | `VolumeMountSpec`、`PvcInfo`/`PvInfo`、`read_pvc`、`apply_pv`/`read_pv`/`delete_pv`/`list_pvs`、`parse_storage_gb`、`build_storage_objects` |
 | 服务 | `app/services/storages.py`、`app/services/images.py` |
 | Schema | `app/schemas/storage.py`、`app/schemas/image.py` |
 | 镜像仓库客户端 | `app/registries/`（`registry.py` 协议 + `harbor.py` 真实实现 + `fake.py`，与 K8s gateway 同构） |
 | API | `app/api/v1/storages.py`（7 个端点）、`app/api/v1/images.py`（7 个端点） |
 | 权限 | `storage:read/create/resize/delete/manage`、`image:read/create/share/delete`；本期新增 `storage:manage`，并把 `image:share` 从普通用户上收到组管理员（组管理员 **44** 项，普通用户 **32** 项） |
-| 实例挂载 | `InstanceCreate.storageIds` → `build_instance_objects(extra_mounts=...)` |
+| 实例挂载 | `InstanceCreate.storageIds`、`TaskCreate.storageIds` → `build_instance_objects`/`build_task_objects(extra_mounts=...)`；属主用户卷隐式挂到 `/home/{用户名}` |
 | 验收测试 | `tests/test_acceptance_phase5.py`（**33** 项）、`tests/test_acceptance_phase5_images.py`（**36** 项） |
 | 冒烟脚本 | `scripts/smoke_phase5.py`（**65** 项，可重复执行） |
 
@@ -1026,8 +1058,10 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 2. **可见性按 *类型* 分叉**，这是 `visible_condition()` 返回裸条件而非
    `policy.scope_filter()` 的原因：用户卷只有本人可见，而 `group_share`/`global_share`
    的可见范围不同 —— 同一张表上三类行的可见规则不同，行级 scope 表达不了。
-3. **附加存储不重复计配额**。容量在**创建存储时**结算一次；实例挂载它时不再计入
-   `storage_gb`，否则同一个 GB 会被收两次费，工作空间会莫名撞上配额上限。
+3. **附加存储不重复计配额**。容量在**创建存储时**结算一次；实例挂载它时不再计入配额，
+   否则同一个 GB 会被收两次费，工作空间会莫名撞上配额上限。第二步干脆把实例的
+   `storage_gb` 整个删掉了 —— 一个"只是挂载已计费卷"的字段，留着就一定会有人再次把它加进
+   用量汇总里。
 4. **失败的操作 ≠ 失败的卷**。核对失败时容量与**状态都保持原样**，不标记 `FAILED` ——
    卷仍然可用，把它标红会让用户去追一个不存在的问题。
 5. **只读同时落在 volume 和 mount 两处**，否则「只读」只是 API 响应里的一句话，
@@ -1784,22 +1818,22 @@ Phase 8 结束时，`config/navigation.ts` 里还有两个入口指向 `Placehol
 **交付物**：迁移 `a1c4e7f90b23`（加 `host_path` + `dir_name`，`workspace_id` 改可空，
 删 `storage_class`/`medium`/`size_bytes` 与 `instance_storages.sub_path`，建两个部分唯一索引；
 **表里已有行时拒绝执行**并打印导出指引 —— 旧行无法推断目录，硬凑只会指向错误的数据）·
-`app/services/storage_paths.py`（唯一的目录推导处）· `K8sGateway.apply_pv/read_pv/delete_pv` ·
+`app/services/storage_paths.py`（唯一的目录推导处）· `K8sGateway.apply_pv/read_pv/delete_pv/list_pvs` ·
 `PvSpec`/`PvInfo` · 前端存储页（目录成为独立一列、表单按类型收窄、只有 `storage:manage`
 才显示写操作）。
 
-**尚未做（第二步，等确认）**：用户卷默认挂进三类工作负载（`/home/{用户名}`）、实例自身临时
-PVC 的去留（倾向取消，用户卷即家目录）、全局共享卷按命名空间补齐 claim，以及
-**用户存储卷不存在时硬失败**。最后一条是这一轮唯一明确"没做完"的地方：现在缺卷会静默返回空
-挂载列表，而"看不到自己的数据"不该表现为一个空目录 —— 它应该让工作负载起不来。真实集群 E2E
-里这两项标为 `PENDING`。
+**曾经"尚未做"的四项，已在第二步全部完成**（见下面「后续增量 — 存储卷重构（第二步）」）：
+用户卷默认挂进三类工作负载（`/home/{用户名}`）、实例与任务自身临时 PVC 取消、全局共享卷按命名
+空间补齐 claim、**用户存储卷不存在时硬失败**。最后一条当时是这一轮唯一明确"没做完"的地方：
+缺卷会静默返回空挂载列表，而"看不到自己的数据"不该表现为一个空目录。真实集群 E2E 里那两项
+`PENDING` 也已转为通过。
 
-**三个已知的不一致，都已用测试钉住、本轮没改**：
+**两处当时已知的不一致，以及一处环境坑**：
 
-1. **`GET /storages/attachable` 会向所有人推荐全局共享卷，但挂载必然 400**。全局共享的
-   `k8s_namespace` 是 `None`（claim 还没按命名空间建），所以"推荐"和"能用"目前不一致 ——
-   要等第二步把每个命名空间的 claim 补齐。用例：
-   `test_a_global_share_cannot_be_mounted_until_it_has_a_claim`。
+1. ~~**`GET /storages/attachable` 会向所有人推荐全局共享卷，但挂载必然 400**。~~ **已解决
+   （第二步）**：全局共享卷的按命名空间 claim 现在会在挂载时创建，所以"推荐"和"能用"一致了。
+   旧用例 `test_a_global_share_cannot_be_mounted_until_it_has_a_claim` 被改写成断言相反的
+   事实：推荐它，就能挂上它。
 2. **`storage_group_level_requires_admin` 这个分支当前不可达**（`_administers` 收窄到
    `scope.group_ids` 之后，它和可见性读的是同一个集合，能过可见性的必定能过它）。按"防御性
    第二道防线"保留，并在代码里写明了它不可达、以及**如果你放宽了 `visible_condition` 就是它
@@ -1835,6 +1869,123 @@ PVC 的去留（倾向取消，用户卷即家目录）、全局共享卷按命�
 > **686 passed, 0 failed, 0 errors**。所以在本机验证时：**一次只跑一个 pytest**，
 > 并显式给 basetemp，例如
 > `pytest -q --basetemp=/root/project/kube-wl-ai/.smoke/bt`。
+
+### ✅ 后续增量 — 存储卷重构（第二步：工作负载不自带磁盘，已完成）
+
+第一步把「目录」变成了权威，但仍留着三处没做完：工作负载还在要 `storageGb` 并各自建临时 PVC、
+用户卷还没默认挂进容器、全局共享卷在每个命名空间的 claim 还没建。这一步就是关掉这三处，让
+§5.4 里写下的那套模型**成为唯一事实**。
+
+**改了什么**
+
+| 改动 | 位置 |
+| --- | --- |
+| 删除 `instances.storage_gb`、`tasks.storage_gb`、`applications.default_storage_gb` | 迁移 `b7d2f4a8c915`（三张表各一批 `batch_alter_table`） |
+| 实例与任务只挂属主用户卷，`HOME=/home/{用户名}` | `build_instance_objects`/`build_task_objects` 的 `home_pvc_name`/`home_mount_path` |
+| `WorkloadSpec.mount_path`/`JobSpec.mount_path` 改为**必填**，删掉 `HOME_MOUNT_PATH = "/home/dev"` | `app/k8s/gateway.py`、`app/k8s/workloads.py` |
+| 实例/任务都不再建 PVC；`InstanceObjects.pvc`、`TaskObjects.pvc`、`TASK_MOUNT_PATH` 删除 | `app/services/instances.py`、`app/services/tasks.py` |
+| 缺用户卷 → 400 `user_volume_missing` | `storages.require_user_volume()`（实例/应用/任务三条创建路径都会先调它） |
+| 全局共享卷按命名空间补 claim | `storages.ensure_attachment_claims()` + `claim_name_for()` |
+| `TaskCreate.storage_ids` 新增（任务也能挂共享卷） | `app/schemas/task.py`、`build_task_objects(extra_mounts=...)` |
+| 每用户存储上限改在**建卷**时校验 | `storages._check_capacity_against_pools()`，取已授予资源组里**最小**的上限 |
+| 工作空间存储用量只从**卷**汇总 | `quota_guard.workspace_usage()`；`check_quota()` 只在请求自身消耗存储时才查 |
+| `STORAGE_CLASS_*` 不再被读取，系统页改为 info | `app/services/system.py`（原来那条 warning 已经变成假话：没有任何东西会因此失败） |
+| 退休共享卷时按 `wl-storage-id` 清扫跨命名空间的 PV/PVC | `K8sGateway.list_pvs`、`storages._delete_namespaced_claims()` |
+
+**为什么删列而不是迁移数据**：`storage_gb` 描述的是「这个实例自己的那块盘」，而这块盘正是被取消
+的东西。把它换算成某个用户卷的容量是**编造**：一个实例的 10 GB 并不等于属主目录只有 10 GB，
+而属主目录的容量早在登记卷时就定下了。宁愿丢掉这个数字，也不要留下一个看起来有意义、实际与
+真实容量无关的列。老实例仍然可以正常删除 —— `instances.k8s_pvc` 这一列**特意保留**，它记的是
+升级前那些临时盘，删除路径靠它回收。（**千万不要**把用户卷的 claim 写进去：PV 是 `Retain`，
+claim 一消失 PV 就 `Released` 且不可重绑，用户的存储会永久挂不上。）
+
+**任务的 `storage_ids` 不落库**。实例有 `instance_storages` 关联表，任务没有，而这一步也不打算
+为它加一张：`apply_job` **只在 `create_task` 里被调用一次**，没有重试、没有重跑、没有"按当前
+配置重新对齐"的入口，所以挂载集合在 Job 创建后就再也不需要读了。加一张表只会得到一份没有读者
+的真相。**如果以后加了任务重跑或对账，这里必须一起补上** —— 到那时 `_apply` 就从"一次性提交"
+变成了"可重复收敛"，而它的输入不能再只来自调用栈。
+
+**`ensure_attachment_claims` 为什么单独一步**：可见性、种类、组本级权限这些校验都在
+`resolve_attachments()` 里，它是**纯数据库**的、可单测的；而建 PV/PVC 需要 gateway。
+把两者混在一起会让"能不能挂"这个问题必须先有一个假集群才能回答，并且会把集群调用塞进一条
+本该只读的校验路径里。现在 `resolve_attachments` 不再检查 `storage.k8s_namespace` 与
+`workspace.k8s_namespace` 是否相等 —— 那个检查在"按需建 claim"之后已经**不成立**了：
+全局共享卷的 `k8s_namespace` 就是 `None`，而它恰恰是必须能挂的那一类。`claim_name_for()` 是
+**纯函数**，所以 pod spec 任何时候都能从零重建而不与集群漂移。
+
+**顺带删掉 `to_mounts()`**：它没有生产调用者，而且计算出的 `pvc_name` 对全局共享卷是**错的**
+（直接用 `storage.pvc_name`，对全局卷恒为空）。留着一个只有在被使用时才会暴露错误的辅助函数，
+比没有它更危险。
+
+**踩到的坑**
+
+1. **`mypy` 是唯一挡住"漏传 `mount_path`"的东西。** 把 `HOME_MOUNT_PATH` 从一个共享常量改成
+   必填参数后，所有调用点立刻变红 —— 这正是想要的：一个默认值会让某个忘了传的地方安静地挂到
+   `/home/dev`，而那个目录不属于任何人。
+2. **删 `TaskCreate.storage_gb` 之后 `storage_ids` 必须先存在**，否则 `mypy` 报
+   `"TaskCreate" has no attribute "storage_ids"` —— 它把"字段换了名字但没加新的"挡住了。
+3. **`check_quota` 的 `storage_gb` 要变成可选**（`= 0`，且只在非零时进检查列表）。否则实例/任务
+   创建路径会继续传一个已经不存在的量，等于把刚删掉的概念从后门放回来。
+4. **迁移必须 `--no-force-exclude` 才检查得到**：`alembic/versions` 被 CI 的 ruff 配置排除，
+   `ruff format --check .` 永远会说它"已格式化"。这一步的迁移文件单独跑过一次。
+5. **`alembic -x db_url=…` 是空操作**（`alembic/env.py` 用 `get_settings().database_url` 覆盖了
+   命令行值），要用 `DATABASE_URL=` 环境变量。往返验证就是这样在副本上做的。
+
+**质量门禁**（本轮实测，全部在 `backend/` 下按 CI 口径跑）：
+
+- `ruff check .` → All checks passed；`ruff format --check .` → **159 files already formatted**；
+  `mypy app` → **Success: no issues found in 131 source files**。
+- `alembic upgrade head` → `b7d2f4a8c915 (head)`，`alembic check` → No new upgrade operations detected；
+  在副本上 `downgrade -1` 再 `upgrade head` 往返一次，三列正确地回来又消失，`integrity_check` ok。
+- `pytest -q` → **690 passed**（第一步 686，本步净增 4 条：缺家目录硬失败、任务挂载集合、
+  每用户上限在建卷时生效、退休共享卷按标签清扫跨命名空间 claim）；`openapi/schema.json`
+  重新生成后，`InstanceCreate`/`TaskCreate` 有 `storageIds`、一切 `storageGb` 全部消失，
+  `check-frontend-types.py` 报 "OK — every declared field exists in the API schema"。
+- 前端 `vue-tsc --noEmit` 0 退出、`vite build` 2.47s 成功、`smoke_frontend_views.mjs`
+  **19/19** 视图挂载并渲染出数据；`InstancesView`/`TasksView`/`ApplicationsView` 里的
+  `storageGb`/`defaultStorageGb` 全部清除，任务的"临时存储（GB）"换成与实例一致的
+  **挂载存储多选**。
+- 真集群 E2E（`.smoke/e2e_storage.py`，`K8S_ENABLED` 环境下的 `RealK8sGateway`）：
+  **全部通过，0 失败，无 PENDING**。第七组"删除后无遗留 PV/PVC"是本步从 **FAIL 修到 PASS**
+  的 —— 见下面第 6 条。
+- 真实后端冒烟（独立端口 + 一次性 SQLite，跑完即销毁）：`smoke_phase3.py` **50/50 通过**；
+  `smoke_phase5.py` **75 通过 / 1 失败**，唯一的失败是**本轮明确推迟的镜像问题**
+  （`library/base-notebook:latest` 不在 Harbor 的 `library` 项目里 → `image_not_found_upstream`），
+  存储相关全部通过，包括本步新增的三条：`user_volume_missing` 硬失败、建卷时校验每用户上限、
+  共享卷不受该上限约束。
+
+**踩到的第 6 个坑：按需创建的跨命名空间 claim 没人回收。** 真集群 E2E 一开始报
+`集群中无遗留的托管 PV — 残留 ['wl-vol-vol3-4-wl-e2e6']`：`ensure_attachment_claims()` 给每个
+挂载过全局共享卷的命名空间各建了一对 PV+PVC，而数据库**刻意**不记录它们（名字可由
+`storage_pv_name(id, name, namespace=…)` 推导），`delete_storage()` 却只知道卷自己的那个名字。
+于是每挂过一个命名空间就留下一块 `Retain` PV：界面看不见、任何代码路径都不会删它，只有
+`kubectl` 手工能清。**"可推导所以不落库"是对的，"可推导所以不必找"是错的** —— 删除时必须
+反过来用标签去找它们。修法是给网关加 `list_pvs(label_selector)`（真实现
+`list_persistent_volume`，假实现复用 `_parse_selector`/`_labels_match`），`delete_storage()`
+在删掉卷自己的 PV 之后按 `wl-storage-id` 清扫一遍，先删 claim 再删 PV（顺序同前，理由同前）。
+顺带把 `read_pv()` 里内联的 `PvInfo` 转换提成 `_pv_info()`，让"按名字读"和"从列表读"不可能
+给出不同答案 —— 清扫信任列表的结论。
+
+**踩到的第 7 个坑：一个组有两个工作空间，这个组就永远不能有存储。** 改 `smoke_phase3.py` 时它在
+登记主目录那一步返回 `group_has_multiple_workspaces`：`_workspace_for_group()` 要求组恰好有**一个**
+工作空间，因为 claim 得放在某个命名空间里；而脚本为了测"未授权"故意在同一个组下建了第二个工作空间。
+脚本已改成用**第二个组**放那个未授权工作空间（这才是它本来的意图）。
+
+但这暴露的是产品层面的死路，不只是脚本问题：**工作负载必须挂属主的主目录，而主目录必须登记，
+登记又要求组只有一个工作空间** —— 所以任何有两个工作空间的组，其成员**一个实例都起不来**，
+而且只有走到登记那一步才会看到 409。规则本身（不猜）是对的，缺的是"指定是哪一个"。
+`Storage.workspace_id` 这一列和 `create_storage(workspace_id=…)` 参数**都已经存在**，
+`_workspace_for_group()` 只是没把它们用起来。建议的改法：允许调用方显式指定 `workspace_id`
+（校验它确实属于该组），只有在**没指定**时才退回"必须唯一"。这一步不动它 —— 那是第一步已经
+评审并写进验收用例 `test_a_group_with_two_workspaces_is_refused_rather_than_guessed_at`
+的行为，属于需要单独决策的改动，不该混在这次提交里。
+
+**同一个 E2E 里还有一条是断言太严，不是产品问题**：`该 claim 已经 Bound` 一开始 FAIL。卷控制器
+先把 **PV** 标成 `Bound`，claim 自己的 `.status.phase` 落后一拍，所以紧跟
+`ensure_attachment_claims()` 的一次读会看到"其实已经绑好、却还写着 `Pending`"。这与真正的
+provisioning 失败无法区分，单读一次必然偶发误报。harness 里本来就有轮询（对第一步的 claim），
+这一步把轮询提成 `wait_bound()` 并给按需 claim 也用上。**产品侧不需要等** —— pod 提交后多等
+一拍是正常的 Kubernetes 行为。
 
 ### 有意推迟（非遗漏）
 
@@ -1947,12 +2098,13 @@ Vuex `namespace: true` 拼写错误、`Admin/User.vue` 为 0 字节、
 
 1. **既有的 Prometheus 是否带 `namespace` / `pod` 标签？** 没有这两个标签就无法把指标
    归到租户上，"用量按 Prometheus 记账"就无从谈起。这是 Phase 7 的前置问题（详见 §10）。
-2. ~~**集群里是否存在 RWX 的 StorageClass？**~~ **已不再是阻塞项**：托管存储卷改用静态
+2. ~~**集群里是否存在 RWX 的 StorageClass？**~~ **已彻底不再是问题**。托管存储卷用静态
    `hostPath` PV（`storageClassName: ""` + `volumeName`），完全不经过 StorageClass，而
-   `hostPath` 本来就可以声明 `ReadWriteMany` —— 已在真实集群上验证组共享/全局共享卷能
-   `Bound`。**仍然相关的是**实例与任务的临时盘：它们走
-   `STORAGE_CLASS_HOME`/`DATA`/`SHARE`，三者在 `.env` 里都是空的，所以扩容与共享行为
-   仍取决于集群是否有默认可用的 StorageClass。
+   `hostPath` 本来就可以声明 `ReadWriteMany` —— 已在真实集群上验证组共享/全局共享卷能 `Bound`。
+   原先"仍然相关"的那半句（实例与任务的临时盘走 `STORAGE_CLASS_HOME/DATA/SHARE`）也随第二步
+   消失了：**工作负载不再有自己的盘**，只挂已经登记好的用户卷。于是 `STORAGE_CLASS_*` 这三个
+   设置项目前**没有任何消费者**，系统页把它们从 warning 降为 info —— 保留它们是为了将来换
+   GPFS/Lustre 时接 CSI 的 StorageClass，而不是因为它们现在还有用。
 3. **LDAP 服务账号凭据**：目录同步需要一个可绑定账号；没有它，`group:sync` 只能跑假实现。
 4. **kubeconfig token 轮换**：`legacy/` 里泄漏的那个（见 14.1）必须在集群侧吊销。
 

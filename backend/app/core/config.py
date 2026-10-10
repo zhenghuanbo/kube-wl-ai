@@ -195,9 +195,6 @@ class Settings(BaseSettings):
     #: when empty, which is only right for single-node clusters; production must
     #: set it to the cluster's external address.
     instance_ssh_host: str = ""
-    #: Default home directory size for an instance whose pool sets no storage
-    #: allowance of its own.
-    instance_default_storage_gb: int = 10
     #: How long the short-lived ticket that protects an IDE URL stays valid.
     #: Long enough for a websocket to be established, short enough that a
     #: leaked URL is useless.

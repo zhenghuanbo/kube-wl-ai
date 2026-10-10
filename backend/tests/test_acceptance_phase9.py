@@ -298,26 +298,35 @@ async def test_debug_in_production_is_critical(
     assert codes["debug_in_production"]["severity"] == "critical"
 
 
-async def test_a_missing_storage_class_is_reported_with_its_setting(
+async def test_an_unused_storage_class_setting_is_information_not_a_warning(
     admin_client: AsyncClient, settings: Settings
 ) -> None:
-    """
-    The warning has to name the setting.
+    """`STORAGE_CLASS_*` no longer decides anything, and the page must say so.
 
-    "A storage class is missing" sends the reader to the source to find out
-    which; the remedy field is what makes the page actionable, so it is asserted
-    rather than left as decoration.
+    It used to be a *warning* naming whichever of the three was unset — accurate
+    while instances and tasks each created their own claim. Workloads have no disk of
+    their own any more, and managed volumes are static ``hostPath`` PVs that never
+    consult a StorageClass, so nothing can fail because these are empty. A warning
+    here would be a lie, and an operator chasing it would find nothing.
+
+    They are still reported — as information — because an operator who sets them
+    deserves to know they currently have no effect.
     """
     settings.storage_class_home = "ceph-rbd"
     settings.storage_class_data = ""
     settings.storage_class_share = "cephfs"
 
     warnings = (await admin_client.get(SYSTEM)).json()["warnings"]
-    entry = next(w for w in warnings if w["code"] == "storage_class_missing")
-    assert "STORAGE_CLASS_DATA" in entry["remedy"]
-    # The two that *are* configured must not be named.
-    assert "STORAGE_CLASS_HOME" not in entry["remedy"]
-    assert "STORAGE_CLASS_SHARE" not in entry["remedy"]
+    entry = next(w for w in warnings if w["code"] == "storage_classes_unused")
+
+    assert entry["severity"] == "info"
+    # The unset one is still named: "these do nothing" is more useful with the
+    # specific setting than without it.
+    assert "STORAGE_CLASS_DATA" in entry["detail"]
+    assert "STORAGE_CLASS_HOME" not in entry["detail"]
+    assert "STORAGE_CLASS_SHARE" not in entry["detail"]
+    # And the old warning must be gone, not merely joined by a new entry.
+    assert not [w for w in warnings if w["code"] == "storage_class_missing"]
 
 
 async def test_ldap_enabled_without_a_uri_is_critical(

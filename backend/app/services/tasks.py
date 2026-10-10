@@ -26,7 +26,7 @@ from app.core.config import Settings
 from app.core.errors import BadRequestError, ConflictError, NotFoundError
 from app.core.logging import get_logger
 from app.k8s import K8sError, K8sGateway, build_task_objects, run_gateway
-from app.k8s.gateway import JobInfo, WorkloadRefs
+from app.k8s.gateway import JobInfo, VolumeMountSpec
 from app.k8s.naming import is_managed_workload
 from app.models.enums import (
     TERMINAL_TASK_STATUSES,
@@ -40,6 +40,7 @@ from app.models.task import Task
 from app.models.user import User
 from app.models.workspace import Workspace
 from app.schemas.task import TaskCreate, TaskSummary, TaskUpdate
+from app.services import storages as storage_service
 from app.services import workload_events as events
 from app.services.quota_guard import check_quota, workspace_quotas, workspace_usage
 from app.services.workload_common import (
@@ -165,12 +166,11 @@ async def create_task(
         )
 
     max_runtime = _resolve_runtime(payload.max_runtime_seconds, pool)
-    storage_gb = payload.storage_gb or 0
-    pool_storage_cap = pool.limits.max_storage_gb_per_user if pool.limits else None
-    if pool_storage_cap and storage_gb > pool_storage_cap:
-        raise BadRequestError(
-            f"存储超出资源组上限（{pool_storage_cap} GB）", code="storage_exceeds_pool_limit"
-        )
+
+    # A task owns no disk, exactly like an instance: its home is the owner's
+    # managed storage volume. Refused before anything is created, so a missing
+    # volume is an error the submitter sees rather than a job whose home is empty.
+    await storage_service.require_user_volume(session, owner)
 
     quotas = await workspace_quotas(session, workspace.id)
     usage = await workspace_usage(session, workspace.id)
@@ -179,7 +179,6 @@ async def create_task(
         usage,
         cpu_milli=spec.cpu_milli,
         memory_mb=spec.memory_mb,
-        storage_gb=storage_gb,
         gpu_type=spec.gpu_type,
         gpu_count=spec.gpu_count,
         tasks=1,
@@ -199,7 +198,6 @@ async def create_task(
         memory_mb=spec.memory_mb,
         gpu_type=spec.gpu_type,
         gpu_count=spec.gpu_count,
-        storage_gb=storage_gb,
         image=payload.image,
         script=payload.script,
         working_dir=payload.working_dir,
@@ -211,6 +209,24 @@ async def create_task(
     )
     session.add(task)
     await session.flush()
+
+    # Opted-in shares. The home volume is *not* in here — the builder adds it — and
+    # nothing is mounted unless it was asked for, because a task that silently saw
+    # a colleague's shared directory would be a surprise, not a convenience.
+    attached = await storage_service.resolve_attachments(
+        session, actor, workspace, payload.storage_ids or []
+    )
+    # A global share has no claim in this namespace until something mounts it, and
+    # the Job's pod template needs the claim to exist before the pod is scheduled.
+    await storage_service.ensure_attachment_claims(session, workspace, attached, gateway)
+    extra_mounts = tuple(
+        VolumeMountSpec(
+            pvc_name=storage_service.claim_name_for(storage, workspace),
+            mount_path=mount_path,
+            read_only=storage.is_read_only,
+        )
+        for storage, mount_path in storage_service.resolve_mount_paths(attached)
+    )
 
     await events.record(
         session,
@@ -224,7 +240,7 @@ async def create_task(
     await session.commit()
 
     try:
-        await _apply(session, task, workspace, pool, payload, settings, gateway)
+        await _apply(session, task, workspace, pool, extra_mounts, settings, gateway)
     except K8sError as exc:
         await _persist_failure(session, task, str(exc))
         raise
@@ -267,10 +283,17 @@ async def _apply(
     task: Task,
     workspace: Workspace,
     pool: ResourceGroup,
-    payload: TaskCreate,
+    extra_mounts: tuple[VolumeMountSpec, ...],
     settings: Settings,
     gateway: K8sGateway,
 ) -> None:
+    # The home is the owner's managed storage volume. Looked up rather than stored
+    # on the task, so the volume is whatever is registered now.
+    owner = await session.get(User, task.owner_user_id)
+    if owner is None:  # pragma: no cover - a foreign key makes this unreachable
+        raise BadRequestError("任务的属主不存在", code="task_owner_missing")
+    home = await storage_service.require_user_volume(session, owner)
+
     objects = build_task_objects(
         task_id=task.id,
         task_name=task.name,
@@ -282,18 +305,17 @@ async def _apply(
         memory_mb=task.memory_mb,
         gpu_type=task.gpu_type,
         gpu_count=task.gpu_count,
-        storage_gb=task.storage_gb,
+        home_pvc_name=storage_service.claim_name_for(home, workspace),
+        home_mount_path=home.mount_path_for(owner.username),
         working_dir=task.working_dir,
         env=dict(task.env or {}),
         node_selector=pool_node_selector(pool),
         tolerations=tuple(pool.k8s_tolerations or ()),
         max_runtime_seconds=task.max_runtime_seconds,
         ttl_seconds_after_finished=task.ttl_seconds_after_finished,
-        storage_class=pool.storage_class or settings.storage_class_data or None,
+        extra_mounts=extra_mounts,
     )
 
-    if objects.pvc is not None:
-        await run_gateway(gateway.apply_pvc, objects.pvc)
     await run_gateway(gateway.apply_job, objects.job)
 
     task.k8s_job_name = objects.job.name
@@ -367,19 +389,19 @@ async def cancel_task(session: AsyncSession, task: Task, gateway: K8sGateway, ac
 
 
 async def delete_task(session: AsyncSession, task: Task, gateway: K8sGateway, actor: User) -> None:
-    """Delete a task, its Job and its scratch volume.
+    """Delete a task and its Job.
 
     The row is kept and marked inactive: usage history and the audit trail both
     outlive the thing they describe, and a deleted task is exactly what someone
     asks about later.
+
+    No volume is reclaimed. A task owns none — it mounts the owner's managed
+    storage volume, which outlives it by design, so removing it here would destroy
+    the user's home rather than clean up after the task.
     """
     namespace = await task_namespace(task)
     if task.k8s_job_name and is_managed_workload(task.k8s_job_name):
         await run_gateway(gateway.delete_job, namespace, task.k8s_job_name)
-    if task.storage_gb and task.k8s_job_name:
-        # The Job's own deletion is above; this reclaims the scratch volume it
-        # mounted, which would otherwise outlive the task that owned it.
-        await run_gateway(gateway.delete_workload, namespace, WorkloadRefs(pvc=_pvc_name(task)))
 
     task.is_active = False
     if not task.is_finished:
@@ -395,10 +417,6 @@ async def delete_task(session: AsyncSession, task: Task, gateway: K8sGateway, ac
     )
     await session.flush()
     logger.info("task_deleted", task=task.name)
-
-
-def _pvc_name(task: Task) -> str:
-    return f"{task.k8s_job_name}-data" if task.k8s_job_name else ""
 
 
 async def update_task(session: AsyncSession, task: Task, payload: TaskUpdate, actor: User) -> Task:

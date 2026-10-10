@@ -39,7 +39,7 @@ from app.core.errors import BadRequestError, ConflictError, NotFoundError
 from app.core.logging import get_logger
 from app.k8s import K8sError, StorageObjects, build_storage_objects, run_gateway
 from app.k8s.gateway import K8sGateway, PvcInfo, PvInfo, WorkloadRefs
-from app.k8s.naming import storage_pv_name
+from app.k8s.naming import STORAGE_ID_LABEL, storage_pv_name, storage_pvc_name
 from app.models.enums import (
     InstanceStatus,
     StorageKind,
@@ -49,9 +49,10 @@ from app.models.enums import (
 )
 from app.models.group import Group
 from app.models.instance import Instance
+from app.models.resource import ResourceGroup, ResourceGroupLimit
 from app.models.storage import InstanceStorage, Storage
 from app.models.user import User
-from app.models.workspace import Workspace
+from app.models.workspace import Workspace, WorkspaceResourceGrant
 from app.services import storage_paths, workload_events
 from app.services.workload_common import Page
 
@@ -236,6 +237,75 @@ async def get_storage(session: AsyncSession, actor: User, storage_id: int) -> St
 # ---------------------------------------------------------------------------
 # Creation
 # ---------------------------------------------------------------------------
+async def _check_capacity_against_pools(
+    session: AsyncSession,
+    *,
+    kind: StorageKind,
+    capacity_gb: int,
+    workspace: Workspace | None,
+) -> None:
+    """Refuse a user volume larger than the pools of its workspace allow.
+
+    The per-user storage ceiling lives on a resource group
+    (``ResourceGroupLimit.max_storage_gb_per_user``) — that is where the capacity a
+    single person may hold is decided. It used to bound ``instance.storage_gb``,
+    which was a scratch disk; now that an instance has no scratch disk and the
+    owner's *volume* is their home, the ceiling belongs here, on the volume.
+
+    A workspace may be granted several resource groups and a volume is not bound to
+    any one of them — the user picks a group per workload. So the binding
+    constraint is the **smallest** cap among the groups granted here. Checking only
+    the largest (or the first) would register a volume that a workload in a
+    stricter pool could not be used with, and nothing would say so until someone
+    tried.
+
+    A *shared* volume is not a personal home and is not capped per user: a group
+    share belongs to everyone in the group, so dividing it by the per-user ceiling
+    is meaningless. Only user volumes are checked.
+    """
+    if kind is not StorageKind.USER_VOLUME:
+        return
+    if workspace is None:
+        # Nothing to compare against. Warn rather than pass silently: "no ceiling
+        # applied" and "the ceiling passed" must not look the same in the log.
+        logger.warning(
+            "storage_capacity_unchecked",
+            capacity_gb=capacity_gb,
+            reason="user volume has no workspace, so it has no resource group",
+        )
+        return
+
+    rows = (
+        await session.execute(
+            select(ResourceGroup.name, ResourceGroupLimit.max_storage_gb_per_user)
+            .join(
+                WorkspaceResourceGrant,
+                WorkspaceResourceGrant.resource_group_id == ResourceGroup.id,
+            )
+            .join(
+                ResourceGroupLimit,
+                ResourceGroupLimit.resource_group_id == ResourceGroup.id,
+            )
+            .where(WorkspaceResourceGrant.workspace_id == workspace.id)
+        )
+    ).all()
+    if not rows:
+        logger.warning(
+            "storage_capacity_unchecked",
+            workspace=workspace.id,
+            capacity_gb=capacity_gb,
+            reason="workspace has no resource group with limits",
+        )
+        return
+
+    pool_name, cap = min(rows, key=lambda row: row[1])
+    if capacity_gb > cap:
+        raise BadRequestError(
+            f"容量 {capacity_gb} GB 超出资源组 {pool_name} 的每用户上限（{cap} GB）",
+            code="storage_exceeds_pool_limit",
+        )
+
+
 async def create_storage(
     session: AsyncSession,
     actor: User,
@@ -282,6 +352,10 @@ async def create_storage(
             f"存储卷必须建立在用户组 {group.name} 的工作空间上",  # type: ignore[union-attr]
             code="storage_workspace_mismatch",
         )
+
+    await _check_capacity_against_pools(
+        session, kind=kind, capacity_gb=capacity_gb, workspace=workspace
+    )
 
     host_path = storage_paths.volume_path(
         settings,
@@ -733,6 +807,33 @@ async def resize_storage(
     return storage
 
 
+async def _delete_namespaced_claims(gateway: K8sGateway, storage: Storage) -> None:
+    """Remove the extra PV+PVC pairs a volume acquired outside its home namespace.
+
+    Only a global share ever has these: it belongs to no namespace, so
+    :func:`ensure_attachment_claims` gives each mounting namespace its own pair
+    (a PersistentVolume binds to exactly one claim). Nothing in the database
+    records them — deliberately, since they are derivable — so the sweep is by
+    label, and it must come *after* the canonical volume above so that a failure
+    half-way still leaves the primary object gone.
+
+    Claim before volume, for the same reason as in :func:`delete_storage`: a volume
+    deleted out from under a live claim leaves that claim `Lost`, which containers
+    report as corruption rather than as an intentional removal.
+    """
+    selector = f"{STORAGE_ID_LABEL}={storage.id}"
+    for volume in await run_gateway(gateway.list_pvs, selector):
+        if volume.claim_namespace and volume.claim_name:
+            await run_gateway(
+                gateway.delete_workload,
+                volume.claim_namespace,
+                WorkloadRefs(pvc=volume.claim_name),
+            )
+        # Idempotent: the canonical volume was already deleted by name above, and
+        # deleting an absent volume is not an error.
+        await run_gateway(gateway.delete_pv, volume.name)
+
+
 async def _ensure_detached(session: AsyncSession, storage: Storage) -> None:
     """Refuse to retire a volume that an instance is still mounting."""
     holders = list(
@@ -787,6 +888,13 @@ async def delete_storage(
         # volume whose registration only partly succeeded is still cleaned up. A
         # global share never had a claim, and this is the only object it owns.
         await run_gateway(gateway.delete_pv, storage_pv_name(storage.id, storage.name))
+        # ...but a global share does not own just that one volume. Every namespace
+        # that mounted it got its own PV+PVC pair, created on demand and recorded
+        # nowhere, so the *only* way to find them is the label they all carry.
+        # Without this sweep, retiring a share leaves one orphaned `Retain` volume
+        # per namespace that ever used it — invisible in the UI and impossible to
+        # clean up except by hand.
+        await _delete_namespaced_claims(gateway, storage)
     except K8sError as exc:
         raise BadRequestError(
             f"删除集群存储失败：{exc.message}", code="storage_delete_failed"
@@ -864,6 +972,126 @@ def _administers(scope: policy.DataScope, group_id: int | None) -> bool:
     return group_id is not None and group_id in scope.group_ids
 
 
+async def require_user_volume(session: AsyncSession, user: User) -> Storage:
+    """The owner's home volume, or a hard failure.
+
+    Every workload mounts this, so a missing one is not a degraded experience: it
+    is the user's data being absent. The tempting alternative — mount nothing and
+    carry on — starts a container whose home directory is empty, which the user
+    reads as "all my files are gone" rather than as an error, and which then
+    *writes new files into the container's ephemeral layer* that vanish when the
+    workload stops. Refusing is the only honest answer, and it names the fix.
+
+    The oldest live volume wins if several exist, matching the directory layout:
+    a second volume for one user is a separate directory, not a second home.
+    """
+    storage = await session.scalar(
+        select(Storage)
+        .where(
+            Storage.kind == StorageKind.USER_VOLUME.value,
+            Storage.owner_user_id == user.id,
+            Storage.is_active.is_(True),
+        )
+        .order_by(Storage.id)
+        .limit(1)
+    )
+    if storage is None:
+        raise BadRequestError(
+            f"用户 {user.username} 还没有存储卷，无法创建工作负载；"
+            "请先由集群管理员在存储页面为其创建目录卷",
+            code="user_volume_missing",
+        )
+    return storage
+
+
+def claim_name_for(storage: Storage, workspace: Workspace) -> str:
+    """The claim through which ``workspace`` reaches this volume.
+
+    Derived rather than looked up, and that is the point: the name a workload must
+    mount is a pure function of the volume and the namespace, so a pod spec can be
+    rebuilt at any time — after a restart, from a reconcile — without a second
+    place that records it and can drift from the cluster.
+    """
+    if storage.pvc_name and storage.k8s_namespace == workspace.k8s_namespace:
+        return storage.pvc_name
+    return storage_pvc_name(storage.id, storage.name, namespace=workspace.k8s_namespace)
+
+
+async def ensure_attachment_claims(
+    session: AsyncSession,
+    workspace: Workspace,
+    storages: list[Storage],
+    gateway: K8sGateway,
+) -> list[tuple[Storage, str]]:
+    """Pair each volume with a claim it can actually be mounted through.
+
+    A volume reached from its own namespace already has a claim: it was created
+    when the volume was registered. A **global share has no home namespace** — it
+    belongs to the cluster rather than to a lab — and because a PersistentVolume
+    binds to exactly one claim, reaching it from a second namespace needs a second
+    PV+PVC pair over the same directory. Those are created here, on first use, and
+    named after the namespace so :func:`claim_name_for` can derive them again.
+
+    Done at mount time rather than at registration because the set of namespaces is
+    not known then: workspaces are created and deleted continuously, and eagerly
+    materialising a claim in each would mean a claim in every lab for every global
+    share, most of them never used.
+    """
+    claimed: list[tuple[Storage, str]] = []
+    for storage in storages:
+        name = claim_name_for(storage, workspace)
+        if name == storage.pvc_name:
+            claimed.append((storage, name))
+            continue
+
+        if storage.kind is not StorageKind.GLOBAL_SHARE:
+            # Only a global share is reachable from a foreign namespace; anything
+            # else here means the caller bypassed `resolve_attachments`.
+            raise BadRequestError(
+                f"存储 {storage.name} 在命名空间 {workspace.k8s_namespace} 中还没有存储声明，"
+                "无法挂载",
+                code="storage_claim_missing",
+            )
+
+        objects = build_storage_objects(
+            storage_id=storage.id,
+            storage_name=storage.name,
+            host_path=storage.host_path,
+            namespace=workspace.k8s_namespace,
+            workspace_labels={"wl-workspace": workspace.k8s_namespace},
+            size_gb=storage.capacity_gb,
+            access_mode=storage.access_mode,
+            kind=str(storage.kind),
+            # The volume's own namespace is `None`, so any namespace is foreign and
+            # both objects take the namespace suffix.
+            extra_namespace=True,
+        )
+        if objects.pvc is None:  # pragma: no cover - a workspace always has one
+            raise BadRequestError(
+                f"工作空间 {workspace.name} 还没有命名空间，无法挂载存储",
+                code="storage_claim_missing",
+            )
+
+        try:
+            existing = await run_gateway(gateway.read_pvc, workspace.k8s_namespace, name)
+        except K8sError:
+            # Treat an unreadable claim as absent and let the create below produce
+            # the real error if there is one, rather than swallowing it here.
+            existing = None
+        if existing is None:
+            await run_gateway(gateway.apply_pv, objects.pv)
+            await run_gateway(gateway.apply_pvc, objects.pvc)
+            logger.info(
+                "storage_claim_created",
+                storage=storage.id,
+                storage_name=storage.name,
+                namespace=workspace.k8s_namespace,
+                claim=name,
+            )
+        claimed.append((storage, name))
+    return claimed
+
+
 async def resolve_attachments(
     session: AsyncSession,
     actor: User,
@@ -929,16 +1157,11 @@ async def resolve_attachments(
                 f"存储 {storage.name} 是用户组本级目录，只有组管理员可以挂载",
                 code="storage_group_level_requires_admin",
             )
-        # The claim lives in exactly one namespace and a pod can only mount claims
-        # from its own. Checked here because the scheduler's version of this failure
-        # is a container stuck in ContainerCreating with no useful message. A global
-        # share reaches this branch until a claim exists in this namespace.
-        if storage.k8s_namespace != workspace.k8s_namespace:
-            raise BadRequestError(
-                f"存储 {storage.name} 在命名空间 {workspace.k8s_namespace} 中还没有存储声明，"
-                "无法挂载",
-                code="storage_claim_missing",
-            )
+        # Whether a claim exists in the *mounting* namespace is deliberately not
+        # checked here. For a global share it may not exist yet, and creating it is
+        # `ensure_attachment_claims`'s job — it needs a gateway, which this
+        # validation pass does not have. Everything decidable without touching the
+        # cluster is decided here, so a bad set is refused whole.
         resolved.append(storage)
 
     # Raises before anything is created, so a bad set never gets half-applied.
@@ -971,21 +1194,6 @@ def resolve_mount_paths(storages: list[Storage]) -> list[tuple[Storage, str]]:
         seen.add(path)
         assigned.append((storage, path))
     return assigned
-
-
-def to_mounts(storages: list[Storage]) -> list[dict[str, object]]:
-    """Turn volumes into the mount descriptors the workload builder expects."""
-    return [
-        {
-            "storage_id": storage.id,
-            "mount_path": mount_path,
-            "read_only": storage.is_read_only,
-            "pvc_name": storage.pvc_name,
-            "name": storage.name,
-            "kind": str(storage.kind),
-        }
-        for storage, mount_path in resolve_mount_paths(storages)
-    ]
 
 
 async def record_attachments(

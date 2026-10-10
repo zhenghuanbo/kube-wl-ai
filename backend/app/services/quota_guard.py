@@ -13,19 +13,26 @@ The rule for what counts is deliberately *not* "running pods":
   than its quota during a restart.
 * A task stops counting the moment it reaches a terminal status, because it will
   never consume anything again.
+* Storage is counted from the workspace's **managed volumes**, never from the
+  workloads that mount them. A volume is registered once, exists independently of
+  any instance, and outlives all of them — so charging an instance for it would
+  both double-count a shared volume and forget the charge entirely whenever that
+  instance was deleted. It would also be meaningless now that an instance has no
+  disk of its own and merely mounts the owner's volume.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import QuotaExceededError
 from app.models.enums import TERMINAL_TASK_STATUSES, QuotaResource, QuotaScope
 from app.models.instance import Instance
 from app.models.resource import Quota, gpu_resource_key
+from app.models.storage import Storage
 from app.models.task import Task
 from app.services import resources as resource_service
 
@@ -72,7 +79,6 @@ async def workspace_usage(session: AsyncSession, workspace_id: int) -> Usage:
         usage.instances += 1
         usage.cpu_milli += instance.cpu_milli
         usage.memory_mb += instance.memory_mb
-        usage.storage_gb += instance.storage_gb
         if instance.has_gpu:
             key = gpu_resource_key(instance.gpu_type)
             usage.gpu[key] = usage.gpu.get(key, 0) + instance.gpu_count
@@ -91,10 +97,23 @@ async def workspace_usage(session: AsyncSession, workspace_id: int) -> Usage:
         usage.tasks += 1
         usage.cpu_milli += task.cpu_milli
         usage.memory_mb += task.memory_mb
-        usage.storage_gb += task.storage_gb
         if task.has_gpu:
             key = gpu_resource_key(task.gpu_type)
             usage.gpu[key] = usage.gpu.get(key, 0) + task.gpu_count
+
+    # Storage is the workspace's registered volumes, not what is running on top of
+    # them (see the module docstring). A global share has no workspace and so is
+    # charged to nobody, which is the intent: it belongs to the cluster, not to a
+    # lab, and billing one lab for everyone's shared data would be arbitrary.
+    usage.storage_gb = int(
+        await session.scalar(
+            select(func.coalesce(func.sum(Storage.capacity_gb), 0)).where(
+                Storage.workspace_id == workspace_id,
+                Storage.is_active.is_(True),
+            )
+        )
+        or 0
+    )
 
     return usage
 
@@ -112,9 +131,9 @@ def check_quota(
     *,
     cpu_milli: int,
     memory_mb: int,
-    storage_gb: int,
     gpu_type: str,
     gpu_count: int,
+    storage_gb: int = 0,
     instances: int = 0,
     tasks: int = 0,
 ) -> None:
@@ -122,12 +141,20 @@ def check_quota(
 
     Raises 409 rather than 403: this is a capacity decision, not a permission
     one, and the UI has to name the resource that ran out.
+
+    Only the resources the request itself *consumes* are checked. Storage is
+    therefore checked when a volume is registered (which is when gigabytes are
+    committed) and not when a workload is started, because starting a workload
+    consumes none — an instance only mounts a volume that was already counted, and
+    refusing to start it because the workspace is at its storage ceiling would
+    block work over data that is already on disk.
     """
     checks = [
         (QuotaResource.CPU.value, usage.cpu_milli + cpu_milli, "CPU"),
         (QuotaResource.MEMORY.value, usage.memory_mb + memory_mb, "内存"),
-        (QuotaResource.STORAGE.value, usage.storage_gb + storage_gb, "存储"),
     ]
+    if storage_gb:
+        checks.append((QuotaResource.STORAGE.value, usage.storage_gb + storage_gb, "存储"))
     if instances:
         checks.insert(0, (QuotaResource.INSTANCE.value, usage.instances + instances, "实例数"))
     if tasks:

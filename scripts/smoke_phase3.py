@@ -114,6 +114,39 @@ def ensure_user(admin: str, username: str, group_id: int | None = None) -> int |
     return None
 
 
+def ensure_home_volume(
+    admin: str, user_id: int, workspace_id: int, username: str
+) -> int | None:
+    """Register the user's home directory, or find the one already registered.
+
+    An instance has no disk of its own — its container mounts the *owner's* storage
+    volume at ``/home/{username}``, and creating one without a volume is refused
+    with ``user_volume_missing``. So this is a prerequisite of the first instance,
+    not an optional extra.
+
+    Re-runs collide on the directory rather than on the name (a user's directory is
+    fixed by their group and username), so ``storage_path_taken`` is looked up
+    instead of treated as a failure.
+    """
+    status, body = call("POST", "/storages", token=admin, body={
+        "name": f"p3-home-{username}",
+        "displayName": f"{username} 的主目录",
+        "kind": "user_volume",
+        "workspaceId": workspace_id,
+        "ownerUserId": user_id,
+        "capacityGb": 10,
+    })
+    if status == 201 and isinstance(body, dict):
+        return int(body["id"])
+    if status == 409 and error_code(body) == "storage_path_taken":
+        status, page = call("GET", "/storages?kind=user_volume&pageSize=200", token=admin)
+        rows = page.get("items", []) if isinstance(page, dict) else []
+        for row in rows:
+            if row.get("ownerUsername") == username:
+                return int(row["id"])
+    return None
+
+
 def main() -> int:
     print("\n\033[1mPhase 3 — 容器实例、SSH 与 IDE\033[0m")
 
@@ -130,6 +163,19 @@ def main() -> int:
     if not isinstance(group, dict):
         return 1
     group_id = int(group["id"])
+
+    # A second lab for the un-granted workspace below. It has to be a *different*
+    # group: storage registration resolves a group to its single workspace
+    # (`group_has_multiple_workspaces` otherwise), so putting two workspaces in one
+    # group would make that lab permanently unable to own a storage volume — and
+    # this script needs to register one for its user.
+    status, spare_group = call("POST", "/groups", token=admin, body={
+        "name": f"p3-spare-{SUFFIX}", "displayName": "P3 备用实验室", "kind": "lab",
+    })
+    check("建第二个用户组（未授权工作空间用）", status == 201, str(spare_group))
+    spare_group_id = int(spare_group["id"]) if isinstance(spare_group, dict) else None
+    if spare_group_id is None:
+        return 1
 
     pool_name = f"p3-pool-{SUFFIX}"
     status, pool = call("POST", "/resource-groups", token=admin, body={
@@ -169,10 +215,11 @@ def main() -> int:
     workspace_id = int(workspace["id"])
     namespace = str(workspace["k8sNamespace"])
 
-    # A second workspace in the same lab, deliberately *without* a grant, so
-    # "not granted" can be told apart from "not a member".
+    # A second workspace, deliberately *without* a grant, so "not granted" can be
+    # told apart from "not a member". It lives in the spare lab above, so the first
+    # lab keeps exactly one workspace and can still own a storage volume.
     status, bare_ws = call("POST", "/workspaces", token=admin, body={
-        "name": f"p3-bare-{SUFFIX}", "groupId": group_id,
+        "name": f"p3-bare-{SUFFIX}", "groupId": spare_group_id,
     })
     check("建未授权工作空间", status == 201, str(bare_ws))
     bare_ws_id = int(bare_ws["id"]) if isinstance(bare_ws, dict) else None
@@ -193,6 +240,14 @@ def main() -> int:
     other = login(f"p3-other-{SUFFIX}", PASSWORD)
     check("普通用户登录", token is not None and other is not None)
     if token is None or other is None:
+        return 1
+
+    # The instance below has no disk of its own: it mounts the owner's storage
+    # volume. Registering it is a prerequisite, so it is done (as the administrator)
+    # before anything is created.
+    home_id = ensure_home_volume(admin, user_id, workspace_id, f"p3-user-{SUFFIX}")
+    check("为该用户登记主目录存储卷", home_id is not None, str(home_id))
+    if home_id is None:
         return 1
 
     # --- SSH keys ----------------------------------------------------------
@@ -274,10 +329,8 @@ def main() -> int:
     check("超出资源组运行时长被拒", status == 400
           and error_code(too_long) == "runtime_exceeds_pool_limit", f"{status} {too_long}")
 
-    status, too_big = call("POST", "/instances", token=token,
-                           body=payload("dev-big", storageGb=500))
-    check("超出资源组存储上限被拒", status == 400
-          and error_code(too_big) == "storage_exceeds_pool_limit", f"{status} {too_big}")
+    # 「超出资源组存储上限」这一项已随实例的 storageGb 一起取消：实例不再自带磁盘，
+    # 每用户存储上限现在校验的是存储卷的容量（见 smoke_phase5 的存储段）。
 
     # --- quota -------------------------------------------------------------
     status, second = call("POST", "/instances", token=token, body=payload("dev-two"))

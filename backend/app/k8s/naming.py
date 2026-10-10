@@ -115,14 +115,18 @@ STORAGE_ID_LABEL = "wl-storage-id"
 STORAGE_KIND_LABEL = "wl-storage-kind"
 
 
-def storage_pvc_name(storage_id: int, storage_name: str) -> str:
-    """PVC name for a standalone volume.
+def storage_pvc_name(storage_id: int, storage_name: str, *, namespace: str | None = None) -> str:
+    """Claim name for a managed volume.
 
-    Deliberately *not* derived from the owning instance: this claim outlives
-    every instance that mounts it, so its name must not change when one is
-    recreated.
+    Deliberately *not* derived from the owning instance: this claim outlives every
+    instance that mounts it, so its name must not change when one is recreated.
+
+    ``namespace`` is only passed for a volume reached from somewhere other than its
+    own namespace — which today means a global share, whose claims are created one
+    per namespace. See :func:`storage_pv_name` for why that is unavoidable.
     """
-    return truncate_name(f"{WORKLOAD_PREFIX}-vol-{slug(storage_name)}-{storage_id}")
+    base = truncate_name(f"{WORKLOAD_PREFIX}-vol-{slug(storage_name)}-{storage_id}")
+    return base if not namespace else truncate_name(f"{base}-{slug(namespace)}")
 
 
 def storage_pv_name(storage_id: int, storage_name: str, *, namespace: str | None = None) -> str:
@@ -136,8 +140,7 @@ def storage_pv_name(storage_id: int, storage_name: str, *, namespace: str | None
     ``namespace=None`` gives the unsuffixed name, which is what a volume reached
     from only its own namespace gets.
     """
-    base = storage_pvc_name(storage_id, storage_name)
-    return base if not namespace else truncate_name(f"{base}-{slug(namespace)}")
+    return storage_pvc_name(storage_id, storage_name, namespace=namespace)
 
 
 def is_managed_workload(name: str) -> bool:

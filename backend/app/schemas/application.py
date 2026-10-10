@@ -42,7 +42,6 @@ class ApplicationSummary(ApiModel):
     default_memory_mb: int
     default_gpu_type: str
     default_gpu_count: int
-    default_storage_gb: int
     visibility: ApplicationVisibility
     is_curated: bool
     is_active: bool
@@ -78,7 +77,6 @@ class ApplicationSummary(ApiModel):
             default_memory_mb=app.default_memory_mb,  # type: ignore[attr-defined]
             default_gpu_type=app.default_gpu_type,  # type: ignore[attr-defined]
             default_gpu_count=app.default_gpu_count,  # type: ignore[attr-defined]
-            default_storage_gb=app.default_storage_gb,  # type: ignore[attr-defined]
             visibility=app.visibility,  # type: ignore[attr-defined]
             is_curated=app.is_curated,  # type: ignore[attr-defined]
             is_active=app.is_active,  # type: ignore[attr-defined]
@@ -124,7 +122,6 @@ class ApplicationCreate(ApiModel):
     default_memory_mb: int = Field(default=4096, ge=128, le=4194304)
     default_gpu_type: str = Field(default="none", max_length=32)
     default_gpu_count: int = Field(default=0, ge=0, le=64)
-    default_storage_gb: int = Field(default=10, ge=0, le=2048)
     env: dict[str, str] = Field(default_factory=dict)
     ports: list[dict[str, object]] = Field(default_factory=list)
     visibility: ApplicationVisibility = ApplicationVisibility.WORKSPACE
@@ -144,7 +141,6 @@ class ApplicationUpdate(ApiModel):
     default_memory_mb: int | None = Field(default=None, ge=128, le=4194304)
     default_gpu_type: str | None = Field(default=None, max_length=32)
     default_gpu_count: int | None = Field(default=None, ge=0, le=64)
-    default_storage_gb: int | None = Field(default=None, ge=0, le=2048)
     env: dict[str, str] | None = None
     ports: list[dict[str, object]] | None = None
     visibility: ApplicationVisibility | None = None
@@ -163,7 +159,6 @@ class ApplicationLaunch(ApiModel):
     owner_user_id: int | None = None
     resource_group_id: int | None = None
     resource_spec_id: int | None = None
-    storage_gb: int | None = Field(default=None, ge=0, le=2048)
     max_runtime_seconds: int | None = Field(default=None, ge=60)
     ssh_enabled: bool = True
 

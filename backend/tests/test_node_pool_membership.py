@@ -36,11 +36,13 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings
 from app.k8s import FakeK8sGateway, NodeInfo
 from app.models.enums import GroupKind
 from app.models.group import Group
 from app.models.resource import POOL_LABEL, ComputeNode, ResourceGroup
 from app.models.user import User
+from app.models.workspace import Workspace
 from tests import factories
 
 PASSWORD = "correct-horse-battery"
@@ -61,7 +63,7 @@ class World:
 
 
 @pytest.fixture
-async def world(admin_client: AsyncClient, seeded: AsyncSession) -> World:
+async def world(admin_client: AsyncClient, seeded: AsyncSession, settings: Settings) -> World:
     """A default pool, a named pool, one spec, and a workspace holding both."""
     lab_a = await factories.create_group(seeded, name="lab-a", kind=GroupKind.LAB)
     admin = await factories.create_user(
@@ -124,6 +126,13 @@ async def world(admin_client: AsyncClient, seeded: AsyncSession) -> World:
         json={"userId": user_a.id, "moveFromExisting": True},
     )
     assert moved.status_code in (200, 201), moved.text
+
+    # A workload mounts its owner's home, and starting one without a registered home
+    # is refused — so user-a needs one before any pinning test can run.
+    await factories.create_user_volume(
+        seeded, user_a, settings=settings, workspace=await seeded.get(Workspace, workspace_id)
+    )
+    await seeded.commit()
 
     return World(
         lab_a=lab_a,
@@ -538,7 +547,6 @@ async def test_a_task_is_pinned_to_its_pool(
             "resourceSpecId": world.spec_id,
             "image": "registry.local/pytorch:2.4",
             "script": "python train.py --epochs 3",
-            "storageGb": 0,
         },
     )
     assert response.status_code == 201, response.text

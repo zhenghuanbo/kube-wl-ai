@@ -227,25 +227,30 @@ def _warnings(settings: Settings, counts: SystemCounts) -> list[SystemWarning]:
             "设置 K8S_ENABLED=true 并确认服务账号权限",
         )
 
-    missing_classes = [
-        name
-        for name, value in (
-            ("HOME", settings.storage_class_home),
-            ("DATA", settings.storage_class_data),
-            ("SHARE", settings.storage_class_share),
-        )
-        if not value
-    ]
-    if missing_classes:
-        add(
-            "storage_class_missing",
-            "warning",
-            "有存储类型没有配置 StorageClass",
-            "对应的实例/任务临时数据盘会在运行时才失败，报错是集群侧的 "
-            "ProvisioningFailed，看不出是配置缺失。"
-            "注意这与「存储卷」无关：托管存储卷是静态 hostPath PV，不需要 StorageClass。",
-            "设置 " + "、".join(f"STORAGE_CLASS_{name}" for name in missing_classes),
-        )
+    # Reported as information, never as a warning. These three settings configured
+    # the *dynamic* claims the platform used to create for an instance's home, a
+    # task's scratch disk and a share — all of which are gone: a workload now mounts
+    # the managed storage volume, which is a static hostPath PV that needs no
+    # StorageClass at all. Nothing reads these values today, so "not configured"
+    # cannot cause a failure and must not be dressed up as one.
+    #
+    # They are kept because the volumes are expected to move to shared storage
+    # (GPFS/Lustre), and that is exactly when a StorageClass becomes the right way
+    # to say which class of storage a claim should get.
+    _storage_class_settings = ", ".join(
+        f"STORAGE_CLASS_{name}"
+        for name in ("HOME", "DATA", "SHARE")
+        if not getattr(settings, f"storage_class_{name.lower()}")
+    )
+    add(
+        "storage_classes_unused",
+        "info",
+        "STORAGE_CLASS_* 当前不生效",
+        "托管存储卷是静态 hostPath PV，不需要 StorageClass，因此这三个配置项现在没有读取方。"
+        + (f"未设置：{_storage_class_settings}。" if _storage_class_settings else "三者都已设置。")
+        + "保留它们是为了将来把存储卷换成 GPFS/Lustre 共享存储时，用 StorageClass 指定存储类型。",
+        "无需处理。等存储卷改用共享存储（GPFS/Lustre）时再设置这三个值。",
+    )
 
     # The managed-volume layout. Reported as information rather than a warning: the
     # default is a real path, and whether it exists on the node is a property of the

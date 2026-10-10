@@ -8289,13 +8289,6 @@
             "title": "Defaultgpucount",
             "default": 0
           },
-          "defaultStorageGb": {
-            "type": "integer",
-            "maximum": 2048.0,
-            "minimum": 0.0,
-            "title": "Defaultstoragegb",
-            "default": 10
-          },
           "env": {
             "additionalProperties": {
               "type": "string"
@@ -8451,10 +8444,6 @@
             "type": "integer",
             "title": "Defaultgpucount"
           },
-          "defaultStorageGb": {
-            "type": "integer",
-            "title": "Defaultstoragegb"
-          },
           "visibility": {
             "$ref": "#/components/schemas/ApplicationVisibility"
           },
@@ -8535,7 +8524,6 @@
           "defaultMemoryMb",
           "defaultGpuType",
           "defaultGpuCount",
-          "defaultStorageGb",
           "visibility",
           "isCurated",
           "isActive",
@@ -8603,19 +8591,6 @@
               }
             ],
             "title": "Resourcespecid"
-          },
-          "storageGb": {
-            "anyOf": [
-              {
-                "type": "integer",
-                "maximum": 2048.0,
-                "minimum": 0.0
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Storagegb"
           },
           "maxRuntimeSeconds": {
             "anyOf": [
@@ -8767,10 +8742,6 @@
             "type": "integer",
             "title": "Defaultgpucount"
           },
-          "defaultStorageGb": {
-            "type": "integer",
-            "title": "Defaultstoragegb"
-          },
           "visibility": {
             "$ref": "#/components/schemas/ApplicationVisibility"
           },
@@ -8814,7 +8785,6 @@
           "defaultMemoryMb",
           "defaultGpuType",
           "defaultGpuCount",
-          "defaultStorageGb",
           "visibility",
           "isCurated",
           "isActive",
@@ -8978,19 +8948,6 @@
               }
             ],
             "title": "Defaultgpucount"
-          },
-          "defaultStorageGb": {
-            "anyOf": [
-              {
-                "type": "integer",
-                "maximum": 2048.0,
-                "minimum": 0.0
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Defaultstoragegb"
           },
           "env": {
             "anyOf": [
@@ -10786,19 +10743,6 @@
             "$ref": "#/components/schemas/IdeType",
             "default": "none"
           },
-          "storageGb": {
-            "anyOf": [
-              {
-                "type": "integer",
-                "maximum": 10240.0,
-                "minimum": 1.0
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Storagegb"
-          },
           "sshEnabled": {
             "type": "boolean",
             "title": "Sshenabled",
@@ -10959,10 +10903,6 @@
           "gpuCount": {
             "type": "integer",
             "title": "Gpucount"
-          },
-          "storageGb": {
-            "type": "integer",
-            "title": "Storagegb"
           },
           "sshEnabled": {
             "type": "boolean",
@@ -11148,7 +11088,6 @@
           "memoryMb",
           "gpuType",
           "gpuCount",
-          "storageGb",
           "sshEnabled",
           "isActive",
           "createdAt",
@@ -11316,10 +11255,6 @@
             "type": "integer",
             "title": "Gpucount"
           },
-          "storageGb": {
-            "type": "integer",
-            "title": "Storagegb"
-          },
           "sshEnabled": {
             "type": "boolean",
             "title": "Sshenabled"
@@ -11405,7 +11340,6 @@
           "memoryMb",
           "gpuType",
           "gpuCount",
-          "storageGb",
           "sshEnabled",
           "isActive",
           "createdAt",
@@ -14511,12 +14445,13 @@
             "type": "object",
             "title": "Env"
           },
-          "storageGb": {
-            "type": "integer",
-            "maximum": 2048.0,
-            "minimum": 0.0,
-            "title": "Storagegb",
-            "default": 0
+          "storageIds": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "maxItems": 16,
+            "title": "Storageids"
           },
           "priority": {
             "type": "integer",
@@ -14663,10 +14598,6 @@
           "gpuCount": {
             "type": "integer",
             "title": "Gpucount"
-          },
-          "storageGb": {
-            "type": "integer",
-            "title": "Storagegb"
           },
           "status": {
             "$ref": "#/components/schemas/TaskStatus"
@@ -14831,7 +14762,6 @@
           "memoryMb",
           "gpuType",
           "gpuCount",
-          "storageGb",
           "status",
           "priority",
           "isActive",
@@ -15000,10 +14930,6 @@
             "type": "integer",
             "title": "Gpucount"
           },
-          "storageGb": {
-            "type": "integer",
-            "title": "Storagegb"
-          },
           "status": {
             "$ref": "#/components/schemas/TaskStatus"
           },
@@ -15118,7 +15044,6 @@
           "memoryMb",
           "gpuType",
           "gpuCount",
-          "storageGb",
           "status",
           "priority",
           "isActive",

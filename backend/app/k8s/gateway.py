@@ -112,9 +112,6 @@ class NodeInfo:
 #: ``ClusterIP`` for internal-only access, ``NodePort`` to expose SSH.
 ServiceType = str  # "ClusterIP" | "NodePort"
 
-#: Default mount point for the instance's home directory.
-HOME_MOUNT_PATH = "/home/dev"
-
 
 @dataclass(frozen=True, slots=True)
 class ContainerPort:
@@ -148,6 +145,11 @@ class WorkloadSpec:
     name: str
     namespace: str
     image: str
+    #: Where the home volume is mounted inside the container. Required, with no
+    #: default: the home is a specific user's managed storage volume, at
+    #: ``/home/{username}``, so any fixed default is a path nobody owns — and a
+    #: silent one would mount a volume at a location the user cannot find.
+    mount_path: str
     labels: dict[str, str] = field(default_factory=dict)
     cpu_milli: int = 1000
     memory_mb: int = 2048
@@ -159,9 +161,8 @@ class WorkloadSpec:
     args: tuple[str, ...] | None = None
     env: dict[str, str] = field(default_factory=dict)
     ports: tuple[ContainerPort, ...] = ()
-    #: Home directory claim, and where it is mounted.
+    #: The claim backing ``mount_path``.
     pvc_name: str | None = None
-    mount_path: str = HOME_MOUNT_PATH
     #: Secret whose ``authorized_keys`` entry is mounted for SSH.
     ssh_secret_name: str | None = None
     #: Attached storage, beyond the home claim above.
@@ -329,6 +330,9 @@ class JobSpec:
     name: str
     namespace: str
     image: str
+    #: Where the home volume is mounted. Required for the same reason as on
+    #: ``WorkloadSpec``: see there.
+    mount_path: str
     labels: dict[str, str] = field(default_factory=dict)
     #: argv. For a *task* the third element may legitimately be a user's shell
     #: script — see ``app/models/task.py`` — but the platform never builds these
@@ -341,9 +345,11 @@ class JobSpec:
     gpu_count: int = 0
     env: dict[str, str] = field(default_factory=dict)
     working_dir: str | None = None
-    #: Optional read-only data or home volume.
+    #: The owner's managed storage volume, mounted as the task's home.
     pvc_name: str | None = None
-    mount_path: str = HOME_MOUNT_PATH
+    #: Opted-in shares, beyond the home above. Not mounted by default: a task that
+    #: wants a group or global share says so when it is submitted.
+    extra_mounts: tuple[VolumeMountSpec, ...] = ()
     node_selector: dict[str, str] = field(default_factory=dict)
     tolerations: tuple[dict[str, Any], ...] = ()
     backoff_limit: int = 0
@@ -523,6 +529,15 @@ class K8sGateway(Protocol):
 
         Deletes the *object*. With the reclaim policy this layer pins, the
         directory behind it is never touched — which is the point.
+        """
+
+    def list_pvs(self, label_selector: str) -> list[PvInfo]:
+        """Volumes matching a selector, in a stable order.
+
+        Exists because a global share's claim is created on demand in whatever
+        namespace mounts it, and no row records those namespaces. The label every
+        platform volume carries is the only thing that can find them again, so
+        retiring a share has to sweep by label rather than delete known names.
         """
 
     def scale_deployment(self, namespace: str, name: str, replicas: int) -> None:
@@ -769,6 +784,32 @@ class FakeK8sGateway:
         self._record("delete_pv", name)
         self.pvs.pop(name, None)
         self.pv_states.pop(name, None)
+
+    def list_pvs(self, label_selector: str) -> list[PvInfo]:
+        self._record("list_pvs", label_selector)
+        wanted = _parse_selector(label_selector)
+        found: list[PvInfo] = []
+        # Sorted, so a sweep deletes in a predictable order and a test that asserts
+        # on which volume went first is not at the mercy of dict ordering.
+        for name in sorted(self.pvs):
+            spec = self.pvs[name]
+            if wanted and not _labels_match(spec.labels, wanted):
+                continue
+            scripted = self.pv_states.get(name)
+            if scripted is not None:
+                found.append(scripted)
+                continue
+            found.append(
+                PvInfo(
+                    name=name,
+                    phase="Bound" if spec.claim_name else "Available",
+                    host_path=spec.host_path,
+                    capacity_gb=spec.capacity_gb,
+                    claim_namespace=spec.claim_namespace,
+                    claim_name=spec.claim_name,
+                )
+            )
+        return found
 
     def scale_deployment(self, namespace: str, name: str, replicas: int) -> None:
         self._record("scale_deployment", namespace, name, replicas)

@@ -15,12 +15,15 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.tokens import IDE_TOKEN_TYPE, create_access_token, decode_ide_ticket
+from app.core.config import Settings
 from app.core.errors import UnauthorizedError
 from app.k8s import FakeExecSession, FakeK8sGateway
 from app.k8s.gateway import PodInfo
 from app.models.enums import GroupKind, GroupRole
 from app.models.group import Group
+from app.models.storage import Storage
 from app.models.user import User
+from app.models.workspace import Workspace
 from tests import factories
 
 PASSWORD = "correct-horse-battery"
@@ -42,6 +45,8 @@ class World:
     #: the CPU spec attached to that pool
     spec_id: int
     workspace_id: int
+    #: dana's registered home directory — mounted by every workload she starts
+    home_volume: Storage
 
 
 async def act_as(client: AsyncClient, username: str) -> AsyncClient:
@@ -52,7 +57,7 @@ async def act_as(client: AsyncClient, username: str) -> AsyncClient:
     return client
 
 
-async def build_world(admin_client: AsyncClient, seeded: AsyncSession) -> World:
+async def build_world(admin_client: AsyncClient, seeded: AsyncSession, settings: Settings) -> World:
     """One lab with one granted pool, and a second lab with nothing."""
     lab_a = await factories.create_group(seeded, name="lab-a", kind=GroupKind.LAB)
     lab_b = await factories.create_group(seeded, name="lab-b", kind=GroupKind.LAB)
@@ -146,6 +151,15 @@ async def build_world(admin_client: AsyncClient, seeded: AsyncSession) -> World:
     )
     assert moved.status_code in (200, 201), moved.text
 
+    # Dana's home directory has to be registered before she can start anything:
+    # creating a workload without one is refused (`user_volume_missing`) rather than
+    # silently starting with an empty HOME. Erin is deliberately left without one —
+    # several tests below depend on that being a refusal.
+    home_volume = await factories.create_user_volume(
+        seeded, user_a, settings=settings, workspace=await seeded.get(Workspace, workspace_id)
+    )
+    await seeded.commit()
+
     return World(
         lab_a=lab_a,
         lab_b=lab_b,
@@ -158,12 +172,13 @@ async def build_world(admin_client: AsyncClient, seeded: AsyncSession) -> World:
         pool_id=pool_id,
         spec_id=spec_id,
         workspace_id=workspace_id,
+        home_volume=home_volume,
     )
 
 
 @pytest.fixture
-async def world(admin_client: AsyncClient, seeded: AsyncSession) -> World:
-    return await build_world(admin_client, seeded)
+async def world(admin_client: AsyncClient, seeded: AsyncSession, settings: Settings) -> World:
+    return await build_world(admin_client, seeded, settings)
 
 
 def create_payload(world: World, **overrides: object) -> dict:
@@ -218,7 +233,11 @@ def spawn_pod(
 async def test_creating_an_instance_applies_the_full_object_set(
     client: AsyncClient, world: World, gateway: FakeK8sGateway
 ) -> None:
-    """One request must produce a Deployment, two Services, an Ingress, a PVC."""
+    """One request must produce a Deployment, two Services and an Ingress — but no disk.
+
+    The instance has no volume of its own any more: it mounts the owner's
+    registered home directory, and the claim it uses is that volume's.
+    """
     await act_as(client, "dana")
     body = await make_instance(client, world)
 
@@ -237,7 +256,9 @@ async def test_creating_an_instance_applies_the_full_object_set(
     assert deployment.replicas == 1
     # Jupyter must be told the ingress prefix or every asset 404s.
     assert f"--ServerApp.base_url=/x/{body['id']}/" in (deployment.command or ())
-    assert deployment.pvc_name == f"{deployment.name}-home"
+    # The claim is dana's home volume, and it is mounted under her own name.
+    assert deployment.pvc_name == world.home_volume.pvc_name
+    assert deployment.mount_path == "/home/dana"
 
     services = {key: spec for key, spec in gateway.services.items() if key.startswith(prefix)}
     assert len(services) == 2
@@ -248,7 +269,9 @@ async def test_creating_an_instance_applies_the_full_object_set(
     assert [port.name for port in ide.ports] == ["ide"]
 
     assert len([k for k in gateway.ingresses if k.startswith(prefix)]) == 1
-    assert len([k for k in gateway.pvcs if k.startswith(prefix)]) == 1
+    # Nothing is created in the cluster's storage layer: the home claim already
+    # exists (registered with the volume), and the instance owns no scratch disk.
+    assert [k for k in gateway.pvcs if k.startswith(prefix)] == []
     # No SSH key registered yet, so no Secret — and the pod must not mount one.
     assert [k for k in gateway.secrets if k.startswith(prefix)] == []
     assert deployment.ssh_secret_name is None
@@ -470,13 +493,21 @@ async def test_runtime_longer_than_the_pool_allows_is_rejected(
     assert response.json()["error"]["code"] == "runtime_exceeds_pool_limit"
 
 
-async def test_storage_beyond_the_pool_limit_is_rejected(client: AsyncClient, world: World) -> None:
+async def test_storage_is_no_longer_a_concern_of_instance_creation(
+    client: AsyncClient, world: World
+) -> None:
+    """The per-user storage ceiling moved to volume registration.
+
+    An instance has no disk to size, so `storageGb` is not merely ignored — it is
+    rejected as an unknown field. Silently accepting it would let a caller keep
+    believing they had asked for 500 GB. The limit itself is exercised where it now
+    lives, in the storage tests.
+    """
     await act_as(client, "dana")
 
     response = await client.post("/api/v1/instances", json=create_payload(world, storageGb=500))
 
-    assert response.status_code == 400
-    assert response.json()["error"]["code"] == "storage_exceeds_pool_limit"
+    assert response.status_code == 422
 
 
 async def test_instance_names_are_unique_within_a_workspace(
@@ -489,6 +520,31 @@ async def test_instance_names_are_unique_within_a_workspace(
 
     assert again.status_code == 409
     assert again.json()["error"]["code"] == "instance_name_taken"
+
+
+async def test_a_user_without_a_home_volume_cannot_start_anything(
+    client: AsyncClient, world: World, seeded: AsyncSession
+) -> None:
+    """A missing home is a refusal, not a container with an empty ``HOME``.
+
+    Starting the instance anyway would give dana a pod whose home is the container's
+    writable layer: she would find her files gone, write new ones, and lose those too
+    when the pod stops. Refusing up front is the only honest answer.
+
+    The volume is *retired* rather than never created, so the only thing missing is a
+    live home — a workspace without one would let ``no_workspace`` fire first and the
+    test would pass for the wrong reason.
+    """
+    world.home_volume.is_active = False
+    await seeded.commit()
+
+    await act_as(client, "dana")
+    response = await client.post("/api/v1/instances", json=create_payload(world, name="no-home"))
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "user_volume_missing"
+    # The message names the account, so an administrator knows whose volume to make.
+    assert "dana" in response.json()["error"]["message"]
 
 
 async def test_a_user_without_a_workspace_is_told_so(client: AsyncClient, world: World) -> None:

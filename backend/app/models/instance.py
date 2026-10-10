@@ -73,8 +73,6 @@ class Instance(Base, TimestampMixin):
     #: schema migration (same rationale as ``ResourceSpec.gpu_type``).
     gpu_type: Mapped[str] = mapped_column(String(32), nullable=False, default="none")
     gpu_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    #: Home directory size; the PVC the platform creates for this instance.
-    storage_gb: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
 
     image: Mapped[str] = mapped_column(String(512), nullable=False)
     ide_type: Mapped[IdeType] = mapped_column(

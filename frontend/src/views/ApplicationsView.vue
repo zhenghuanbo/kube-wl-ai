@@ -164,7 +164,6 @@ interface EditorForm {
   defaultMemoryMb: number
   defaultGpuCount: number
   defaultGpuType: string
-  defaultStorageGb: number
   visibility: ApplicationVisibility
 }
 
@@ -191,7 +190,6 @@ function emptyForm(): EditorForm {
     defaultMemoryMb: 4096,
     defaultGpuCount: 0,
     defaultGpuType: 'none',
-    defaultStorageGb: 10,
     visibility: 'workspace',
   }
 }
@@ -260,7 +258,6 @@ async function openEdit(summary: ApplicationSummary): Promise<void> {
       defaultMemoryMb: detail.defaultMemoryMb,
       defaultGpuCount: detail.defaultGpuCount,
       defaultGpuType: detail.defaultGpuType,
-      defaultStorageGb: detail.defaultStorageGb,
       visibility: detail.visibility,
     })
     await loadEditorGrants(detail.workspaceId)
@@ -344,7 +341,6 @@ async function submitEditor(): Promise<void> {
       defaultMemoryMb: form.defaultMemoryMb,
       defaultGpuCount: form.defaultGpuCount,
       defaultGpuType: form.defaultGpuCount > 0 ? form.defaultGpuType : 'none',
-      defaultStorageGb: form.defaultStorageGb,
       visibility: form.visibility,
     }
 
@@ -400,7 +396,6 @@ const launchForm = reactive({
   workspaceId: null as number | null,
   resourceGroupId: null as number | null,
   resourceSpecId: null as number | null,
-  storageGb: 10,
   maxRuntimeSeconds: null as number | null,
   sshEnabled: true,
 })
@@ -461,7 +456,6 @@ async function openLaunch(summary: ApplicationSummary): Promise<void> {
       workspaceId: isAdmin.value ? null : (myWorkspace.value?.id ?? null),
       resourceGroupId: detail.resourceGroupId ?? null,
       resourceSpecId: detail.resourceSpecId ?? null,
-      storageGb: detail.defaultStorageGb || 10,
       maxRuntimeSeconds: null,
       sshEnabled: true,
     })
@@ -530,7 +524,6 @@ async function submitLaunch(): Promise<void> {
       workspaceId: launchForm.workspaceId,
       resourceGroupId: launchForm.resourceGroupId,
       resourceSpecId: launchForm.resourceSpecId,
-      storageGb: launchForm.storageGb,
       maxRuntimeSeconds: launchForm.maxRuntimeSeconds,
       sshEnabled: launchForm.sshEnabled,
     })
@@ -968,17 +961,6 @@ function mayEdit(summary: ApplicationSummary): boolean {
                 density="comfortable"
               />
             </v-col>
-            <v-col cols="12" sm="3">
-              <v-text-field
-                v-model.number="form.defaultStorageGb"
-                type="number"
-                min="0"
-                label="存储（GB）"
-                variant="outlined"
-                density="comfortable"
-              />
-            </v-col>
-
             <v-col cols="12">
               <v-select
                 v-model="form.visibility"
@@ -1096,17 +1078,6 @@ function mayEdit(summary: ApplicationSummary): boolean {
               </div>
             </v-col>
 
-            <v-col cols="12" sm="6">
-              <v-text-field
-                v-model.number="launchForm.storageGb"
-                type="number"
-                min="0"
-                label="存储（GB）"
-                :max="launchPool?.limits?.maxStorageGbPerUser ?? undefined"
-                variant="outlined"
-                density="comfortable"
-              />
-            </v-col>
             <v-col cols="12" sm="6">
               <v-select
                 v-model="launchForm.maxRuntimeSeconds"

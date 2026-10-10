@@ -38,7 +38,6 @@ from app.k8s.gateway import (
     WorkloadSpec,
 )
 from app.k8s.workloads import (
-    TASK_MOUNT_PATH,
     TASK_SHELL,
     InstanceObjects,
     StorageObjects,
@@ -53,7 +52,6 @@ from app.k8s.workloads import (
 logger = get_logger(__name__)
 
 __all__ = [
-    "TASK_MOUNT_PATH",
     "TASK_SHELL",
     "ContainerPort",
     "ExecSession",

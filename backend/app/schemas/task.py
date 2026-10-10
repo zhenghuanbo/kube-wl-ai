@@ -47,7 +47,6 @@ class TaskSummary(ApiModel):
     memory_mb: int
     gpu_type: str
     gpu_count: int
-    storage_gb: int
     status: TaskStatus
     status_message: str | None = None
     priority: int
@@ -85,7 +84,6 @@ class TaskSummary(ApiModel):
             memory_mb=task.memory_mb,  # type: ignore[attr-defined]
             gpu_type=task.gpu_type,  # type: ignore[attr-defined]
             gpu_count=task.gpu_count,  # type: ignore[attr-defined]
-            storage_gb=task.storage_gb,  # type: ignore[attr-defined]
             status=task.status,  # type: ignore[attr-defined]
             status_message=task.status_message,  # type: ignore[attr-defined]
             priority=task.priority,  # type: ignore[attr-defined]
@@ -139,7 +137,11 @@ class TaskCreate(ApiModel):
     script: str = Field(min_length=1)
     working_dir: str | None = Field(default=None, max_length=256)
     env: dict[str, str] = Field(default_factory=dict)
-    storage_gb: int = Field(default=0, ge=0, le=2048)
+    #: Extra volumes to mount, beyond the owner's home volume — which is always
+    #: mounted, because a task has no home without it. Nothing is mounted by
+    #: default: a task that silently saw a colleague's shared directory would be a
+    #: surprise rather than a convenience.
+    storage_ids: list[int] = Field(default_factory=list, max_length=16)
     priority: int = Field(default=0, ge=-100, le=100)
     max_runtime_seconds: int | None = Field(default=None, ge=60)
     ttl_seconds_after_finished: int = Field(default=3600, ge=60, le=604800)

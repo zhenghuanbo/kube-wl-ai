@@ -11,11 +11,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.passwords import hash_password
 from app.auth.tokens import hash_token
-from app.models.enums import GroupKind, GroupRole, RoleScope, UserSource
+from app.core.config import Settings
+from app.k8s.naming import storage_pvc_name
+from app.models.enums import GroupKind, GroupRole, RoleScope, StorageKind, StorageStatus, UserSource
 from app.models.group import Group, UserGroupLink
 from app.models.rbac import Role, UserRole
+from app.models.storage import Storage
 from app.models.token import ApiToken
 from app.models.user import User
+from app.models.workspace import Workspace
+from app.services import storage_paths
 
 
 async def create_group(
@@ -95,6 +100,65 @@ async def add_to_group(
     session.add(link)
     await session.flush()
     return link
+
+
+async def create_user_volume(
+    session: AsyncSession,
+    user: User,
+    *,
+    settings: Settings,
+    workspace: Workspace | None = None,
+    group: Group | None = None,
+    capacity_gb: int = 10,
+    name: str | None = None,
+    pvc_name: str | None = None,
+    is_active: bool = True,
+) -> Storage:
+    """The owner's home directory, as a registered volume.
+
+    Every workload mounts one, and creating one without it is refused with
+    ``user_volume_missing`` — so any test that creates an instance or a task needs
+    this row to exist first. Kept here rather than duplicated in each test file.
+
+    ``pvc_name``/``k8s_namespace`` are filled in when a workspace is given, so the
+    common case needs no cluster calls at all:
+    :func:`app.services.storages.claim_name_for` returns ``pvc_name`` verbatim
+    whenever it matches the namespace.
+    """
+    resolved_group = group or user.primary_group
+    if resolved_group is None:
+        raise AssertionError(f"user {user.username!r} has no group — cannot place a home directory")
+
+    volume_name = name or f"{user.username}-home"
+    storage = Storage(
+        name=volume_name,
+        display_name=volume_name,
+        kind=StorageKind.USER_VOLUME,
+        status=StorageStatus.BOUND,
+        host_path=storage_paths.user_volume_path(
+            settings, group_name=resolved_group.name, username=user.username
+        ),
+        workspace_id=workspace.id if workspace else None,
+        group_id=resolved_group.id,
+        owner_user_id=user.id,
+        created_by=user.id,
+        capacity_gb=capacity_gb,
+        access_mode="ReadWriteOnce",
+        pvc_name=pvc_name,
+        k8s_namespace=workspace.k8s_namespace if workspace else None,
+        is_active=is_active,
+    )
+    session.add(storage)
+    await session.flush()
+
+    # Derive the claim from the row's real id, the same way registration does, so a
+    # test's volume is indistinguishable from a production one.
+    if workspace is not None and pvc_name is None:
+        storage.pvc_name = storage_pvc_name(
+            storage.id, volume_name, namespace=workspace.k8s_namespace
+        )
+        await session.flush()
+    return storage
 
 
 async def create_api_token(

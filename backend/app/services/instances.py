@@ -235,12 +235,11 @@ async def create_instance(
     ):
         raise ConflictError(f"该工作空间下已存在实例 {payload.name}", code="instance_name_taken")
 
-    storage_gb = payload.storage_gb or settings.instance_default_storage_gb
-    pool_storage_cap = pool.limits.max_storage_gb_per_user if pool.limits else None
-    if pool_storage_cap and storage_gb > pool_storage_cap:
-        raise BadRequestError(
-            f"存储超出资源组上限（{pool_storage_cap} GB）", code="storage_exceeds_pool_limit"
-        )
+    # An instance owns no disk: its home *is* the owner's managed storage volume, so
+    # there is no useful instance without one. Refused here, before any row exists,
+    # rather than at mount time — a container that starts with an empty home and
+    # then writes into its ephemeral layer looks to the user like data loss.
+    await storage_service.require_user_volume(session, owner)
 
     max_runtime = _resolve_runtime(payload.max_runtime_seconds, pool)
 
@@ -251,7 +250,6 @@ async def create_instance(
         usage,
         cpu_milli=spec.cpu_milli,
         memory_mb=spec.memory_mb,
-        storage_gb=storage_gb,
         gpu_type=spec.gpu_type,
         gpu_count=spec.gpu_count,
     )
@@ -270,7 +268,6 @@ async def create_instance(
         memory_mb=spec.memory_mb,
         gpu_type=spec.gpu_type,
         gpu_count=spec.gpu_count,
-        storage_gb=storage_gb,
         image=payload.image,
         ide_type=payload.ide_type,
         ssh_enabled=payload.ssh_enabled,
@@ -290,6 +287,9 @@ async def create_instance(
     attached = await storage_service.resolve_attachments(
         session, actor, workspace, payload.storage_ids or []
     )
+    # A global share has no claim in this namespace until something mounts it, and
+    # the pod spec needs the claim to exist before the pod is scheduled.
+    await storage_service.ensure_attachment_claims(session, workspace, attached, gateway)
     await storage_service.record_attachments(session, instance.id, attached)
 
     await apply_cluster_state(session, instance, workspace, pool, settings, gateway)
@@ -354,21 +354,32 @@ async def apply_cluster_state(
     """
     keys = await authorized_keys(session, instance.owner_user_id)
 
+    # The home volume is looked up rather than stored on the instance: the instance
+    # does not own it, and the owner's volume can be re-registered underneath a
+    # running instance. Resolving it here means a repair picks up the current one.
+    owner = await session.get(User, instance.owner_user_id)
+    if owner is None:  # pragma: no cover - a foreign key makes this unreachable
+        raise BadRequestError("实例的属主不存在", code="instance_owner_missing")
+    home = await storage_service.require_user_volume(session, owner)
+    home_mount_path = home.mount_path_for(owner.username)
+
     # Read the attachments from the database rather than taking them as an
     # argument: this function is also the repair path, and a reconcile that
     # forgot the mounts would silently produce an instance missing its data.
     attachments = await storage_service.list_attachments(session, instance.id)
     extra_mounts = tuple(
         VolumeMountSpec(
-            pvc_name=row.storage.pvc_name,
+            # Derived per namespace, not read from the volume: a global share is
+            # reached through a claim named after the namespace doing the mounting.
+            pvc_name=storage_service.claim_name_for(row.storage, workspace),
             mount_path=row.mount_path,
             read_only=row.is_read_only,
         )
         for row in attachments
-        if row.storage is not None and row.storage.pvc_name
+        if row.storage is not None
     )
     if len(extra_mounts) != len(attachments):
-        # Not silent. An attachment whose claim has gone would otherwise just stop
+        # Not silent. An attachment whose row has gone would otherwise just stop
         # being mounted, and the user would see an empty directory rather than a
         # failure — which is the worst possible way to lose access to data.
         logger.warning(
@@ -392,13 +403,13 @@ async def apply_cluster_state(
         memory_mb=instance.memory_mb,
         gpu_type=instance.gpu_type,
         gpu_count=instance.gpu_count,
-        storage_gb=instance.storage_gb,
+        home_pvc_name=storage_service.claim_name_for(home, workspace),
+        home_mount_path=home_mount_path,
         ssh_enabled=instance.ssh_enabled,
         authorized_keys=keys,
         node_selector=pool_node_selector(pool),
         tolerations=tuple(pool.k8s_tolerations or ()),
         ingress_host=settings.instance_ingress_host,
-        storage_class=pool.storage_class or settings.storage_class_home or None,
         extra_mounts=extra_mounts,
     )
 
@@ -434,8 +445,6 @@ async def _apply(
 
     if objects.ssh_secret is not None:
         await run_gateway(gateway.apply_secret, objects.ssh_secret)
-    if objects.pvc is not None:
-        await run_gateway(gateway.apply_pvc, objects.pvc)
 
     await run_gateway(gateway.apply_deployment, replace(objects.deployment, replicas=replicas))
 
@@ -456,6 +465,11 @@ async def _apply(
     instance.k8s_ssh_service = objects.ssh_service.name if objects.ssh_service else None
     instance.k8s_ide_service = objects.ide_service.name if objects.ide_service else None
     instance.k8s_ingress = refs.ingress
+    # Left null, always. An instance creates no claim of its own any more — its home
+    # belongs to the storage volume — and the delete path removes the claims named
+    # here, so recording the owner's claim would make deleting an instance destroy
+    # the user's storage. The column is kept for rows created before that change,
+    # whose temporary home claims still have to be cleaned up.
     instance.k8s_pvc = refs.pvc
     instance.k8s_secret = refs.secret
     instance.ssh_node_port = node_port if instance.ssh_enabled else None

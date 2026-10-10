@@ -17,11 +17,14 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings
 from app.k8s import FakeK8sGateway
 from app.k8s.gateway import JobInfo
 from app.models.enums import GroupKind, GroupRole, TaskStatus
 from app.models.group import Group
+from app.models.storage import Storage
 from app.models.user import User
+from app.models.workspace import Workspace
 from tests import factories
 
 PASSWORD = "correct-horse-battery"
@@ -43,6 +46,8 @@ class World:
     workspace_id: int
     #: id of a resource spec that exists but was never attached to the pool
     orphan_spec_id: int
+    #: dana's registered home directory — mounted by every workload she starts
+    home_volume: Storage
 
 
 async def act_as(client: AsyncClient, username: str) -> AsyncClient:
@@ -53,7 +58,7 @@ async def act_as(client: AsyncClient, username: str) -> AsyncClient:
     return client
 
 
-async def build_world(admin_client: AsyncClient, seeded: AsyncSession) -> World:
+async def build_world(admin_client: AsyncClient, seeded: AsyncSession, settings: Settings) -> World:
     lab_a = await factories.create_group(seeded, name="lab-a", kind=GroupKind.LAB)
     lab_b = await factories.create_group(seeded, name="lab-b", kind=GroupKind.LAB)
 
@@ -165,6 +170,14 @@ async def build_world(admin_client: AsyncClient, seeded: AsyncSession) -> World:
     )
     assert suspended.status_code == 200, suspended.text
 
+    # Every workload mounts its owner's home directory, and starting one without it
+    # is refused (`user_volume_missing`). Dana needs hers registered before any test
+    # below can create an instance or a task; Erin deliberately has none.
+    home_volume = await factories.create_user_volume(
+        seeded, user_a, settings=settings, workspace=await seeded.get(Workspace, workspace_id)
+    )
+    await seeded.commit()
+
     return World(
         lab_a=lab_a,
         lab_b=lab_b,
@@ -178,12 +191,13 @@ async def build_world(admin_client: AsyncClient, seeded: AsyncSession) -> World:
         spec_id=spec_id,
         workspace_id=workspace_id,
         orphan_spec_id=orphan.json()["id"],
+        home_volume=home_volume,
     )
 
 
 @pytest.fixture
-async def world(admin_client: AsyncClient, seeded: AsyncSession) -> World:
-    return await build_world(admin_client, seeded)
+async def world(admin_client: AsyncClient, seeded: AsyncSession, settings: Settings) -> World:
+    return await build_world(admin_client, seeded, settings)
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +216,6 @@ def app_payload(world: World, **overrides: object) -> dict:
         "resourceSpecId": world.spec_id,
         "defaultCpuMilli": 2000,
         "defaultMemoryMb": 4096,
-        "defaultStorageGb": 10,
         "visibility": "workspace",
     }
     payload.update(overrides)
@@ -223,7 +236,6 @@ def task_payload(world: World, **overrides: object) -> dict:
         "resourceSpecId": world.spec_id,
         "image": "registry.local/pytorch:2.4",
         "script": "python train.py --epochs 3",
-        "storageGb": 0,
     }
     payload.update(overrides)
     return payload
@@ -497,6 +509,53 @@ async def test_launching_a_retired_application_is_refused(
 # ---------------------------------------------------------------------------
 # Tasks — submission
 # ---------------------------------------------------------------------------
+async def test_a_task_mounts_the_owners_home_and_any_opted_in_shares(
+    client: AsyncClient, world: World, gateway: FakeK8sGateway, admin_client: AsyncClient
+) -> None:
+    """A task's mounts are the home plus exactly what it asked for — nothing else.
+
+    The home is mounted at ``/home/{username}`` and named in ``HOME``; a share is
+    *not* mounted unless the submitter names it. A task that silently saw a
+    colleague's shared directory would be a surprise rather than a convenience.
+
+    A *global* share is used rather than a group share because this world's lab has
+    two workspaces, and a group share is refused when its group's workspace is
+    ambiguous (``group_has_multiple_workspaces``) — a rule about where the claim
+    lives, unrelated to what is being tested here.
+    """
+    await act_as(client, "root2")
+    share = await admin_client.post(
+        "/api/v1/storages",
+        json={
+            "name": "task-share",
+            "displayName": "任务共享",
+            "kind": "global_share",
+            "capacityGb": 10,
+        },
+    )
+    assert share.status_code == 201, share.text
+    share_id = share.json()["id"]
+
+    # Without a choice: only the home.
+    await act_as(client, "dana")
+    await make_task(client, world, name="bare")
+    spec = gateway.jobs[job_name(gateway)]
+    assert spec.mount_path == "/home/dana"
+    assert spec.pvc_name == world.home_volume.pvc_name
+    assert spec.env["HOME"] == "/home/dana"
+    assert spec.extra_mounts == ()
+
+    gateway.jobs.clear()
+    await make_task(client, world, name="mounted", storageIds=[share_id])
+
+    spec = gateway.jobs[job_name(gateway)]
+    assert spec.mount_path == "/home/dana"
+    assert len(spec.extra_mounts) == 1
+    assert spec.extra_mounts[0].mount_path == "/mnt/global_shared"
+    assert spec.extra_mounts[0].pvc_name is not None
+    assert spec.extra_mounts[0].read_only is False
+
+
 async def test_submitting_a_task_creates_a_job_with_the_users_shell(
     client: AsyncClient, world: World, gateway: FakeK8sGateway
 ) -> None:
@@ -831,17 +890,28 @@ async def test_a_finished_task_cannot_be_cancelled(
     assert response.json()["error"]["code"] == "task_already_finished"
 
 
-async def test_deleting_a_task_reclaims_its_scratch_volume(
+async def test_deleting_a_task_leaves_the_users_storage_alone(
     client: AsyncClient, world: World, gateway: FakeK8sGateway
 ) -> None:
+    """A task has no scratch volume of its own any more — and must not take the home.
+
+    This is the sharp edge of the change: the task mounts the owner's registered
+    home claim, so a delete that reclaimed "the task's volume" would destroy the
+    user's data. The PV is ``Retain``, but a deleted claim leaves it ``Released``
+    and unrecoverable.
+    """
     await act_as(client, "dana")
-    task = await make_task(client, world, storageGb=5)
-    assert gateway.pvcs, "the scratch volume should have been created"
+    task = await make_task(client, world)
+
+    # Nothing is created in the storage layer when a task starts: the home claim
+    # already exists, and the task asks for no shares.
+    assert gateway.pvcs == {}, "a task must not create a claim"
 
     response = await client.delete(f"/api/v1/tasks/{task['id']}")
 
     assert response.status_code == 204
-    assert gateway.pvcs == {}
+    # No claim was deleted, and in particular the home claim is untouched.
+    assert world.home_volume.pvc_name is not None
     assert gateway.jobs == {}
     assert (await client.get(f"/api/v1/tasks/{task['id']}")).json()["isActive"] is False
 

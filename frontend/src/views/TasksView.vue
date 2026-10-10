@@ -17,6 +17,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '@/api/client'
 import { getResourceGroup } from '@/api/resources'
+import { listAttachableStorages } from '@/api/storages'
 import {
   cancelTask,
   createTask,
@@ -40,6 +41,7 @@ import { useNotificationStore } from '@/stores/notifications'
 import type { WorkloadEvent } from '@/types/application'
 import type { ResourceGroupDetail, ResourceSpec, WorkspaceSummary } from '@/types/resource'
 import { formatCpu, formatDuration, formatMemory } from '@/types/resource'
+import { storageKindMeta, type StorageSummary } from '@/types/storage'
 import type { TaskDetail, TaskStatus, TaskSummary } from '@/types/task'
 import { SCRIPT_PRESETS, isTerminal } from '@/types/task'
 
@@ -194,7 +196,8 @@ interface SubmitForm {
   resourceSpecId: number | null
   image: string
   script: string
-  storageGb: number
+  /** Extra volumes to mount, beyond the home volume that is always mounted. */
+  storageIds: number[]
   maxRuntimeSeconds: number | null
 }
 
@@ -209,12 +212,57 @@ const form = reactive<SubmitForm>({
   resourceSpecId: null,
   image: '',
   script: SCRIPT_PRESETS[0].value,
-  storageGb: 0,
+  storageIds: [],
   maxRuntimeSeconds: null,
 })
 
 const grants = ref<{ resourceGroupId: number; displayName: string; isActive: boolean }[]>([])
 const selectedPool = ref<ResourceGroupDetail | null>(null)
+
+/**
+ * Volumes this task could mount, beyond the home volume it always gets.
+ *
+ * Personal homes are excluded: one is mounted automatically, and asking for it
+ * explicitly is refused by the API — offering it would be offering an action that
+ * always fails.
+ */
+const attachableStorages = ref<StorageSummary[]>([])
+const loadingStorages = ref(false)
+
+async function loadAttachable(): Promise<void> {
+  const workspaceId = form.workspaceId
+  if (workspaceId === null) {
+    attachableStorages.value = []
+    return
+  }
+  loadingStorages.value = true
+  try {
+    attachableStorages.value = await listAttachableStorages(workspaceId)
+  } catch {
+    // Optional. Failing to load the list must not stop a task being submitted
+    // without any extra mounts.
+    attachableStorages.value = []
+  } finally {
+    loadingStorages.value = false
+  }
+}
+
+// Reload on workspace change and drop a selection that no longer belongs to it: a
+// volume from another namespace cannot be mounted here at all.
+watch(
+  () => form.workspaceId,
+  () => {
+    form.storageIds = []
+    void loadAttachable()
+  },
+)
+
+function storageSubtitle(row: StorageSummary): string {
+  const parts = [row.defaultMountPath, `${row.capacityGb} GB`]
+  if (row.isReadOnly) parts.push('只读')
+  parts.push(storageKindMeta(row.kind).title)
+  return parts.join(' · ')
+}
 
 const availableSpecs = computed<ResourceSpec[]>(() =>
   (selectedPool.value?.specs ?? []).filter((spec) => spec.isActive),
@@ -257,7 +305,7 @@ function openSubmit(): void {
     resourceSpecId: null,
     image: '',
     script: SCRIPT_PRESETS[0].value,
-    storageGb: 0,
+    storageIds: [],
     maxRuntimeSeconds: null,
   })
   void loadGrants(form.workspaceId)
@@ -311,7 +359,7 @@ async function submit(): Promise<void> {
       resourceSpecId: form.resourceSpecId!,
       image: form.image.trim(),
       script: form.script,
-      storageGb: form.storageGb,
+      storageIds: form.storageIds,
       maxRuntimeSeconds: form.maxRuntimeSeconds,
     })
     notifications.success(`任务 ${task.name} 已提交`)
@@ -634,9 +682,6 @@ function eventTone(event: WorkloadEvent): string {
 
         <template #item.shape="{ item }">
           <span class="text-body-2">{{ shapeOf(item) }}</span>
-          <div v-if="item.storageGb > 0" class="text-caption text-medium-emphasis">
-            /data {{ item.storageGb }} GB
-          </div>
         </template>
 
         <template #item.status="{ item }">
@@ -806,20 +851,47 @@ function eventTone(event: WorkloadEvent): string {
               />
             </v-col>
 
-            <v-col cols="12" sm="8">
+            <v-col cols="12">
               <ImagePicker v-model="form.image" label="容器镜像 *" />
             </v-col>
-            <v-col cols="12" sm="4">
-              <v-text-field
-                v-model.number="form.storageGb"
-                type="number"
-                min="0"
-                label="临时存储（GB）"
-                hint="挂载到 /data，任务结束后保留"
-                persistent-hint
-                variant="outlined"
+
+            <v-col cols="12">
+              <v-select
+                v-model="form.storageIds"
+                :items="attachableStorages"
+                item-title="displayName"
+                item-value="id"
+                label="挂载存储（可选）"
                 density="comfortable"
-              />
+                variant="outlined"
+                hide-details="auto"
+                multiple
+                chips
+                closable-chips
+                :loading="loadingStorages"
+                :disabled="form.workspaceId === null"
+                :no-data-text="
+                  form.workspaceId === null ? '请先选择工作空间' : '这个工作空间里还没有可挂载的存储'
+                "
+                hint="个人主目录会自动挂载到 /home/{用户名}，不需要在这里选择；不选就不挂任何共享卷。"
+                persistent-hint
+              >
+                <template #item="{ props: itemProps, item }">
+                  <v-list-item v-bind="itemProps" :subtitle="storageSubtitle(item)">
+                    <template #prepend>
+                      <v-icon :icon="storageKindMeta(item.kind).icon" />
+                    </template>
+                    <template #append>
+                      <v-icon
+                        v-if="item.isReadOnly"
+                        icon="mdi-lock-outline"
+                        size="small"
+                        title="只读挂载"
+                      />
+                    </template>
+                  </v-list-item>
+                </template>
+              </v-select>
             </v-col>
 
             <v-col cols="12">
@@ -928,8 +1000,10 @@ function eventTone(event: WorkloadEvent): string {
                   <dd>{{ detail.image }}</dd>
                   <dt>规格</dt>
                   <dd>{{ shapeOf(detail) }}</dd>
-                  <dt>存储</dt>
-                  <dd>{{ detail.storageGb > 0 ? `/data · ${detail.storageGb} GB` : '未挂载' }}</dd>
+                  <dt>主目录</dt>
+                  <dd class="wl-mono">
+                    {{ detail.ownerUsername ? `/home/${detail.ownerUsername}` : '—' }}
+                  </dd>
                   <dt>耗时</dt>
                   <dd>{{ formatDuration(detail.durationSeconds ?? null) ?? '—' }}</dd>
                   <dt>退出码</dt>

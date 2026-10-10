@@ -46,7 +46,6 @@ export interface TaskSummary {
   memoryMb: number
   gpuType: string
   gpuCount: number
-  storageGb: number
   status: TaskStatus
   statusMessage?: string | null
   priority: number
@@ -83,7 +82,15 @@ export interface TaskCreatePayload {
   script: string
   workingDir?: string | null
   env?: Record<string, string>
-  storageGb?: number
+  /**
+   * Extra volumes to mount, beyond the owner's home volume.
+   *
+   * The home volume is not chosen here: it is always mounted at `/home/{username}`,
+   * because a task without it would have no home at all. Nothing listed here is
+   * mounted by default — a task that silently saw a colleague's shared directory
+   * would be a surprise rather than a convenience.
+   */
+  storageIds?: number[]
   priority?: number
   maxRuntimeSeconds?: number | null
   ttlSecondsAfterFinished?: number

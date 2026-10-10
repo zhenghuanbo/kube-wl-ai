@@ -176,7 +176,6 @@ async def create_application(
         default_memory_mb=payload.default_memory_mb,
         default_gpu_type=payload.default_gpu_type,
         default_gpu_count=payload.default_gpu_count,
-        default_storage_gb=payload.default_storage_gb,
         env=dict(payload.env),
         ports=list(payload.ports),
         visibility=payload.visibility,
@@ -322,7 +321,6 @@ async def launch_application(
         resource_spec_id=spec_id,
         image=app.image,
         ide_type=app.ide_type,
-        storage_gb=payload.storage_gb or app.default_storage_gb or None,
         ssh_enabled=payload.ssh_enabled,
         max_runtime_seconds=payload.max_runtime_seconds,
     )

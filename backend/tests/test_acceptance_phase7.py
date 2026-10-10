@@ -181,7 +181,6 @@ async def add_instance(
         memory_mb=1024,
         gpu_type=gpu_type,
         gpu_count=gpu_count,
-        storage_gb=10,
         image="registry.local/pytorch:2.4",
         ide_type=IdeType.NONE,
         status=status,

@@ -210,6 +210,8 @@ def spawn_pod(
     phase: str = "Running",
     ready: bool = True,
     node_name: str = "gpu-01",
+    reason: str | None = None,
+    message: str | None = None,
 ) -> PodInfo:
     """Register a pod the fake will find for ``deployment``.
 
@@ -221,6 +223,8 @@ def spawn_pod(
         phase=phase,
         ready=ready,
         node_name=node_name,
+        reason=reason,
+        message=message,
         restart_count=0,
     )
     gateway.pods[f"{namespace}/{pod.name}"] = pod
@@ -678,7 +682,13 @@ async def test_reconcile_promotes_a_ready_pod_to_running(
 async def test_reconcile_reports_a_crash_looping_container(
     client: AsyncClient, world: World, gateway: FakeK8sGateway
 ) -> None:
-    """The failure reason must reach the user, or a bad image is undiagnosable."""
+    """The failure reason must reach the user, or a bad image is undiagnosable.
+
+    The pod's phase stays **Running** the whole time a container crash-loops —
+    only the container is failing — so a `Pending` pod is not this case at all.
+    This test previously spawned exactly that, which is why it passed while a
+    crash-looping instance was being reported as 运行中.
+    """
     await act_as(client, "dana")
     body = await make_instance(client, world)
     deployment = next(
@@ -688,14 +698,40 @@ async def test_reconcile_reports_a_crash_looping_container(
         gateway,
         namespace="wl-lab-a-alpha",
         deployment=deployment,
-        phase="Pending",
+        phase="Running",
         ready=False,
+        reason="CrashLoopBackOff",
+        message="CrashLoopBackOff: back-off 5m0s restarting failed container=main",
     )
 
     response = await client.post(f"/api/v1/instances/{body['id']}/reconcile")
 
     assert response.status_code == 200
-    assert response.json()["status"] == "creating"
+    assert response.json()["status"] == "error", response.text
+    assert "CrashLoopBackOff" in response.json()["statusMessage"]
+
+
+async def test_a_running_but_unready_pod_is_still_starting(
+    client: AsyncClient, world: World, gateway: FakeK8sGateway
+) -> None:
+    """Running-but-not-Ready with no failing container is a probe, not a failure.
+
+    The mirror of the case above: deciding "error" from `ready` alone would make
+    every instance whose readiness probe is slow look broken.
+    """
+    await act_as(client, "dana")
+    body = await make_instance(client, world)
+    deployment = next(
+        key.split("/", 1)[1] for key in gateway.deployments if key.startswith("wl-lab-a-alpha/")
+    )
+    spawn_pod(
+        gateway, namespace="wl-lab-a-alpha", deployment=deployment, phase="Running", ready=False
+    )
+
+    response = await client.post(f"/api/v1/instances/{body['id']}/reconcile")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "creating", response.text
 
 
 async def test_a_stopped_instance_is_not_reconciled_back_to_running(

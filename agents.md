@@ -2061,10 +2061,96 @@ provisioning 失败无法区分，单读一次必然偶发误报。harness 里�
 `v-if` 改成 `false` 复跑，冒烟立即以 `rendered, but without: "还没有用户具备存储条件"` 失败，
 恢复后 19/19 通过 —— 这条断言确实在测东西。
 
+### ✅ 后续增量 — 实例状态不再把崩溃的容器说成「运行中」（已完成）
+
+现场反馈：「创建开发实例之后，页面一直显示创建中。」`kubectl describe` 显示容器
+`CrashLoopBackOff`、`exec: "jupyter": executable file not found in $PATH`（exit 127）。
+
+查下来是**三件事**叠在一起，只有第 2、3 件属于平台要修的问题：
+
+**1. 镜像里没有 `jupyter`（不是代码问题，是前置条件缺失）。** `ide_command()` 把
+`jupyter lab …` 写死在代码里，等于假设**每个镜像都自带 IDE 二进制**。用户选的
+`library/python:3.12` 是官方纯 Python 镜像，没有 Jupyter。而当时 Harbor 的 `library`
+项目下**只有 `library/python`** —— 也就是说**选任何镜像都起不来 Jupyter**。这解释了为什么
+它一直推迟的「往 `library/` 推官方基础镜像」其实是前置条件，不是可选项。同一个假设对
+`vscode`（要 `code-server`）和 `webssh`（要 `ttyd`）一样成立。
+
+**2. 页面一直「创建中」，因为对账器根本没在跑。** 实例状态只由 `reconcile_instance()` 推进，
+触发它的只有 Celery beat 的 `reconcile-workloads`（30 秒）、CLI 和手动
+`POST /instances/{id}/reconcile` —— **页面读取不触发对账**（这是 `create_instance` 的设计：
+先报 `CREATING`，等对账提升）。决定性证据是实例记录里 `podName` 一直是 `None`，而 pod 已经
+存在 12 分钟。这一条**本次没有改**（见「有意推迟」）。
+
+**3. 对账一跑，它会把崩溃的容器报成「运行中」——这次修的就是它。**
+
+原因是 **pod 的 phase 在整个 crash-loop 期间一直是 `Running`**：phase 描述的是 pod，pod 本身
+没问题，只有容器在崩。而旧代码是：
+
+```python
+if pod.phase.lower() == "running" and pod.ready:   # 崩的时候 ready 是 False
+    ...RUNNING
+else:
+    instance.status = _PHASE_TO_STATUS.get(pod.phase.lower(), CREATING)  # "running" → RUNNING
+```
+
+`ready` 在第一支里用了，到 else 里**被丢掉了**，于是 `running` 又映射回 `RUNNING`。结果比
+「卡在创建中」更糟：页面显示**运行中**，消息里却写着 CrashLoopBackOff，IDE 链接必然 502。
+
+改法是把这段判断提成纯函数 `status_from_pod()`，并让 **`ready` 优先于 phase**：
+
+| 观测 | 状态 |
+| --- | --- |
+| `Running` + Ready | `running` |
+| 容器 reason 属于 `FATAL_POD_REASONS`（CrashLoopBackOff / ImagePullBackOff / ContainerCannotRun …） | `error`，保留 message |
+| `Running` 但不 Ready，且没有失败容器（就绪探针还没过） | `creating` |
+| 其它 phase | 仍按 `_PHASE_TO_STATUS` |
+
+两个刻意的选择。**`FATAL_POD_REASONS` 用「失败清单」而不是「可接受清单」**：没预料到的 reason
+应该让实例看起来仍在启动（可恢复，且对慢镜像拉取是真的），而不是替平台宣布一个它证明不了的
+结论。**`Running` 但不 Ready 且无失败容器一律算 `creating`** —— 否则就绪探针慢一点的实例都会
+变成「异常」。
+
+为此 `PodInfo` 新增了 `reason` 字段（未格式化的容器 reason）。不能拿现成的 `message` 去比对：
+它是给人看的散文（`CrashLoopBackOff: back-off 5m0s restarting failed container=main pod=…`），
+措辞一变匹配就失效。`_pod_info()` 顺带补上了**两次重启之间**的窗口 —— 那时容器不是 `waiting`
+而是 `terminated`，带着杀死它的退出码；不看这一支，实例会在每个循环里闪回「还在启动」。
+
+**最值得记的一条：那个测出这个 bug 的测试是假的。** `tests/test_acceptance_phase3.py` 里早就有
+`test_reconcile_reports_a_crash_looping_container`，名字完全对得上，但它 spawn 的 pod 是
+`phase="Pending"` —— 而崩溃时 phase 是 `Running`。它测的是 `Pending → creating`，**从来没复现过
+这个 bug 的形状**，所以它一路绿着。已改成真正的形状（`Running` + `ready=False` +
+`reason="CrashLoopBackOff"`），并新增 `tests/test_instance_status.py` 覆盖整个映射矩阵，
+含「未预料的 reason 不得被判成失败」和「每个 `FATAL_POD_REASONS` 成员都真的可达」。
+把新判定关掉复跑：**6 项失败**（5 项单元 + 1 项验收），恢复后全绿 —— 这些测试确实在测东西。
+
+**顺带修了一处名实不符的文案。** 实例菜单的「重新下发」和提示「已重新下发」都是错的：
+`POST /instances/{id}/reconcile` **只读回 pod 观测状态，不对集群下发任何东西**，所以按多少次
+都修不好一个崩溃的容器。已改为「刷新状态」。**工作空间那个「重新下发」是对的，没动** ——
+`apply_cluster_state()` 真的会重新下发命名空间/配额/LimitRange/NetworkPolicy。
+
+验证
+
+- **在真实集群的真 pod 上**跑新映射（只读）：
+  `phase='Running' ready=False reason='CrashLoopBackOff'` → `status=error`，
+  message 携带完整原因。旧代码在同一输入上给的是 `running`。
+- `pytest -q` **704 passed**（原 690 + 14 项新增）；`ruff check .`、`ruff format --check .`
+  （160 文件）、`mypy app`（131 文件）全部无问题。
+- 前端 `vue-tsc --noEmit` exit 0、`vite build` 2.45s、视图冒烟 19/19。
+- 线上后端带 `--reload`，已加载新代码；该实例现在正确显示**异常**。
+
 ### 有意推迟（非遗漏）
 
 - **OIDC** 仅预留扩展点：`OidcProvider.exchange_code()` 明确抛错说明。大学的统一身份是
   FreeIPA，接入 OIDC 需要校方先提供客户端注册；在拿到之前不写不可验证的代码。
+- **实例状态依赖 Celery beat 是否在跑，页面读取不会就地推进。** 这是上一条的必然结果：
+  `reconcile-workloads` 是 30 秒一次的唯一自动途径，所以 beat 没起来时，创建完成的实例会
+  **一直停在「创建中」**（`podName` 也是 `None`，是判断这个问题最快的证据）。改法有两条——让
+  列表/详情读取时就地推进一次，或至少在对账器停摆时明确提示——都还没做，因为前者会把一次
+  K8s 调用放进读路径，是需要单独权衡的改动。
+- **`library/` 里没有带 IDE 的镜像。** `ide_command()` 假设镜像自带 `jupyter`/`code-server`/
+  `ttyd`，但 Harbor 的 `library` 项目下只有 `library/python`。在推入一个真正装了 Jupyter 的
+  基础镜像之前，**任何 Jupyter 实例都会 `CrashLoopBackOff`**，且这与 CPU/GPU 无关。平台侧
+  可以考虑在创建时就校验镜像里有没有对应二进制（或至少给出提示），但基础镜像是前置条件。
 - `app/workers/celery_app.py` 的 `beat_schedule` 已接入 `reconcile-workloads`（30 秒）、
   `rollup-usage`（20 分钟）与 `sync-images`（默认每天一次，`IMAGE_SYNC_INTERVAL_SECONDS`
   可调）。最后一个是镜像从「推送到 Harbor」变成「选择器里可见」的唯一自动途径。

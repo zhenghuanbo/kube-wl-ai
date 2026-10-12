@@ -396,7 +396,10 @@ function toggleRunState(instance: InstanceSummary): void {
 }
 
 function reconcile(instance: InstanceSummary): void {
-  void run(instance, () => reconcileInstance(instance.id), `实例 ${instance.name} 已重新下发`)
+  // "已重新下发" was wrong: `POST /instances/{id}/reconcile` reads the pod's
+  // observed state back into the row. It applies nothing to the cluster, so it
+  // cannot fix a crash-looping container however many times it is pressed.
+  void run(instance, () => reconcileInstance(instance.id), `实例 ${instance.name} 状态已刷新`)
 }
 
 /**
@@ -760,7 +763,7 @@ const workspaceChoices = computed(() =>
                 />
                 <v-list-item
                   v-if="can('instance:update')"
-                  title="重新下发"
+                  title="刷新状态"
                   prepend-icon="mdi-refresh"
                   @click="reconcile(item)"
                 />

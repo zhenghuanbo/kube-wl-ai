@@ -32,7 +32,7 @@ from app.core.config import Settings
 from app.core.errors import BadRequestError, ConflictError, NotFoundError, QuotaExceededError
 from app.core.logging import get_logger
 from app.k8s import InstanceObjects, K8sError, K8sGateway, run_gateway
-from app.k8s.gateway import VolumeMountSpec, WorkloadRefs
+from app.k8s.gateway import PodInfo, VolumeMountSpec, WorkloadRefs
 from app.k8s.naming import INSTANCE_LABEL, WORKSPACE_LABEL, is_managed_workload
 from app.k8s.workloads import SSH_PORT, build_instance_objects, ingress_path
 from app.models.enums import (
@@ -78,6 +78,10 @@ LIVE_STATUSES = LIVE_INSTANCE_STATUSES
 RUNNING_STATUSES: tuple[InstanceStatus, ...] = (InstanceStatus.RUNNING,)
 
 #: Kubernetes phase (lower-cased) → platform status.
+#:
+#: Only consulted for a pod that is **not** Ready. A Ready pod is `running`
+#: regardless of its phase, and a Running-but-not-Ready pod is handled before this
+#: table is reached — see :func:`status_from_pod`.
 _PHASE_TO_STATUS: dict[str, InstanceStatus] = {
     "running": InstanceStatus.RUNNING,
     "pending": InstanceStatus.CREATING,
@@ -85,6 +89,55 @@ _PHASE_TO_STATUS: dict[str, InstanceStatus] = {
     "succeeded": InstanceStatus.STOPPED,
     "unknown": InstanceStatus.ERROR,
 }
+
+#: Container reasons that mean "waiting longer will not help".
+#:
+#: Deliberately a *list of failures* rather than a list of acceptable states: a
+#: reason nobody anticipated should leave the instance looking like it is still
+#: starting (recoverable, and true for a slow pull) rather than declare a failure
+#: the platform cannot substantiate.
+FATAL_POD_REASONS: frozenset[str] = frozenset(
+    {
+        "ContainerCannotRun",
+        "CrashLoopBackOff",
+        "CreateContainerConfigError",
+        "CreateContainerError",
+        "ErrImagePull",
+        "ImageInspectError",
+        "ImagePullBackOff",
+        "InvalidImageName",
+        "RegistryUnavailable",
+        "RunContainerError",
+    }
+)
+
+
+def status_from_pod(pod: PodInfo) -> tuple[InstanceStatus, str | None]:
+    """Translate an observed pod into ``(status, message)``.
+
+    **A pod can be ``Running`` while its container never starts.** The phase
+    describes the pod, and a pod whose container is in ``CrashLoopBackOff`` is
+    still ``Running`` — only the container is not. Mapping the phase alone
+    therefore reported a crash-looping instance as ``running``, which is worse
+    than reporting nothing: the page showed 运行中 and offered an IDE link that
+    could not possibly work.
+
+    So readiness is decided first, and the container's own reason decides the
+    rest. Anything Running-but-not-Ready *without* a known failure is still
+    starting — a readiness probe that has not passed yet is not an error.
+    """
+    phase = pod.phase.lower()
+    if phase == "running" and pod.ready:
+        return InstanceStatus.RUNNING, None
+    if pod.reason in FATAL_POD_REASONS:
+        return InstanceStatus.ERROR, pod.message or f"容器异常：{pod.reason}"
+    if phase == "running":
+        # Running, not Ready, and no failing container to point at.
+        return InstanceStatus.CREATING, pod.message or "容器已启动，尚未就绪"
+    return (
+        _PHASE_TO_STATUS.get(phase, InstanceStatus.CREATING),
+        pod.message or f"容器状态：{pod.phase}",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -661,12 +714,7 @@ async def reconcile_instance(
     instance.node_name = pod.node_name
     instance.last_seen_at = datetime.now(UTC)
 
-    if pod.phase.lower() == "running" and pod.ready:
-        instance.status = InstanceStatus.RUNNING
-        instance.status_message = None
-    else:
-        instance.status = _PHASE_TO_STATUS.get(pod.phase.lower(), InstanceStatus.CREATING)
-        instance.status_message = pod.message or f"容器状态：{pod.phase}"
+    instance.status, instance.status_message = status_from_pod(pod)
 
     if previous != instance.status:
         logger.info(
@@ -794,6 +842,7 @@ __all__ = [
     "ssh_command",
     "ssh_fingerprint",
     "start_instance",
+    "status_from_pod",
     "stop_instance",
     "to_summary",
     "update_instance",

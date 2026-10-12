@@ -240,13 +240,27 @@ def _pod_info(pod: Any) -> PodInfo:
     ready = bool(statuses) and all(container.ready for container in statuses)
     restarts = sum(container.restart_count or 0 for container in statuses)
 
+    reason: str | None = None
     message: str | None = None
     for container in statuses:
-        waiting = container.state.waiting if container.state else None
+        state = container.state
+        waiting = state.waiting if state else None
         if waiting and waiting.reason:
             # `ImagePullBackOff` is the single most common reason an instance
             # never starts, and it is invisible without this.
+            reason = waiting.reason
             message = f"{waiting.reason}: {waiting.message}" if waiting.message else waiting.reason
+            break
+        # Between restarts a crashing container is not `waiting` — it is
+        # `terminated`, carrying the exit code that killed it. Without this the
+        # container looks merely "not ready yet" during that window, because the
+        # pod's own phase stays `Running` the whole time it is crash-looping.
+        terminated = state.terminated if state else None
+        if terminated is not None and (terminated.exit_code or 0) != 0:
+            reason = terminated.reason or "Error"
+            message = f"{reason}: exit code {terminated.exit_code}"
+            if terminated.message:
+                message = f"{message} ({terminated.message})"
             break
     if message is None:
         for condition in pod.status.conditions or []:
@@ -261,6 +275,7 @@ def _pod_info(pod: Any) -> PodInfo:
         node_name=pod.spec.node_name if pod.spec else None,
         restart_count=restarts,
         message=message,
+        reason=reason,
     )
 
 

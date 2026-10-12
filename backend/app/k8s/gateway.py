@@ -391,6 +391,13 @@ class PodInfo:
     #: The most useful human-readable reason, taken from the container status
     #: (e.g. ``ImagePullBackOff``) or the pod condition.
     message: str | None = None
+    #: The container's own reason, unformatted — e.g. ``CrashLoopBackOff``.
+    #:
+    #: Separate from :attr:`message` because callers need to *compare* it, and
+    #: `message` is a prose string built for a human ("`CrashLoopBackOff: back-off
+    #: 5m0s restarting failed container=main pod=…`"). Matching on that would break
+    #: the first time its wording changed.
+    reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -779,6 +779,37 @@ const DEFAULT_RETURN = page([])
 const NEVER_RENDER = ['undefined', 'NaN', '[object Object]']
 
 /**
+ * Interactions to run after a view has loaded, before it is asserted on.
+ *
+ * Some of the most damaging bugs live behind a click: a dialog whose select
+ * offers a choice the server will always reject, a form that submits into a
+ * guaranteed failure. Those branches are unreachable from a first-paint snapshot,
+ * so a view can pass every existing check while the dialog it opens is useless.
+ *
+ * Each hook receives the mounted container and `{ flush, auth }`, and returns extra
+ * HTML to append to what gets asserted on.
+ */
+const INTERACTIONS = {
+  StorageView: async (container, { flush, auth }) => {
+    // StorageView is mounted as a *reader* on purpose, so the page's read-only form
+    // is exercised. Its create dialog only exists for a manager, so the code is
+    // granted here rather than by weakening that default.
+    auth.permissions = new Set([...auth.permissions, 'storage:manage'])
+    await flush()
+
+    const button = [...container.querySelectorAll('button')].find((node) =>
+      node.textContent?.includes('新建存储'),
+    )
+    if (!button) throw new Error('no 「新建存储」 button to click after granting storage:manage')
+    button.click()
+    await flush()
+
+    // The dialog is teleported to the body, not nested inside the view.
+    return container.ownerDocument.body.innerHTML
+  },
+}
+
+/**
  * Text that must appear in the mounted DOM.
  *
  * "It did not throw" is a weak claim: a view whose data never arrives renders a
@@ -787,7 +818,10 @@ const NEVER_RENDER = ['undefined', 'NaN', '[object Object]']
  */
 const EXPECTS = {
   // `/mnt/data` and the attached-instance list live in the detail drawer, which
-  // is closed on first paint; the table is what this asserts.
+  // is closed on first paint; the table is what this asserts. The last entry is
+  // from the create dialog that `INTERACTIONS.StorageView` opens: with no group
+  // owning a workspace — the live state that produced a silent `group_has_no_workspace`
+  // — the dialog has to explain the ordering instead of submitting into a refusal.
   StorageView: [
     '我的数据盘',
     'my-data',
@@ -797,6 +831,7 @@ const EXPECTS = {
     '已就绪',
     '用户存储卷',
     '张三',
+    '还没有用户具备存储条件',
   ],
   // The table carries the reference and the kind chip; the framework chips it
   // used to show are gone with the columns behind them.
@@ -1212,6 +1247,30 @@ try {
   }
 
   /**
+   * Give the window a `visualViewport`.
+   *
+   * happy-dom does not implement it, and Vuetify's overlay teardown reads it while
+   * a dialog is being unmounted — so a view whose dialog was *opened* by an
+   * interaction fails during `app.unmount()` with `visualViewport is not defined`,
+   * after every assertion has already passed. That reads like a view bug and is
+   * not one. The stub only has to be an event target with viewport-shaped numbers;
+   * nothing here is measured.
+   */
+  if (!window.visualViewport) {
+    const viewport = new window.EventTarget()
+    Object.assign(viewport, {
+      width: 1280,
+      height: 800,
+      offsetLeft: 0,
+      offsetTop: 0,
+      pageLeft: 0,
+      pageTop: 0,
+      scale: 1,
+    })
+    window.visualViewport = viewport
+  }
+
+  /**
    * Populate the global scope from the DOM window.
    *
    * The constructors are enumerated rather than listed by hand, because Vuetify
@@ -1235,6 +1294,7 @@ try {
     'matchMedia',
     'requestAnimationFrame',
     'cancelAnimationFrame',
+    'visualViewport',
   ]
 
   for (const name of Object.getOwnPropertyNames(window)) {
@@ -1319,12 +1379,32 @@ try {
 
       // Let the stubbed promises resolve and Vue flush. Several turns, because a
       // view may chain a second `load()` off a lookup it just received.
-      for (let turn = 0; turn < 30; turn += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 0))
+      const flush = async () => {
+        for (let turn = 0; turn < 30; turn += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0))
+        }
       }
+      await flush()
 
       html = container.innerHTML
       if (!html || html.length < 50) throw new Error(`rendered only ${html.length} bytes`)
+
+      // What the page showed before anything was clicked. Kept separately because
+      // `EXPECTS_ABSENT` asserts on the *reader's* view of the page — a view that
+      // only reveals mutations to an administrator is the point of mounting it
+      // without `storage:manage` — and an interaction may deliberately grant a code
+      // and open the very controls that check forbids.
+      const firstPaint = html
+
+      // Branches behind a click are asserted on too, where a view declares one.
+      const interact = INTERACTIONS[label]
+      if (interact) {
+        const after = await interact(container, { flush, auth })
+        if (typeof after !== 'string' || after.length < 50) {
+          throw new Error(`the interaction rendered only ${String(after).length} bytes`)
+        }
+        html += after
+      }
 
       // Attribute values and inline styles are not user-visible, so the leak
       // check runs against the text the page would actually show.
@@ -1349,7 +1429,9 @@ try {
         throw new Error(`rendered, but without: ${absent.map((a) => JSON.stringify(a)).join(', ')}`)
       }
 
-      const unexpected = (EXPECTS_ABSENT[label] ?? []).filter((needle) => html.includes(needle))
+      const unexpected = (EXPECTS_ABSENT[label] ?? []).filter((needle) =>
+        firstPaint.includes(needle),
+      )
       if (unexpected.length) {
         throw new Error(
           `rendered something that should not be there: ${unexpected

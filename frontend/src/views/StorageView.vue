@@ -201,6 +201,79 @@ async function loadBindings(): Promise<void> {
 }
 
 /**
+ * How many workspaces each group has.
+ *
+ * A volume's claim lives in a namespace, so its directory must resolve to *the*
+ * workspace that owns it. Zero workspaces means there is nowhere to put the claim;
+ * two or more means the owner is ambiguous. The API refuses both
+ * (`group_has_no_workspace` / `group_has_multiple_workspaces`), and both are
+ * decidable here from the workspace list this page already loads — so the form
+ * never offers a group whose submission is guaranteed to fail.
+ */
+const groupWorkspaceCount = computed(() => {
+  const counts = new Map<number, number>()
+  for (const row of workspaces.value) {
+    counts.set(row.groupId, (counts.get(row.groupId) ?? 0) + 1)
+  }
+  return counts
+})
+
+/** Every group, marked with whether a volume can be bound to it and why not. */
+const groupOptions = computed(() =>
+  groups.value.map((group) => {
+    const count = groupWorkspaceCount.value.get(group.id) ?? 0
+    if (count === 1) return { ...group, storageDisabled: false, storageReason: '' }
+    return {
+      ...group,
+      storageDisabled: true,
+      storageReason:
+        count === 0
+          ? '还没有工作空间 —— 存储卷的声明无处存放'
+          : `有 ${count} 个工作空间 —— 无法确定存储卷归属`,
+    }
+  }),
+)
+
+/** Groups a volume may actually be bound to: exactly one workspace, no more. */
+const eligibleGroups = computed(() => groupOptions.value.filter((row) => !row.storageDisabled))
+
+/**
+ * The same test applied to a *user*.
+ *
+ * A user volume takes its group from the owner (`owner.primary_group`), never from
+ * the request — the directory is `{root}/{group}/{username}`, so letting the caller
+ * name a different group would put one group's user inside another group's
+ * directory. That means picking an owner is also picking a group, and an owner
+ * whose group cannot hold a claim cannot have a volume either.
+ */
+const userOptions = computed(() =>
+  users.value.map((user) => {
+    if (user.primaryGroupId === null) {
+      return {
+        ...user,
+        storageDisabled: true,
+        storageReason: '不属于任何用户组 —— 无法确定存储目录',
+      }
+    }
+    const label = user.primaryGroupName ?? `#${user.primaryGroupId}`
+    const count = groupWorkspaceCount.value.get(user.primaryGroupId) ?? 0
+    if (count === 1) return { ...user, storageDisabled: false, storageReason: '' }
+    return {
+      ...user,
+      storageDisabled: true,
+      storageReason:
+        count === 0
+          ? `组「${label}」还没有工作空间 —— 存储卷的声明无处存放`
+          : `组「${label}」有 ${count} 个工作空间 —— 无法确定存储卷归属`,
+    }
+  }),
+)
+
+/** Whether *any* group could own a volume: false means creation cannot succeed. */
+const anyGroupEligible = computed(() => eligibleGroups.value.length > 0)
+const anyUserEligible = computed(() => userOptions.value.some((row) => !row.storageDisabled))
+
+/**
  * The name is fixed after creation.
  *
  * It is part of the PV and PVC names in the cluster, so changing it here would
@@ -216,8 +289,10 @@ function openCreate(): void {
     displayName: '',
     description: '',
     kind: 'user_volume' as StorageKind,
-    ownerUserId: null,
-    groupId: groups.value[0]?.id ?? null,
+    // Both defaults skip ineligible rows: a user volume is bound to the owner's
+    // group, so an owner whose group cannot hold a claim would fail on submit.
+    ownerUserId: userOptions.value.find((row) => !row.storageDisabled)?.id ?? null,
+    groupId: eligibleGroups.value[0]?.id ?? null,
     dirName: '',
     capacityGb: 20,
     source: '',
@@ -253,9 +328,20 @@ const formValid = computed(() => {
   if (!nameEditable.value) return true
   if (!/^[a-z0-9][a-z0-9-]*$/.test(form.name)) return false
   // The directory is derived from these, so a missing one is not a preference the
-  // server could default — it is a volume with no path to point at.
-  if (selectedKind.value.binding === 'user' && form.ownerUserId === null) return false
-  if (selectedKind.value.binding === 'group' && form.groupId === null) return false
+  // server could default — it is a volume with no path to point at. Eligibility is
+  // checked here as well as in the pickers: the server refuses an unresolvable
+  // group, and a button that is enabled for a request that cannot succeed is a
+  // worse answer than a disabled one.
+  if (selectedKind.value.binding === 'user') {
+    if (form.ownerUserId === null) return false
+    if (!userOptions.value.some((row) => row.id === form.ownerUserId && !row.storageDisabled)) {
+      return false
+    }
+  }
+  if (selectedKind.value.binding === 'group') {
+    if (form.groupId === null) return false
+    if (!eligibleGroups.value.some((row) => row.id === form.groupId)) return false
+  }
   return true
 })
 
@@ -292,8 +378,14 @@ async function save(): Promise<void> {
     dialogOpen.value = false
     await Promise.all([load(), loadUsage()])
   } catch (error) {
-    if (!(error instanceof ApiError)) throw error
-    notifications.error(error.message)
+    // `throw` on a non-ApiError would be silent *here*: the dialog stays open, the
+    // button re-enables, and the user sees nothing happen. A failure the user
+    // cannot see is worse than a vague message, so anything unexpected is still
+    // announced.
+    notifications.error(
+      error instanceof ApiError ? error.message : '创建存储失败，请稍后重试或查看服务端日志',
+    )
+    if (!(error instanceof ApiError)) console.error('createStorage failed', error)
   } finally {
     saving.value = false
   }
@@ -833,7 +925,7 @@ function onRowClick(_event: unknown, row: unknown): void {
             <v-col v-if="selectedKind.binding === 'user' && !isEditing" cols="12" sm="6">
               <v-select
                 v-model="form.ownerUserId"
-                :items="users"
+                :items="userOptions"
                 item-title="displayName"
                 item-value="id"
                 label="用户 *"
@@ -845,21 +937,35 @@ function onRowClick(_event: unknown, row: unknown): void {
                 <template #item="{ props: itemProps, item }">
                   <v-list-item
                     v-bind="itemProps"
-                    :subtitle="item.username"
+                    :disabled="item.storageDisabled"
+                    :subtitle="item.storageDisabled ? item.storageReason : item.username"
                     :title="item.displayName || item.username"
                   />
+                </template>
+                <template #selection="{ item }">
+                  {{ item.displayName || item.username }}
                 </template>
               </v-select>
               <div class="text-caption text-medium-emphasis mt-1">
                 目录取自该用户所在组：
                 <span class="wl-mono">/storage/kube-wl/{组}/{用户名}</span>
               </div>
+              <v-alert
+                v-if="!anyUserEligible"
+                type="warning"
+                variant="tonal"
+                density="compact"
+                class="mt-2"
+              >
+                还没有用户具备存储条件：用户存储卷的声明要放进该用户所在组的<b>工作空间</b>里，
+                而现在没有任何用户组恰好拥有一个工作空间。请先到「工作空间」页面为该组创建一个。
+              </v-alert>
             </v-col>
 
             <v-col v-if="selectedKind.binding === 'group' && !isEditing" cols="12" sm="6">
               <v-select
                 v-model="form.groupId"
-                :items="groups"
+                :items="groupOptions"
                 item-title="displayName"
                 item-value="id"
                 label="用户组 *"
@@ -867,7 +973,29 @@ function onRowClick(_event: unknown, row: unknown): void {
                 variant="outlined"
                 hide-details="auto"
                 :rules="[(v: number | null) => v !== null || '请选择用户组']"
-              />
+              >
+                <template #item="{ props: itemProps, item }">
+                  <v-list-item
+                    v-bind="itemProps"
+                    :disabled="item.storageDisabled"
+                    :subtitle="item.storageDisabled ? item.storageReason : undefined"
+                    :title="item.displayName"
+                  />
+                </template>
+                <template #selection="{ item }">
+                  {{ item.displayName }}
+                </template>
+              </v-select>
+              <v-alert
+                v-if="!anyGroupEligible"
+                type="warning"
+                variant="tonal"
+                density="compact"
+                class="mt-2"
+              >
+                还没有可用的用户组：存储卷的声明要放进该组的<b>工作空间</b>里，
+                而现在没有任何用户组恰好拥有一个工作空间。请先到「工作空间」页面为该组创建一个。
+              </v-alert>
             </v-col>
 
             <v-col v-if="selectedKind.hasDirName && !isEditing" cols="12">

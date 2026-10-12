@@ -261,6 +261,13 @@ group_id, owner_user_id, created_by, is_active)`
 | 组本级卷（`dir_name` 为空） | `{root}/{组}` | 同上；整个组目录，**只有组管理员能挂载** |
 | 全局共享卷 | `{root}/_global/{name}` | 两者都不绑，`workspace_id` 为 NULL |
 
+**顺序要求：组 → 工作空间 → 存储卷。** 卷的 claim 必须落在某个命名空间的 PVC 里，而命名空间来自
+工作空间，所以 `_workspace_for_group()` 要求该组**恰好有一个**工作空间：零个是
+`group_has_no_workspace`，两个及以上是 `group_has_multiple_workspaces`。全局共享卷不绑组，因此
+**没有**这条要求。用户卷看的是**属主**的组（`owner.primary_group`），不是请求里传的组 —— 目录是
+`{root}/{组}/{用户名}`，让调用方自己指定组会把一个组的用户放进另一个组的目录。建卷页面据此
+**不提供**注定失败的选项（见「存储卷重构（第三步）」）。
+
 `instance_storages(instance_id, storage_id, mount_path, is_read_only)` —— 挂载关系是显式的
 多对多，因为一个卷可以同时被多个实例挂载，而挂载点随实例而变。
 
@@ -2002,6 +2009,57 @@ ResourceQuota，以及若干断言"这个字段已被拒绝/不再回报"的测�
 provisioning 失败无法区分，单读一次必然偶发误报。harness 里本来就有轮询（对第一步的 claim），
 这一步把轮询提成 `wait_bound()` 并给按需 claim 也用上。**产品侧不需要等** —— pod 提交后多等
 一拍是正常的 Kubernetes 行为。
+
+### ✅ 后续增量 — 存储卷重构（第三步：建卷页不再提供走不通的选择，已完成）
+
+现场反馈：「在页面用管理员创建用户存储，点击创建，没有反应。」后端日志是 `POST /api/v1/storages` →
+**400**，审计 `error_message` 为 `用户组 hpc 还没有工作空间，存储卷的声明无处存放`
+（`group_has_no_workspace`），操作者 `admin`。
+
+**这不是后端的问题，后端拒绝得对。** 演示库里 `workspaces` 是**空表**，而一个存储卷的 claim 必须落在某个
+命名空间的 PVC 里 —— 组没有工作空间，这个卷建出来也没有任何 pod 能挂上它。在隔离库上按线上同形复现，
+逐字得到同一条消息：
+
+| 请求 | 结果 |
+| --- | --- |
+| `user_volume`（属主在 `hpc`） | 400 `group_has_no_workspace` |
+| `group_share`（`hpc`） | 400 `group_has_no_workspace` |
+| `global_share` | **201**，`/storage/kube-wl/_global/public-data` |
+| 先给 `hpc` 建一个工作空间，再重发前两条 | **201**，`/storage/kube-wl/hpc/zhangsan` 与 `/storage/kube-wl/hpc/share1` |
+
+所以平台有一条**顺序要求**：**先有组，再有工作空间，才能有存储卷**。这条要求此前只存在于后端，
+页面上一个字都没有 —— 建卷对话框把**所有**组都列出来，管理员挑一个必然失败的，点创建，得到 400。
+
+**改的是「不要提供走不通的选择」，不是放宽后端的规则**（`frontend/src/views/StorageView.vue`）：
+
+| 改动 | 理由 |
+| --- | --- |
+| `groupWorkspaceCount` / `groupOptions` | 用页面**已经加载**的 `workspaces` 算出每个组有几个工作空间；恰好一个才可选 |
+| `userOptions` | 用户卷的组来自**属主**（`owner.primary_group`），所以属主的组不满足时该用户也不可选 |
+| 下拉项 `:disabled` + `:subtitle` 写原因 | 「还没有工作空间 —— 存储卷的声明无处存放」比一个 400 有用 |
+| 一个都不可选时弹 `v-alert` | 明确说出顺序要求，并指向「工作空间」页面 |
+| `openCreate()` 默认选**第一个可选的** | 原来默认 `groups[0]`，等于每次创建都从一个必失败的组开始 |
+| `formValid` 再查一次可选性 | 按钮可用但请求必然失败，比按钮禁用更糟 |
+| `save()` 不再 `throw` 非 `ApiError` | 原来非 `ApiError` 会**静默**抛出：对话框不动、按钮恢复，用户什么也看不到 |
+
+**边界没变**：`_workspace_for_group()` 仍然要求组**恰好一个**工作空间，两个工作空间依旧
+`group_has_multiple_workspaces`（第 7 个坑记的那条死路依然存在，仍待单独决策）。这一步只是让页面
+**提前**说出后端早就会说的话。
+
+**顺带补上了冒烟脚本缺的一种能力。** `smoke_frontend_views.mjs` 此前只做「挂载 + 首屏断言」，
+所以**点开对话框之后**的分支从来没被测过 —— 而这正是这次出问题的地方。新增 `INTERACTIONS`：
+挂载后可以点一个按钮、再断言其后的 DOM。为它顺带修了两件事：
+
+- **`visualViewport` 桩。** happy-dom 没实现它，而 Vuetify 的 overlay 在**卸载**时会读它 —— 于是
+  「打开过对话框」的视图会在 `app.unmount()` 抛 `visualViewport is not defined`，看上去像视图的 bug。
+- **`EXPECTS_ABSENT` 改判首屏。** StorageView 是**故意**以只读者身份挂载的
+  （`VIEW_PERMISSIONS_ABSENT.StorageView = ['storage:manage']`，用来证明只读页面不显示变更入口）；
+  而交互会**主动授予** `storage:manage` 并打开那个入口。两者必须分开判断，否则交互会把只读断言撞掉。
+
+冒烟脚本挂载时不带管理员角色，所以 `loadWorkspaces()` 走 `getMyWorkspace()` 分支、`workspaces` 为空 ——
+**这恰好就是线上的状态**，于是新增的断言 `还没有用户具备存储条件` 直接对应现场。把新增的告警
+`v-if` 改成 `false` 复跑，冒烟立即以 `rendered, but without: "还没有用户具备存储条件"` 失败，
+恢复后 19/19 通过 —— 这条断言确实在测东西。
 
 ### 有意推迟（非遗漏）
 

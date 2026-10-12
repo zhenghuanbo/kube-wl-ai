@@ -1,0 +1,33 @@
+#!/bin/sh
+#
+# ttyd (the `webssh` IDE), with the instance runtime guaranteed to be up first.
+#
+# Same wrapper contract as /opt/wl/bin/jupyter — see that file for why it cannot
+# simply be the real binary.
+#
+# The extra flag is a platform gap this wrapper is the only place that can close.
+# The ingress serves the IDE at /x/{id}/ and carries no rewrite-target, so the
+# upstream is handed the prefix intact. Jupyter is told about it via
+# --ServerApp.base_url; ide_command() does not pass ttyd's equivalent, so ttyd
+# would answer on / and every request to /x/{id}/ would 404. ttyd *does* support
+# a base path, and the instance id it needs is already in the environment
+# (WL_INSTANCE_ID, set by build_instance_objects), so it is supplied here.
+#
+# code-server has no such flag; see /opt/wl/bin/code-server for that one.
+set -eu
+
+# Only when the caller supplied none: if the platform starts passing ttyd's base
+# path itself (the way it already passes Jupyter's), a second flag here would be
+# a duplicate, and which one wins is ttyd's business rather than something to
+# discover in production.
+for arg in "$@"; do
+    case "$arg" in
+        --base-path | -b) has_base_path=1 ;;
+    esac
+done
+
+if [ -n "${WL_INSTANCE_ID:-}" ] && [ "${has_base_path:-0}" = 0 ]; then
+    set -- --base-path "/x/${WL_INSTANCE_ID}/" "$@"
+fi
+
+exec /opt/wl/bin/wl-run /usr/bin/ttyd "$@"

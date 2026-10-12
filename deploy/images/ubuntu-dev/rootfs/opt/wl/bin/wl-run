@@ -1,0 +1,22 @@
+#!/bin/sh
+#
+# Bring the instance runtime up, then drop privileges to the instance's account.
+#
+# Shared by all three IDE wrappers. Running the IDE as the same account an SSH
+# session logs in as is the whole point: otherwise the notebook writes files as
+# root and the user cannot edit them over SSH without a chown, which is the kind
+# of papercut that makes a platform feel broken.
+#
+# Both branches matter. As root this prepares the container and drops privileges;
+# as anyone else it must simply run the command, because the preparation has
+# already happened and cannot be repeated unprivileged. The unprivileged branch
+# is the normal path when Docker keeps the ENTRYPOINT (`docker run <image>
+# jupyter lab`), or when a user starts an IDE from their own shell.
+set -eu
+
+if [ "$(id -u)" = "0" ]; then
+    /opt/wl/runtime.sh
+    exec gosu "$(cat /run/wl/user)" "$@"
+fi
+
+exec "$@"

@@ -1,0 +1,17 @@
+#!/bin/sh
+#
+# code-server, with the instance runtime guaranteed to be up first.
+#
+# Same wrapper contract as /opt/wl/bin/jupyter — see that file for why it cannot
+# simply be the real binary.
+#
+# Known limitation, and it is not fixable from inside the image: the platform
+# serves this through the ingress at /x/{id}/ without a rewrite-target, so the
+# upstream receives the prefix intact. code-server has no equivalent of Jupyter's
+# --ServerApp.base_url and cannot serve a subpath, so VS Code instances 404 their
+# own assets behind the ingress until the platform adds
+# `nginx.ingress.kubernetes.io/rewrite-target` for this IDE type. Told here
+# rather than worked around: a wrapper cannot invent a feature the binary lacks.
+set -eu
+
+exec /opt/wl/bin/wl-run /opt/code-server/bin/code-server "$@"

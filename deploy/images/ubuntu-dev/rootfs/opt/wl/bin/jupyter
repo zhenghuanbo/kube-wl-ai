@@ -1,0 +1,16 @@
+#!/bin/sh
+#
+# JupyterLab, with the instance runtime guaranteed to be up first.
+#
+# This shadows /opt/conda/bin/jupyter because /opt/wl/bin precedes it on PATH
+# (see the Dockerfile). It exists because the platform sets the IDE argv as the
+# container *command* — ide_command() in backend/app/k8s/workloads.py — and a
+# Kubernetes command replaces ENTRYPOINT, so without this wrapper nothing would
+# ever start sshd, and the instance's SSH NodePort would point at a closed port.
+#
+# The argv the platform passes (--ip, --port, --ServerApp.base_url) is forwarded
+# untouched: base_url is what makes Jupyter work behind the ingress prefix, and
+# hardcoding any of it here would silently fight the platform.
+set -eu
+
+exec /opt/wl/bin/wl-run /opt/conda/bin/jupyter "$@"

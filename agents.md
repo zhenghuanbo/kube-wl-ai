@@ -2147,10 +2147,17 @@ else:
   **一直停在「创建中」**（`podName` 也是 `None`，是判断这个问题最快的证据）。改法有两条——让
   列表/详情读取时就地推进一次，或至少在对账器停摆时明确提示——都还没做，因为前者会把一次
   K8s 调用放进读路径，是需要单独权衡的改动。
-- **`library/` 里没有带 IDE 的镜像。** `ide_command()` 假设镜像自带 `jupyter`/`code-server`/
-  `ttyd`，但 Harbor 的 `library` 项目下只有 `library/python`。在推入一个真正装了 Jupyter 的
-  基础镜像之前，**任何 Jupyter 实例都会 `CrashLoopBackOff`**，且这与 CPU/GPU 无关。平台侧
-  可以考虑在创建时就校验镜像里有没有对应二进制（或至少给出提示），但基础镜像是前置条件。
+- **`library/` 里还没有带 IDE 的镜像（镜像已交付，待推送）。** `ide_command()` 假设镜像自带
+  `jupyter`/`code-server`/`ttyd`，但 Harbor 的 `library` 项目下只有 `library/python`。在推入
+  一个真正装了 Jupyter 的基础镜像之前，**任何 Jupyter 实例都会 `CrashLoopBackOff`**，且这与
+  CPU/GPU 无关。镜像已写好并逐条验证：`deploy/images/ubuntu-dev/`（该目录的 README 记录了
+  平台对实例镜像的完整契约、以及只有跑起来才会暴露的四个坑）。**剩下的是人工动作**：用
+  `PUSH=1 deploy/images/ubuntu-dev/build.sh` 推到 `library/`。
+- **`vscode` 走不通子路径（平台侧缺口）。** ingress 暴露在 `/x/{id}/` 且没有
+  `rewrite-target`，所以上游收到的是带前缀的完整路径。Jupyter 靠 `--ServerApp.base_url`、
+  ttyd 靠镜像包装器补的 `--base-path` 都能对上，但 **code-server 不支持 base path**，没有
+  等价参数，因此 VS Code 实例的静态资源会 404。修它需要平台为该 `ide_type` 加
+  `nginx.ingress.kubernetes.io/rewrite-target`——镜像无法发明一个二进制里没有的功能。
 - `app/workers/celery_app.py` 的 `beat_schedule` 已接入 `reconcile-workloads`（30 秒）、
   `rollup-usage`（20 分钟）与 `sync-images`（默认每天一次，`IMAGE_SYNC_INTERVAL_SECONDS`
   可调）。最后一个是镜像从「推送到 Harbor」变成「选择器里可见」的唯一自动途径。

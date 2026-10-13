@@ -23,7 +23,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import policy
 from app.core.errors import BadRequestError, ConflictError, NotFoundError
 from app.core.logging import get_logger
-from app.k8s import K8sError, K8sGateway, LimitSpec, NamespaceSpec, QuotaSpec, run_gateway
+from app.k8s import (
+    SERVICES_PER_INSTANCE,
+    K8sError,
+    K8sGateway,
+    LimitSpec,
+    NamespaceSpec,
+    QuotaSpec,
+    run_gateway,
+)
 from app.k8s.naming import namespace_for
 from app.models.enums import QuotaResource, QuotaScope, WorkspaceRole, WorkspaceStatus
 from app.models.group import Group
@@ -420,15 +428,21 @@ async def _desired_quota(
     if memory_mb:
         hard["requests.memory"] = f"{memory_mb}Mi"
         hard["limits.memory"] = f"{memory_mb}Mi"
-    if storage_gb:
-        hard["requests.storage"] = f"{storage_gb}Gi"
+    # Set unconditionally, including as "0". An absent resource is *unlimited* to
+    # Kubernetes — the same trap the no-pool branch above exists to avoid — and
+    # leaving storage out when nothing was granted made the namespace an
+    # unbounded place to put volumes. Note this is the only aggregate ceiling on
+    # storage: the per-user cap (`max_storage_gb_per_user`) is checked when a
+    # volume is registered and says nothing about the group's total.
+    hard["requests.storage"] = f"{storage_gb}Gi"
     if instances:
         hard["count/deployments.apps"] = str(instances)
-        hard["count/services"] = str(instances)
-        # One home volume per instance, and one scratch volume per task that
-        # asks for storage; the allowance covers the worst case rather than
-        # letting a task fail on a claim the platform said it could make.
-        hard["count/persistentvolumeclaims"] = str(instances + tasks)
+        # Two per instance, not one: an instance with both an IDE and SSH creates
+        # a ClusterIP and a NodePort. Sizing this as one Service per instance let
+        # a single instance consume a two-instance workspace's entire allowance,
+        # so the second instance failed with `exceeded quota: count/services`
+        # *after* its Deployment had been applied.
+        hard["count/services"] = str(SERVICES_PER_INSTANCE * instances)
     if tasks:
         # Exactly the task allowance: a workspace may run its jobs and nothing
         # more, so the platform's counter and the cluster's cannot disagree.

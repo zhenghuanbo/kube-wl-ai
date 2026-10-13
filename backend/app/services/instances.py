@@ -493,39 +493,79 @@ async def _apply(
     *,
     replicas: int,
 ) -> None:
-    """Push the objects, recording their names as they are accepted."""
+    """Push the objects, naming each one *before* it is applied.
+
+    That order is the point, not an accident. Recording the names only once every
+    apply had returned lost objects in two different ways:
+
+    * a later object is rejected — a namespace ``ResourceQuota`` is the usual one
+      — after an earlier object was already created. The Deployment exists, the
+      Service does not, and the exception unwinds before anything was recorded.
+    * an apply that took effect on the API server but raised on the way back: a
+      timeout or a dropped connection, where "it failed" and "it exists" are both
+      true.
+
+    Either way the instance row ends up naming nothing. ``_persist_failure`` then
+    commits an ``error`` row precisely so the half-built workload stays
+    referenced — and its own docstring says as much — but a row with null columns
+    references nothing: ``delete_instance`` builds the deletion list *from these
+    columns*, so deleting the instance removed nothing from the cluster. The
+    workload stayed behind, invisible to the platform and still consuming the
+    quota that caused the failure, which left the workspace unable to create
+    anything else.
+
+    Naming the object first cannot lose anything, which is why it beats tracking
+    successes: deleting an object that was never created is a no-op, and
+    ``delete_workload`` already tolerates absent objects. The cost is that the row
+    may name an object the cluster does not have, which is the harmless direction
+    to be wrong in.
+    """
     refs = objects.refs
 
     if objects.ssh_secret is not None:
+        # Set only when a secret is actually created, so a repair that turns SSH
+        # *off* keeps the old name and the delete path still collects it; the
+        # secret's name is derived from the instance, so enabling it again reuses
+        # the same object rather than leaking a second one.
+        instance.k8s_secret = refs.secret
         await run_gateway(gateway.apply_secret, objects.ssh_secret)
 
+    instance.k8s_deployment = refs.deployment
     await run_gateway(gateway.apply_deployment, replace(objects.deployment, replicas=replicas))
 
     node_port: int | None = instance.ssh_node_port
     if objects.ssh_service is not None:
+        # The column records which Service is ours — named before the call, like
+        # every other object here. The port itself is read back afterwards,
+        # because the cluster picks it, so it stays unset if that never happens;
+        # leaving it unset only hides the SSH command, while the recorded Service
+        # name is what lets a delete clean it up.
+        instance.k8s_ssh_service = objects.ssh_service.name
         applied = await run_gateway(gateway.apply_service, objects.ssh_service)
         # The cluster picks the port, so read it back rather than assume the
         # one that was requested (which is usually none).
         for port in applied.ports:
             if port.node_port:
                 node_port = port.node_port
+        instance.ssh_node_port = node_port if instance.ssh_enabled else None
+    else:
+        instance.ssh_node_port = None
+
     if objects.ide_service is not None:
+        instance.k8s_ide_service = objects.ide_service.name
         await run_gateway(gateway.apply_service, objects.ide_service)
+
     if objects.ingress is not None:
+        instance.k8s_ingress = refs.ingress
         await run_gateway(gateway.apply_ingress, objects.ingress)
 
-    instance.k8s_deployment = refs.deployment
-    instance.k8s_ssh_service = objects.ssh_service.name if objects.ssh_service else None
-    instance.k8s_ide_service = objects.ide_service.name if objects.ide_service else None
-    instance.k8s_ingress = refs.ingress
-    # Left null, always. An instance creates no claim of its own any more — its home
-    # belongs to the storage volume — and the delete path removes the claims named
-    # here, so recording the owner's claim would make deleting an instance destroy
-    # the user's storage. The column is kept for rows created before that change,
-    # whose temporary home claims still have to be cleaned up.
+    # Left null, always, and naming each object before its call cannot change
+    # that: ``refs.pvc`` is None because an instance creates no claim of its own.
+    # Its home belongs to the storage volume, and the delete path removes the
+    # claims named here, so recording the owner's claim would make deleting an
+    # instance destroy the user's storage. The column is kept for rows created
+    # before that change, whose temporary home claims still have to be cleaned up.
     instance.k8s_pvc = refs.pvc
-    instance.k8s_secret = refs.secret
-    instance.ssh_node_port = node_port if instance.ssh_enabled else None
     await session.flush()
 
 

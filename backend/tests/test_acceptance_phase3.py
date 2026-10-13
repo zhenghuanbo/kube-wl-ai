@@ -791,6 +791,48 @@ async def test_a_cluster_failure_is_recorded_and_the_request_fails(
     assert "cluster refused" in listed.json()["items"][0]["statusMessage"]
 
 
+async def test_a_failure_after_the_deployment_leaves_nothing_unreachable(
+    client: AsyncClient, world: World, gateway: FakeK8sGateway
+) -> None:
+    """A later rejection must not orphan what an earlier one already created.
+
+    This reproduces the workspace that had to be repaired by hand. The Deployment
+    was applied, the Service was refused by the namespace quota, and the instance
+    row recorded neither — because the names were written only once every apply
+    had returned. The row claimed to reference the half-built workload, as
+    ``_persist_failure`` intends it to, while naming nothing: deleting the
+    instance deleted nothing from the cluster, and the Deployment went on
+    consuming the very quota that caused the failure.
+
+    Asserted through the API's own delete, because "the row names it" only
+    matters if it makes the object collectable.
+    """
+
+    gateway.fail_on["apply_service"] = "exceeded quota: count/services"
+    await act_as(client, "dana")
+
+    response = await client.post("/api/v1/instances", json=create_payload(world))
+    assert response.status_code == 502
+
+    listed = (await client.get("/api/v1/instances")).json()["items"]
+    assert [item["status"] for item in listed] == ["error"]
+    instance_id = listed[0]["id"]
+
+    detail = (await client.get(f"/api/v1/instances/{instance_id}")).json()
+    deployment = detail["k8sDeployment"]
+    # Named even though the apply as a whole failed, and it really is in the
+    # cluster — the fake raises before creating, so this is the object the real
+    # quota rejection had already left behind too.
+    assert deployment is not None
+    keys = [key for key in gateway.deployments if key.endswith(f"/{deployment}")]
+    assert len(keys) == 1, gateway.deployments.keys()
+
+    deleted = await client.delete(f"/api/v1/instances/{instance_id}")
+    assert deleted.status_code == 200, deleted.text
+    # The whole point: the abandoned object is reachable from the row.
+    assert keys[0] not in gateway.deployments
+
+
 async def test_expiry_stops_an_instance_that_ran_too_long(
     client: AsyncClient, world: World, gateway: FakeK8sGateway, session_factory
 ) -> None:

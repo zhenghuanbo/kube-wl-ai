@@ -38,6 +38,7 @@ from app.k8s.gateway import (
     WorkloadSpec,
 )
 from app.k8s.workloads import (
+    SERVICES_PER_INSTANCE,
     TASK_SHELL,
     InstanceObjects,
     StorageObjects,
@@ -52,6 +53,7 @@ from app.k8s.workloads import (
 logger = get_logger(__name__)
 
 __all__ = [
+    "SERVICES_PER_INSTANCE",
     "TASK_SHELL",
     "ContainerPort",
     "ExecSession",

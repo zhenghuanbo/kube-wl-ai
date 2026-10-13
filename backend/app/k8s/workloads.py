@@ -72,6 +72,20 @@ IDE_PORTS: dict[IdeType, int] = {
 SSH_PORT_NAME = "ssh"
 IDE_PORT_NAME = "ide"
 
+#: The most Services one instance can ever create: its SSH NodePort and its IDE
+#: ClusterIP. The two are independent — either can be absent (`ssh_enabled=false`,
+#: `ide_type=none`) but both together are the bound a namespace quota has to
+#: cover, and a quota is a maximum rather than a prediction.
+#:
+#: It lives here, next to the code that creates the Services, because the
+#: workspace quota (``app/services/workspaces.py``) has to size itself from it.
+#: Sizing that quota as one Service per instance is what capped a two-instance
+#: workspace at a single usable instance: the first one's SSH + IDE pair consumed
+#: the whole allowance, and the second instance's Services were rejected with
+#: ``exceeded quota: count/services`` after its Deployment had already been
+#: created.
+SERVICES_PER_INSTANCE = 2
+
 
 def ide_command(ide_type: IdeType, *, instance_id: int) -> tuple[str, ...] | None:
     """The argv that starts ``ide_type``, or ``None`` to use the image default.

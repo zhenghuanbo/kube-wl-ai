@@ -2138,6 +2138,110 @@ else:
 - 前端 `vue-tsc --noEmit` exit 0、`vite build` 2.45s、视图冒烟 19/19。
 - 线上后端带 `--reload`，已加载新代码；该实例现在正确显示**异常**。
 
+### ✅ 后续增量 — 工作空间配额算错，以及失败实例留下的孤儿对象（已完成）
+
+现场症状两条，看起来像两个问题，其实是同一个事故的两半。
+
+**一、第二个实例建不出来**
+
+在工作空间里建第二个开发实例，前端报：
+
+```
+下发失败：create service wl-jupyter-test-2-ssh failed: services "wl-jupyter-test-2-ssh"
+is forbidden: exceeded quota: wl-quota, requested: count/services=1, used: count/services=2,
+limited: count/services=2
+```
+
+而集群里那个 Pod 明明是 `1/1 Running`——**新镜像没问题，被拒的是 Service**。
+
+根因在 `workspaces.py` 的配额公式：`hard["count/services"] = str(instances)`，
+但**每个实例创建 2 个 Service**（`-ssh` 的 NodePort + `-ide` 的 ClusterIP）。
+`max_concurrent_instances=2` 于是只给 2 个 Service 名额，第一个实例的两个 Service
+就吃光了，第二个实例一个都建不出来。**这不是权限问题，也与 CPU/GPU 无关**：只要公式是
+`instances`，同一个组里就永远只能有 1 个带 SSH+IDE 的实例。
+
+修法：把"每个实例几个 Service"变成**一个常量**，放在创建 Service 的那段代码旁边
+（`app/k8s/workloads.py` 的 `SERVICES_PER_INSTANCE`），由配额侧引用。数量必须待在
+创建侧，否则两边会各自漂移；配额只是引用它。
+
+**二、失败之后留下的东西，平台自己删不掉**
+
+更严重的一半。下发顺序是 deployment 在前、Service 在后，而**对象名是在所有 apply 都
+成功之后才写回数据库的**（原 `_apply` 末尾）。异常在 Service 那步抛出 → 写回的代码
+永不执行 → 线上实测该实例行的 `k8s_deployment` / `k8s_ssh_service` / `k8s_ide_service`
+**全是 NULL**，而集群里的 Deployment 正在跑。
+
+`delete_instance` 是**从这些列拼出要删的对象名**的，所以：删掉这个实例，集群里什么都
+不会被删；Deployment 永久残留；`count/deployments.apps` 与内存配额被它一直占着（实测
+连排查用的临时 Pod 都被配额拒绝），**整个工作空间彻底卡死**，重试还会再产生一个孤儿。
+
+讽刺的是 `_persist_failure` 的文档字符串写明了它为什么要把 `error` 行提交下来：
+"losing the `error` row would leave a half-built workload in the namespace with nothing
+referencing it"——**它想要的正是"能引用到半成品"，而 refs 全 NULL 的行什么都引用不到**。
+注释描述的目标被代码本身破坏了。接口文档里"a rejected request never leaves a partial
+workload behind"同理：对**平台侧校验**成立，对**集群侧拒绝**（命名空间 ResourceQuota）
+不成立。
+
+修法：**在下发每个对象之前就把它的名字记到行上**，而不是等全部成功。
+- 记录"成功的"会丢对象，"先记名字"不会：删除一个从未创建的对象是空操作，
+  而 `delete_workload` 本来就容忍对象不存在。
+- 它还顺带覆盖了第二种丢对象的路径：**apply 在 API server 上已生效、但回程报错**
+  （超时、连接断开），这时"它失败了"和"它存在"同时为真。
+- 代价是行上可能记着一个集群里并不存在的对象——这是无害的那个方向。
+
+第二、三条是同一类问题：**配额公式算的是"能跑起来多少"，而实际消耗的是"建了多少个对象"**。
+
+**三、顺带修正的两处**
+
+1. **`count/persistentvolumeclaims` 算错了整个维度**。原公式 `instances + tasks`：
+   实例**不建任何 PVC**（它的 home 是用户的*卷*），任务的临时盘也已移除。真正落在这个
+   命名空间里的是**每个已注册的卷一个**（用户卷/组共享卷）以及**每个全局共享卷按命名空间
+   一个** —— 与能跑几个实例毫无关系。它同时**错在两个方向**：组里卷一多就会在*注册卷*时
+   撞配额，而它从来没有真正按 claim 数限住任何东西。已**移除该键**（字节由下面的
+   `requests.storage` 限）。
+2. **`requests.storage` 之前只在授权非零时才设置**，而**缺失的配额被 K8s 解读为"无限"**
+   —— 这恰好违反了同一函数上方注释自己声明的原则（"Kubernetes reads an absent resource
+   as *unlimited*"）。存储这一维是唯一没有被封零的。现在无条件设置（未授权即 `0Gi`）。
+   这条不是洁癖：命名空间配额是**组存储总量的唯一上限**，`max_storage_gb_per_user` 只在
+   注册卷时核对单卷大小；而无池工作空间连那个上限都读不到（`_refuse_oversized_user_volume`
+   在 `not rows` 时只记一条 `storage_capacity_unchecked` 就放行）。因此同步更新了
+   `test_workspace_without_a_pool_gets_a_usable_but_empty_namespace` 的断言（它原本只断言
+   `{"pods": "0"}`，其注释所写的原则正是这条，只是早于存储维度）。
+
+验证
+
+- **逐个证明新测试能抓住对应的 bug**（临时改回旧写法，跑完即还原）：
+  `count/services` 改回 `instances` → `assert 2 == (2 * 2)`；
+  `requests.storage` 改回 `if storage_gb:` → `KeyError: 'requests.storage'`；
+  refs 改回"全部成功后才写" → `assert None is not None`（正是线上那个 NULL）。
+- **真实集群端到端**（后端 `K8S_ENABLED=true` 且带 `--reload`，改动已生效）：
+  - `POST /workspaces/1/reconcile` 后，线上 ResourceQuota 变为 `count/services: 4`、
+    `requests.storage: 100Gi`，`count/persistentvolumeclaims` 消失。
+  - **同一命名空间建起两个 `ideType=jupyter` + `sshEnabled` 的实例**（用
+    `library/ubuntu-dev:24.04`）：两个 Deployment/SVC/Ingress 全部创建成功，
+    `count/services used=4/4`，两个 Pod 都 `1/1 Running` 且 `RESTARTS=0`。
+  - 两个实例各自的 ClusterIP 上 `/x/{id}/lab` 都返回 **200 `<title>JupyterLab</title>`**；
+    两个 NodePort 都回 `SSH-2.0-OpenSSH_9.6p1` 横幅。
+  - `/reconcile` 后平台状态均为 `running`、message 为空；删除两个实例后
+    Deployment/Service/Ingress/Pod **全部清空**、配额归零。
+- `pytest -q` **709 passed**（原 704 + 5 项新增；另有 1 项既有断言因上述存储封零而更新）；
+  `ruff check .`、`ruff format --check .`（160 文件）、`mypy app`（131 文件）全部无问题。
+
+**本轮暴露但未修的问题（另行处理）**
+
+- **平台接受一个它明知拉不下来的镜像引用**。Pod 里的 `image` 是用户输入**原样**透传的
+  （`instance.image` → `build_instance_objects(image=…)`），没有补 registry host。
+  填 `library/ubuntu-dev:24.04` 会去 **Docker Hub** 拉并超时（实测
+  `Get "https://registry-1.docker.io/v2/": Client.Timeout`），而目录里存着 `registry_host`
+  字段、平台完全知道正确的完整引用应该是什么（`10.28.0.194:30002/...`）。
+  失败形态是最难查的一种：Pod 一直 `ErrImagePull`，而创建接口返回 201。
+- **已删除的实例永久占用名字**：唯一性检查没有过滤 `is_active`
+  （`instances.py` 的 `instance_name_taken` 查询），所以 `is_active=false` 的行虽然
+  "从所有列表里消失"，名字却再也用不了。
+- **旧 bug 留下的一块残骸**：`Secret wl-jupyter-test-2-ssh` 仍在 `wl-hpc-hpc` 里——
+  那一行的 `k8s_secret` 当年就是 NULL，因此没有任何东西能引用并清理它。属于本次修复前
+  造成的既成事实，手工删掉即可。
+
 ### 有意推迟（非遗漏）
 
 - **OIDC** 仅预留扩展点：`OidcProvider.exchange_code()` 明确抛错说明。大学的统一身份是

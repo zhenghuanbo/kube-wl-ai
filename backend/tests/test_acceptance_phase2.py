@@ -13,8 +13,14 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.k8s import FakeK8sGateway, set_gateway
-from app.models.enums import GroupKind, GroupRole
+from app.k8s import (
+    SERVICES_PER_INSTANCE,
+    FakeK8sGateway,
+    InstanceObjects,
+    build_instance_objects,
+    set_gateway,
+)
+from app.models.enums import GroupKind, GroupRole, IdeType
 from app.models.group import Group
 from app.models.user import User
 from tests import factories
@@ -340,7 +346,13 @@ async def test_workspace_without_a_pool_gets_a_usable_but_empty_namespace(
     assert response.status_code == 201, response.text
     assert response.json()["status"] == "active"
     # Fail closed: an absent quota would read to Kubernetes as "unlimited".
-    assert gateway.quotas["wl-lab-a-bare"].hard == {"pods": "0"}
+    # Storage is pinned here too, not only pods. `pods: 0` stops workloads but says
+    # nothing about PersistentVolumeClaims, and a workspace with no granted pool is
+    # the one case where the per-volume ceiling cannot help either: with no
+    # ResourceGroupLimit to read, `_refuse_oversized_user_volume` logs
+    # `storage_capacity_unchecked` and lets the volume through. The namespace quota
+    # is then the only thing between that workspace and unbounded storage.
+    assert gateway.quotas["wl-lab-a-bare"].hard == {"pods": "0", "requests.storage": "0Gi"}
 
 
 async def test_workspace_names_are_unique_within_a_group(
@@ -621,6 +633,158 @@ async def test_quota_is_the_sum_of_the_granted_pools(
     assert by_resource["cpu"] == 6000
     assert by_resource["memory"] == 12288
     assert by_resource["instance"] == 4
+
+
+# ---------------------------------------------------------------------------
+# The quota Kubernetes is actually given
+#
+# These assert on the ``ResourceQuota`` the platform applies, not on the
+# platform's own record of the limits. The two are different objects, and the
+# difference is exactly where a real bug lived: the platform's record said
+# "instance: 2" and looked right, while the namespace quota it produced allowed
+# two *Services* — which one instance with both an IDE and SSH consumes, leaving
+# a two-instance workspace unable to run a second instance.
+# ---------------------------------------------------------------------------
+def _fullest_instance() -> InstanceObjects:
+    """The instance that declares the most objects: an IDE *and* SSH."""
+    return build_instance_objects(
+        instance_id=1,
+        instance_name="fullest",
+        namespace="wl-probe",
+        workspace_labels={"wl-managed": "true"},
+        image="library/ubuntu-dev:24.04",
+        ide_type=IdeType.JUPYTER,
+        cpu_milli=1000,
+        memory_mb=1024,
+        gpu_type="none",
+        gpu_count=0,
+        home_pvc_name="wl-vol-probe-1",
+        home_mount_path="/home/probe",
+        ssh_enabled=True,
+        authorized_keys="ssh-ed25519 AAAAprobe probe@wl\n",
+        node_selector={},
+        tolerations=(),
+        ingress_host="",
+    )
+
+
+def _services_declared(objects: InstanceObjects) -> int:
+    return sum(1 for spec in (objects.ssh_service, objects.ide_service) if spec is not None)
+
+
+async def _make_pool_granting_no_storage(admin_client: AsyncClient, name: str) -> dict:
+    """A pool that grants no storage at all, which ``make_pool`` cannot express."""
+    created = await admin_client.post(
+        "/api/v1/resource-groups",
+        json={
+            "name": name,
+            "displayName": name,
+            "kind": "public",
+            "networkType": "internal",
+            "maxRuntimeSeconds": 86400,
+        },
+    )
+    assert created.status_code == 201, created.text
+    pool = created.json()
+    limited = await admin_client.put(
+        f"/api/v1/resource-groups/{pool['id']}/limits",
+        json={
+            "maxConcurrentInstances": 2,
+            "maxGpuPerInstance": 0,
+            "maxGpuPerUser": 0,
+            "maxCpuMilliPerUser": 8000,
+            "maxMemoryMbPerUser": 16384,
+            "maxStorageGbPerUser": 0,
+        },
+    )
+    assert limited.status_code == 200, limited.text
+    return pool
+
+
+async def _workspace_on(
+    admin_client: AsyncClient, world: World, *, name: str, pool_ids: list[int]
+) -> dict:
+    response = await admin_client.post(
+        "/api/v1/workspaces",
+        json={"name": name, "groupId": world.lab_a.id, "resourceGroupIds": pool_ids},
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+async def test_the_service_allowance_covers_the_services_an_instance_creates(
+    admin_client: AsyncClient, world: World, gateway: FakeK8sGateway
+) -> None:
+    """One Service per instance caps a two-instance workspace at one instance.
+
+    Anchored to what :func:`build_instance_objects` actually declares rather than
+    to the number two, so giving an instance a third Service fails here instead
+    of in a workspace that cannot start its second instance.
+    """
+    pool = await make_pool(admin_client, name="svc-pool", kind="public")
+    workspace = await _workspace_on(admin_client, world, name="svc-ws", pool_ids=[pool["id"]])
+
+    hard = gateway.quotas[workspace["k8sNamespace"]].hard
+    per_instance = _services_declared(_fullest_instance())
+
+    # The regression, stated as the relationship that was violated.
+    assert per_instance == SERVICES_PER_INSTANCE
+    assert int(hard["count/services"]) == per_instance * int(hard["count/deployments.apps"])
+    # Two instances that each want an IDE and SSH must both fit — this workspace's
+    # pool allows two instances, and the failure that prompted the fix was the
+    # second one being refused after its Deployment had already been created.
+    assert int(hard["count/services"]) >= 4
+
+
+async def test_storage_is_bounded_even_when_no_pool_grants_any(
+    admin_client: AsyncClient, world: World, gateway: FakeK8sGateway
+) -> None:
+    """An absent limit is *unlimited* to Kubernetes, which is not a policy.
+
+    The namespace quota is the only place a group's storage is bounded in
+    aggregate: ``max_storage_gb_per_user`` is checked when a volume is registered
+    and says nothing about the total. Leaving the key out when nothing was
+    granted therefore made the group's storage unbounded.
+    """
+    pool = await _make_pool_granting_no_storage(admin_client, "nostorage-pool")
+    workspace = await _workspace_on(admin_client, world, name="nostorage-ws", pool_ids=[pool["id"]])
+
+    hard = gateway.quotas[workspace["k8sNamespace"]].hard
+    assert hard["requests.storage"] == "0Gi"
+
+
+async def test_storage_is_the_sum_of_what_the_pools_grant(
+    admin_client: AsyncClient, world: World, gateway: FakeK8sGateway
+) -> None:
+    first = await make_pool(admin_client, name="storage-one", kind="public")
+    second = await make_pool(admin_client, name="storage-two", kind="public")
+    workspace = await _workspace_on(
+        admin_client, world, name="storage-ws", pool_ids=[first["id"], second["id"]]
+    )
+
+    hard = gateway.quotas[workspace["k8sNamespace"]].hard
+    assert hard["requests.storage"] == "200Gi"
+
+
+async def test_the_claim_allowance_is_not_guessed_from_instances(
+    admin_client: AsyncClient, world: World, gateway: FakeK8sGateway
+) -> None:
+    """Nothing an instance or a task does creates a claim, so nothing sizes one.
+
+    The old formula allowed one claim per instance plus one per task. An instance
+    creates none — its home is the owner's *volume*, which outlives it — and a
+    task's scratch claims were removed. The claims that do land in the namespace
+    (one per registered volume, and one per global share per namespace) bear no
+    relation to how many instances may run, so a number derived from instances
+    was wrong in both directions: it failed volume registration once the group
+    outgrew it, while never actually bounding anything by claims. Bytes are what
+    is bounded, by ``requests.storage``.
+    """
+    pool = await make_pool(admin_client, name="claim-pool", kind="public")
+    workspace = await _workspace_on(admin_client, world, name="claim-ws", pool_ids=[pool["id"]])
+
+    hard = gateway.quotas[workspace["k8sNamespace"]].hard
+    assert "count/persistentvolumeclaims" not in hard
 
 
 # ---------------------------------------------------------------------------

@@ -5,16 +5,26 @@ pod has since died, a Job has finished, or an instance has outlived its runtime
 cap. Without this the platform would keep saying ``creating`` forever for
 something that failed ten minutes ago.
 
-Everything here is **idempotent and safe to run concurrently**. Two workers
-racing produce the same final state, because each transition is derived from
-what the cluster reports rather than from a counter. That matters more than
-efficiency: beat runs this every 30 seconds and a rolling deploy briefly runs
-two of them.
+The sweep itself now lives in :mod:`app.services.reconcile`, shared with the
+in-process reconciler (:mod:`app.workers.sweeper`) so the two cannot drift into
+covering different things.
+
+This file is also where the sweep used to be thrown away. It assembled three
+``async with factory() as session:`` blocks with no ``commit()`` anywhere, and a
+session *rolls back* an uncommitted transaction when the block exits — so every
+sweep read the cluster correctly, wrote the answer, and discarded it. Instance
+statuses therefore never left ``creating`` and the runtime cap was never enforced,
+while task reconciliation kept working only because its service happened to commit
+for itself. The commit now lives with the batch it belongs to; see
+:func:`app.services.instances.reconcile_all`.
 
 The async services are called through :func:`asyncio.run` because Celery's
 execution model is synchronous. Each task therefore opens and closes its own
 engine, which is also what keeps a long-lived worker from holding a stale
-connection pool across a database failover.
+connection pool across a database failover. That is why the engine lives here and
+not in :func:`~app.services.reconcile.sweep_all`: the in-process reconciler runs
+inside the web process, where disposing the engine every few seconds would take
+the API's database away from under it.
 """
 
 from __future__ import annotations
@@ -23,33 +33,22 @@ import asyncio
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.db.session import dispose_engine, get_session_factory, init_engine
+from app.db.session import dispose_engine, init_engine
 from app.k8s import get_gateway
-from app.services import instances as instance_service
-from app.services import tasks as task_service
+from app.services.reconcile import sweep_all
 from app.workers.celery_app import celery_app
 
 logger = get_logger(__name__)
 
 
 async def _reconcile() -> dict[str, int]:
-    """One sweep. Returns counters, which is what makes the log useful."""
+    """One sweep, wrapped in this process's own engine."""
     settings = get_settings()
     init_engine(settings)
-    gateway = get_gateway(settings)
-    factory = get_session_factory()
-
     try:
-        async with factory() as session:
-            instances = await instance_service.reconcile_all(session, gateway)
-        async with factory() as session:
-            expired = await instance_service.expire_overdue(session, gateway)
-        async with factory() as session:
-            tasks = await task_service.reconcile_all(session, gateway)
+        return await sweep_all(get_gateway(settings))
     finally:
         await dispose_engine()
-
-    return {"instances": instances, "expired": expired, "tasks": tasks}
 
 
 # Celery's decorator is untyped, and ``--strict`` refuses to let that silence
@@ -59,5 +58,5 @@ def reconcile_workloads() -> dict[str, int]:
     """Advance every instance and task that has not reached a resting state."""
     result = asyncio.run(_reconcile())
     if any(result.values()):
-        logger.info("reconcile_swept", **result)
+        logger.info("reconcile_swept", source="celery", **result)
     return result

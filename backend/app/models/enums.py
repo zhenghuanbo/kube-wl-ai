@@ -164,7 +164,11 @@ class InstanceStatus(StrEnum):
 
 
 class IdeType(StrEnum):
-    """Which web IDE an instance exposes through the ingress, if any."""
+    """Which web IDE an instance exposes, if any.
+
+    Exposed by the platform's own reverse proxy under ``/x/{user}/{id}/lab``, not
+    by a cluster ingress: that is what keeps the IDE on the platform's origin.
+    """
 
     NONE = "none"
     JUPYTER = "jupyter"

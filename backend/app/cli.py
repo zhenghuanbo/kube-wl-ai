@@ -26,8 +26,7 @@ from app.k8s import get_gateway
 from app.models.enums import UserSource
 from app.models.rbac import Role, UserRole
 from app.models.user import User
-from app.services import instances as instance_service
-from app.services import tasks as task_service
+from app.services.reconcile import sweep_all
 
 MIN_PASSWORD_LENGTH = 12
 
@@ -101,23 +100,21 @@ async def _sync_rbac() -> int:
 async def _reconcile() -> int:
     """Run one sweep by hand.
 
-    The same routine beat schedules every 30 seconds, exposed for the case it
-    cannot cover: an operator who has just fixed something and does not want to
-    wait for the next tick.
+    The same routine beat schedules every 30 seconds and the in-process reconciler
+    runs every few, exposed for the case neither covers: an operator who has just
+    fixed something and does not want to wait for the next tick.
+
+    It calls :func:`~app.services.reconcile.sweep_all` rather than assembling its
+    own three-step sweep. The old copy here had no ``commit()`` anywhere, so this
+    command observed the cluster correctly, discarded everything, and then printed
+    "对齐完成：实例 N 个状态变化" — confident, specific and false. The summary was
+    doubly wrong: it counted rows *examined* rather than rows that moved, and
+    nothing had been written at all.
     """
-    settings = get_settings()
-    gateway = get_gateway(settings)
-    factory = get_session_factory()
-
-    async with factory() as session:
-        instances = await instance_service.reconcile_all(session, gateway)
-    async with factory() as session:
-        expired = await instance_service.expire_overdue(session, gateway)
-    async with factory() as session:
-        tasks = await task_service.reconcile_all(session, gateway)
-
+    result = await sweep_all(get_gateway(get_settings()))
     print(
-        f"对齐完成：实例 {instances} 个状态变化，超时回收 {expired} 个，任务 {tasks} 个状态变化。"
+        f"对齐完成：实例 {result['instances']} 个状态变化，"
+        f"超时回收 {result['expired']} 个，任务 {result['tasks']} 个状态变化。"
     )
     return 0
 

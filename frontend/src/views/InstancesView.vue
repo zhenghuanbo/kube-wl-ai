@@ -82,12 +82,66 @@ const STATUS_OPTIONS: { value: InstanceStatus; title: string }[] = [
 /** Statuses in which a shell can actually be opened. */
 const INTERACTIVE_STATUSES: readonly InstanceStatus[] = ['running']
 
+/**
+ * Statuses that are on their way somewhere.
+ *
+ * The listing only polls while one of these is on screen, which is what makes the
+ * page feel live without leaving a request every three seconds behind it forever:
+ * a list nobody is starting or stopping produces no traffic at all. `running`,
+ * `stopped`, `failed` and `error` are all resting states — an instance that has
+ * crashed stays crashed until someone acts on it, so there is nothing to wait for.
+ */
+const UNSETTLED_STATUSES: readonly InstanceStatus[] = ['pending', 'creating', 'stopping', 'deleting']
+
+/** How often to re-read the list while something in it is still moving. */
+const POLL_INTERVAL_MS = 3000
+
 // --- listing -----------------------------------------------------------------
 const rows = ref<InstanceSummary[]>([])
 const total = ref(0)
 const loading = ref(false)
 const page = ref(1)
 const pageSize = ref(20)
+
+/**
+ * Re-read the list on a timer while any row is still settling.
+ *
+ * Polling, deliberately, rather than a push channel. The backend sweeps the
+ * cluster every few seconds, so an answer is never more than a few seconds old to
+ * begin with, and this only runs while there is a row that is actually changing.
+ * The alternative — `EventSource` — buys a second or two on a screen a user watches
+ * for eight, and costs a streaming endpoint, `proxy_buffering off` in nginx, a
+ * token in the query string (because `EventSource` cannot send headers), and a
+ * reconnect path to get wrong.
+ */
+let pollTimer: ReturnType<typeof setInterval> | undefined
+
+function stopPolling(): void {
+  clearInterval(pollTimer)
+  pollTimer = undefined
+}
+
+function syncPolling(): void {
+  const settling = rows.value.some((row) => UNSETTLED_STATUSES.includes(row.status))
+  if (!settling) {
+    stopPolling()
+    return
+  }
+  if (pollTimer === undefined) {
+    pollTimer = setInterval(() => void load({ silent: true }), POLL_INTERVAL_MS)
+  }
+}
+
+/**
+ * Refresh when the tab comes back to the foreground.
+ *
+ * A background tab's timers are throttled hard — often to once a minute — so a
+ * list left open in another tab is arbitrarily stale at exactly the moment the
+ * user looks at it again.
+ */
+function onVisibilityChange(): void {
+  if (document.visibilityState === 'visible') void load({ silent: true })
+}
 
 const filters = reactive({
   search: '',
@@ -124,8 +178,8 @@ const headers = computed<Column[]>(() => {
   return base
 })
 
-async function load(): Promise<void> {
-  loading.value = true
+async function load(options: { silent?: boolean } = {}): Promise<void> {
+  if (!options.silent) loading.value = true
   try {
     const result = await listInstances({
       page: page.value,
@@ -136,11 +190,16 @@ async function load(): Promise<void> {
     })
     rows.value = result.items
     total.value = result.meta.total
+    syncPolling()
   } catch (error) {
     if (!(error instanceof ApiError)) throw error
-    notifications.error(error.message)
+    // A failing background poll is not worth a toast. The next tick will probably
+    // succeed, and a user watching the list is not helped by the same message
+    // arriving every three seconds; a poll that keeps failing is still visible in
+    // the network tab and in the server log.
+    if (!options.silent) notifications.error(error.message)
   } finally {
-    loading.value = false
+    if (!options.silent) loading.value = false
   }
 }
 
@@ -396,9 +455,12 @@ function toggleRunState(instance: InstanceSummary): void {
 }
 
 function reconcile(instance: InstanceSummary): void {
-  // "已重新下发" was wrong: `POST /instances/{id}/reconcile` reads the pod's
-  // observed state back into the row. It applies nothing to the cluster, so it
-  // cannot fix a crash-looping container however many times it is pressed.
+  // `POST /instances/{id}/reconcile` re-applies the workload objects *and* reads the
+  // pod's observed state back into the row. So it can genuinely repair a workload
+  // that was deleted or evicted from the cluster, and it cannot help a container
+  // that is crash-looping — re-creating the pod reproduces the crash.
+  // (This comment used to claim it applied nothing to the cluster, which was the
+  // opposite of what the endpoint does.)
   void run(instance, () => reconcileInstance(instance.id), `实例 ${instance.name} 状态已刷新`)
 }
 
@@ -573,6 +635,7 @@ function isInteractive(instance: InstanceSummary): boolean {
 
 onMounted(async () => {
   void load()
+  document.addEventListener('visibilitychange', onVisibilityChange)
   try {
     hasSshKey.value = (await listSshKeys()).length > 0
   } catch (error) {
@@ -590,7 +653,11 @@ onMounted(async () => {
   }
 })
 
-onBeforeUnmount(() => clearTimeout(searchTimer))
+onBeforeUnmount(() => {
+  clearTimeout(searchTimer)
+  stopPolling()
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+})
 
 const workspaceChoices = computed(() =>
   workspaces.value.map((workspace) => ({
@@ -727,12 +794,18 @@ const workspaceChoices = computed(() =>
               title="终端"
               @click="openDetail(item)"
             />
+            <!--
+              Deliberately not gated on the instance's status. The IDE is served by
+              the platform's own reverse proxy, which answers 503 with a readable
+              reason when the instance is not up yet. A greyed-out button says less
+              than that, and it hid a working IDE for as long as the row was stuck
+              reading 创建中.
+            -->
             <v-btn
               v-if="item.ideType !== 'none'"
               size="small"
               variant="text"
               icon="mdi-open-in-new"
-              :disabled="!isInteractive(item)"
               title="打开 Web IDE"
               @click="openIde(item)"
             />
@@ -1118,13 +1191,13 @@ const workspaceChoices = computed(() =>
               color="primary"
               variant="tonal"
               prepend-icon="mdi-open-in-new"
-              :disabled="!isInteractive(detail)"
               @click="openIde(detail)"
             >
               打开 {{ ideLabel(detail.ideType) }}
             </v-btn>
             <p class="text-caption text-medium-emphasis mt-3">
-              IDE 链接由后端签发一次性短时票据，每次打开都会重新生成；把地址栏里的链接转给别人会在几分钟后失效。
+              链接形如 <code>/x/{{ detail.ownerUsername }}/{{ detail.id }}/lab</code>，由平台后端反向代理到该实例。
+              地址里<strong>不含任何凭证</strong>，任何能访问本平台的人拿到这个链接都能打开这个 IDE，请不要转发。
             </p>
           </v-window-item>
 

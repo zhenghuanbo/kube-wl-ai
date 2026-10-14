@@ -648,7 +648,14 @@ scope 限不住它们。更糟的是 `effective_role_codes` 只对 `group_admin`
   （Jupyter 用 `…/lab`，vscode 与 webssh 用根路径）。**这条路由不做任何鉴权**，IDE 自身也以关闭认证
   的方式启动（`--ServerApp.token=` / `code-server --auth none` / `ttyd --writable`），
   所以**拿到 URL 就等于拿到该用户的 shell**。
-- **协调**：beat 周期 reconcile（指数退避）+ K8s watcher → Redis pub/sub → SSE 推送。
+- **协调**：周期性 reconcile，**两个调用者共用同一份代码**
+  （`app/services/reconcile.py::sweep_all()`）：Web 进程内的 sweeper
+  （`RECONCILE_INTERVAL_SECONDS`，默认 5 秒）和 Celery beat 的 `reconcile-workloads`（30 秒）；
+  多 worker 部署把前者设成 `0`，让 beat 当唯一的对账者。**没有 K8s watch，没有 Redis
+  pub/sub，没有 SSE 推送，也没有指数退避。** 状态靠轮询观测，前端只在列表里还有未安定
+  行时每 3 秒拉一次。
+  （这一行原先写的是「beat 周期 reconcile（指数退避）+ K8s watcher → Redis pub/sub → SSE
+  推送」—— 四件里有三件从未存在，第四件的退避也没有实现。）
 - **命令注入防护**：Job 命令必须用 `command` / `args` 数组，**禁止 shell 字符串拼接**。
 - **测试隔离**：单元测试一律使用 `K8sGateway` 的 Fake 实现，不接触真实集群。
 
@@ -1437,10 +1444,14 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 - **冒烟脚本断言「等于」在共享数据库上必然失败。** 前几期留下的实例仍归同一个管理员所有，
   所以「管理员看到 2 个容器」应写成「**包含**这 2 个」，而真正有分量的是
   **排除**断言：「组管理员的范围里不含乙组命名空间」。
-- **冒烟环境没有 reconciler，实例停在 `creating` 且 `pod_name` 为 NULL。**
-  这不是缺陷而是一种真实状态（实例刚创建、或 reconciler 挂了），
+- **冒烟环境跑在 `K8S_ENABLED=false` 上，所以没有 sweeper，实例会停在 `creating`
+  且 `pod_name` 为 NULL。** 冒烟脚本用的是假网关，而进程内对账器只在
+  `k8s_enabled` / `k8s_in_cluster` 为真时启动（否则它会把假网关编出来的状态写进真行）。
   所以断言要落在「`pods` 是列表」而不是「`pods` 非空」，Pod 锁定的行为放到 pytest 里
   用确定的数据覆盖。
+  ⚠️ 别把这句话读成「停在 `creating` 是正常的」——在真正连着集群的部署里它曾经**就是**缺陷
+  （对账的写入被回滚，见「后续增量 — 状态永远停在「创建中」」）。区别在于谁在跑、以及
+  它写不写得进去。
 - **`GET /resource-specs` 返回裸列表、`/resource-groups` 返回信封** —— 两个列表接口的形状不同，
   冒烟脚本的 `rows_of()` 两种都要能处理。
 
@@ -2091,7 +2102,12 @@ provisioning 失败无法区分，单读一次必然偶发误报。harness 里�
 触发它的只有 Celery beat 的 `reconcile-workloads`（30 秒）、CLI 和手动
 `POST /instances/{id}/reconcile` —— **页面读取不触发对账**（这是 `create_instance` 的设计：
 先报 `CREATING`，等对账提升）。决定性证据是实例记录里 `podName` 一直是 `None`，而 pod 已经
-存在 12 分钟。这一条**本次没有改**（见「有意推迟」）。
+存在 12 分钟。
+
+⚠️ **本条当时写的是「本次没有改」，后来发现真相比这更糟：对账器即使跑起来也没用**，
+因为它的写入会被回滚，而且本机连 broker 都没有。已在
+「后续增量 — 状态永远停在「创建中」：一次被回滚的提交」里连根修掉（进程内 sweeper +
+补上提交 + 前端自适应轮询）。
 
 **3. 对账一跑，它会把崩溃的容器报成「运行中」——这次修的就是它。**
 
@@ -2135,10 +2151,16 @@ else:
 含「未预料的 reason 不得被判成失败」和「每个 `FATAL_POD_REASONS` 成员都真的可达」。
 把新判定关掉复跑：**6 项失败**（5 项单元 + 1 项验收），恢复后全绿 —— 这些测试确实在测东西。
 
-**顺带修了一处名实不符的文案。** 实例菜单的「重新下发」和提示「已重新下发」都是错的：
-`POST /instances/{id}/reconcile` **只读回 pod 观测状态，不对集群下发任何东西**，所以按多少次
-都修不好一个崩溃的容器。已改为「刷新状态」。**工作空间那个「重新下发」是对的，没动** ——
-`apply_cluster_state()` 真的会重新下发命名空间/配额/LimitRange/NetworkPolicy。
+**顺带修了一处名实不符的文案（但理由当时写错了）。** 实例菜单的「重新下发」和提示
+「已重新下发」被改成了「刷新状态」。**改名是对的，给的理由是错的**：这里原先写着
+`POST /instances/{id}/reconcile` 「只读回 pod 观测状态，**不对集群下发任何东西**」——
+而该端点第一件事就是 `apply_cluster_state()`（已停止的实例用 `replicas=0` 重建，免得
+「修对象」把实例悄悄启动起来），然后才 `reconcile_instance()` 读回观测状态。
+
+所以准确的说法是**两件事都做**：它**能**修好一个被删除或驱逐的工作负载（重新下发），
+**不能**修好一个正在崩溃的容器（重新下发只会重演同一次崩溃）。工作空间那个「重新下发」
+则一直是名副其实的。前端里同一句错话也已一并改正
+（`InstancesView.vue` 的 `reconcile()` 注释）。
 
 验证
 
@@ -2431,6 +2453,281 @@ code-server 是唯一的例外，也是唯一需要**回程改写**的：剥掉�
 
 ---
 
+### ✅ 后续增量 — 状态永远停在「创建中」：一次被回滚的提交（已完成）
+
+用户报告：**前端提交成功、K8s 创建成功、数据库记录也在，但页面状态一直停在「创建中」，
+也不会出现打开 IDE 的链接。** 查下来不是一个 bug，是四个；而最要命的那个让整套状态同步
+机制**从来没有真正生效过一次**。
+
+#### ① 提交被回滚：对账写下的状态从来没进过数据库
+
+`app/workers/tasks/reconcile.py` 原来是三个裸的
+
+```python
+async with factory() as session:
+    await instance_service.reconcile_all(session, gateway)
+```
+
+`reconcile_instance()` 只 `flush()`，**从不 `commit()`**。而 SQLAlchemy 的
+`AsyncSession.__aexit__` 是 `close()` —— **close 会回滚未提交的事务**。于是每一轮对账都
+正确读到了集群状态，写进会话，然后在退出时全部丢掉。
+
+拿 `app.db` 的副本直接实测（用合法枚举值当哨兵）：
+
+```
+初始 status = creating
+块内 flush() 成功（SQL 已发出）
+块退出后 status = creating   pod_name = None      ← 改动被回滚
+```
+
+**为什么它藏了这么久**：HTTP 路径的 `get_session` 依赖在 handler 返回后 `commit()`，所以
+`POST /instances/{id}/reconcile` 一直是好的，而**所有既有的对账测试都走那个门**——
+`test_acceptance_phase3.py::test_reconcile_promotes_a_ready_pod_to_running` 就是，
+它从头到尾都是绿的。
+
+**这是疏漏，不是设计**，两条对照证据：
+
+| 文件 | `factory()` 块 | `commit()` |
+| --- | --- | --- |
+| `workers/tasks/reconcile.py` | 3 | **0** |
+| `workers/tasks/usage.py` | 1 | 1 |
+| `workers/tasks/images.py` | 1 | 1 |
+| `workers/tasks/nodes.py` | 1 | 1 |
+
+更直接的一条：**`task_service.reconcile_all()` 自己 commit（`tasks.py:19`），
+`instances.reconcile_all()` 不 commit** —— 所以任务状态一直会同步，实例状态永远不会。
+
+连带后果比「状态不动」更糟。`expire_overdue()` 也只有 `flush()`，于是**最长运行时长这条
+上限从来没有真正执行过一次**；而且停止动作把 Deployment 真的缩到了 0（集群侧生效），
+回滚之后行里还写着 `running`，下一轮对账看到没有 pod，就判定「还在启动」—— 实例于是
+既停不下来，也永不过期。
+
+改法：**commit 归批处理入口自己所有**。`instances.reconcile_all()` 与 `expire_overdue()`
+末尾各自 `await session.commit()`（照抄 `task_service.reconcile_all()` 已有的先例），
+并在 docstring 里写明这不是细节、而是这个函数存在的理由。`reconcile_instance()` 保持
+flush-only，因为它还要被 HTTP 端点组合进请求事务。
+
+**第三个调用者，一模一样的 bug。** `app/cli.py` 的 `reconcile` 命令（运维手动救急会敲的
+那一个）是同一份三连裸 `async with factory()`，同样没有任何 `commit()`，而且它还会打印
+`对齐完成：实例 N 个状态变化，超时回收 M 个，任务 K 个状态变化。` 这句话撒了两个谎：
+改动**全部被回滚**，而 N 数的是「检查了几个」不是「变了几个」（`task_service.reconcile_all`
+数的却是变化数 —— 两边语义还不一致）。
+
+现在 CLI 也改为调用 `sweep_all()`，并且 `instances.reconcile_all()` 与任务侧统一成
+**数变化数**，于是那行摘要第一次是真话。真集群实测（先把实例 11 直接改回 `creating`）：
+
+```
+$ .venv/bin/python -m app.cli reconcile
+instance_status_changed  current=running instance=test previous=creating
+对齐完成：实例 1 个状态变化，超时回收 0 个，任务 0 个状态变化。
+$ sqlite3 app.db "SELECT status,pod_name FROM instances WHERE id=11"
+running|wl-test-11-5894b9bd87-87rjt        ← 真的落库了
+```
+
+计数的语义也顺带成了日志质量的支点：**只有在真有东西移动时才打 info**。若按「检查了几个」
+计数，只要有实例存活，5 秒一次的 sweeper 就会永远重复打印同一行 —— 一条有用的日志就此
+变成没人看的噪音。
+
+#### ② 没有任何东西在跑对账：进程内 sweeper
+
+原先唯一的自动触发者是 Celery beat，而本机 `REDIS_URL=redis://redis:6379/0` 里的 `redis`
+主机名根本解析不了（那是 docker-compose 的服务名）—— **没有 broker 就没有 beat**。
+
+⚠️ **一条要作废的推理**：早先「`ps` 里没有 celery 进程」这条证据是**无效的**。我的 bash
+跑在 `bwrap --unshare-pid` 的私有 PID 命名空间里，**看不到宿主机进程**（`ss -ltnp` 也拿不到
+pid）。结论成立靠的是另外两条独立证据：Redis 主机名解析失败，以及实例卡住 17 分钟、
+`pod_name` 为 NULL 的真实观测。
+
+新增 `app/workers/sweeper.py`：在 FastAPI 的 lifespan 里起一个 asyncio 后台任务，按
+`RECONCILE_INTERVAL_SECONDS`（默认 **5 秒**，设 `0` 关闭）调一次对账；每个 tick 独立
+try/except，一次集群抖动不会杀死循环；关闭时 `cancel()` 并 await（保证没有 tick 在引擎被
+拆掉的同时还在开会话）；集群调用都走 `run_gateway`（即 `asyncio.to_thread`），**不阻塞
+事件循环**。仅在 `k8s_enabled` / `k8s_in_cluster` 为真时启动 —— 否则它会把假网关编出来的
+状态写进真行。
+
+对账逻辑本身被提到 `app/services/reconcile.py::sweep_all()`，**Celery 任务和进程内 sweeper
+调用同一份代码**，两者不可能再各自漂移。**引擎管理留在调用方**：Celery 是同步进程，必须
+自己建/拆引擎；sweeper 跑在 Web 进程里，每 5 秒 dispose 一次等于把 API 的数据库从底下抽走。
+
+多 worker 部署应设 `RECONCILE_INTERVAL_SECONDS=0`，让 beat 当唯一的对账者。两者同时跑是
+浪费但无害：所有状态都从集群推导而来，不是计数器，两个 sweeper 抢着跑会到达同一状态。
+
+#### ③ 前端列表是快照
+
+`InstancesView.vue` 原先只在 `onMounted` 和每次操作之后 `load()` 一次，没有轮询。改为
+**自适应轮询**：列表里只要还有未安定状态（`pending` / `creating` / `stopping` /
+`deleting`）就每 **3 秒**刷一次，全部安定后自动停表（一个没人启停的列表产生**零**额外流量）；
+另外在 `visibilitychange` 回到前台时立刻刷一次（后台标签页的定时器会被节流到分钟级，
+否则切回来的瞬间看到的可能是几分钟前的数据）。后台轮询失败**不弹 toast**：下一次 tick
+大概率就成功了，而每 3 秒重复同一句错误对用户没有帮助。
+
+**没有做 SSE**：它能在用户盯 8 秒的界面上省下 1~2 秒，代价却是一个流式端点、nginx 的
+`proxy_buffering off`、因为 `EventSource` 发不了 header 而不得不塞进 query string 的 token，
+以及一条必须写对的重连路径。
+
+#### ④ IDE 按钮被状态闸门锁死 —— 这是「打不开 IDE」的直接原因
+
+`INTERACTIVE_STATUSES = ['running']`，模板里 `:disabled="!isInteractive(item)"`。但后端
+**早就在 `creating` 状态下给出完全可用的 IDE**：
+
+```
+实例 11：status='creating'  idePath='/x/zhenghuanbo/11/lab'
+GET /api/v1/instances/11/ide-access -> 200 {"url":"/x/zhenghuanbo/11/lab"}
+GET /x/zhenghuanbo/11/lab           -> 200  <title>JupyterLab</title>
+```
+
+**IDE 一直在正常工作，只是 UI 不让人点。** 改为**有 IDE 就能点**（只剩
+`v-if="item.ideType !== 'none'"`），让反代当权威。`isInteractive` 保留给终端按钮和
+「终端」标签页——shell 确实需要容器活着。
+
+这个选择是安全的，因为反代的 503 本来就已经把两种情况分开了：实例没在运行 →
+`该实例未在运行，请先启动它。`；连不上 IDE → `IDE 暂不可用 / 无法连接实例的 IDE，
+它可能正在重启。实例可能仍在创建中，稍后刷新本页即可。`
+
+顺带删掉了详情页那句过期文案（「IDE 链接由后端签发一次性短时票据…几分钟后失效」）——
+票据已随反代方案停用，现在写明**地址里不含任何凭证**、拿到链接的人都能打开。
+
+#### 顺带查出来的一个事实：`running` 并不等于 IDE 在服务
+
+Deployment **没有任何 `readinessProbe`**（`readinessProbe = None`，liveness 也没有）。
+k8s 的 `Ready` 因此只表示容器进程起来了，而 JupyterLab 还要几十秒才监听 8888。实测：
+
+```
+ t      status      IDE
+ 0.7s  creating    503  "IDE 暂不可用 …实例可能仍在创建中，稍后刷新本页即可。"
+ 4.3s  running     200
+```
+
+所以 `running` 之后仍可能短暂 503。**没有顺手加就绪探针**：那会把 `running` 推迟到 Jupyter
+真正监听之后（对慢镜像可能是几十秒），同时拖慢 SSH，并改变配额语义（未就绪的 pod 照样占
+配额）。这是语义变更，应当单独决定。
+
+#### 验证
+
+- 新增 `tests/test_reconcile_sweeper.py`（8 项）。**关键是它确实在测东西**：临时抽掉
+  `reconcile_all()` 的 `commit()` 复跑，`test_a_sweep_persists_what_it_observed` 与
+  `test_the_session_shape_that_caused_the_bug_now_persists` 精确失败在
+  `assert creating is running`，恢复后全绿。断言一律**换一个新会话来读**——用同一个会话读
+  什么也证明不了，identity map 会把刚改过的对象原样还给你。
+- **真集群、无人干预**：把实例 11 直接改回 `creating` 并清空 `pod_name` / `node_name`，
+  然后完全不碰它：
+  ```
+  t= 4s  status=creating  podName=None
+  t= 8s  status=running   podName=wl-test-11-5894b9bd87-87rjt nodeName=10.28.0.194
+  ```
+- **真集群、全新创建**：`POST /instances` → 201 `creating`，**3.4 秒后自己变成 `running`**，
+  全程没有人刷新页面或点任何按钮。
+- 门禁：`ruff check .`、`ruff format --check .`（165 文件）、`mypy app`（135 文件）全部通过；
+  `pytest` **738 passed**（原 730 + 新增 8）；前端 `vue-tsc --noEmit` 与 `vite build` 通过。
+- 顺手修掉两处名实不符的注释：`instances.py` 里指向反代的路径写成
+  `app/api/x/proxy.py`（应为 `app/api/ide/proxy.py`）；`IdeType` 的 docstring 仍说
+  「通过 ingress 暴露」。
+
+#### ⑤ 一次 sweep 每个实例发一次 LIST → 改为每个命名空间一次
+
+**动机**：`reconcile_all()` 原来对每个实例调一次 `reconcile_instance()`，也就发一次
+`list_namespaced_pod(ns, "wl-instance={name}")`，成本随「有多少实例在跑」线性增长。改为
+**按命名空间分组、每个命名空间一次 `wl-managed=true` LIST**，再用 `wl-instance` 标签把
+pod 分派回各自的行；成本变成随「有多少命名空间在用」增长——一个更小、增长更慢的量。
+
+**为什么标签是唯一可靠的分派键**：pod 名是 `{deployment}-{replicaset hash}-{random}`
+（`wl-test-11-5894b9bd87-87rjt`），而且 k8s 会截断过长的名字，所以解析 pod 名会**恰好
+在名字最长的实例上静默分派出错**。`wl-instance` 在 pod 模板的 labels 里（真实 pod 实测：
+`pod-template-hash=5894b9bd87,wl-instance-id=11,wl-instance=test,wl-managed=true,wl-workspace=hpc`），
+而 `Workspace.k8s_namespace` 是 `unique=True`（namespace ⇔ workspace 一一对应）、实例名
+在 workspace 内唯一，所以标签在这个命名空间里是无歧义的键。
+
+**顺带：为什么必须忽略「没有 `wl-instance` 的 managed pod」**。任务 Job 的 pod 同样带
+`wl-managed=true`（`build_task_objects()` 的标签），但它们属于另一张表的行。忽略它们是
+**一段活代码，不是防御性写法**——所以它有专门的测试。
+
+改动形状：`reconcile_instance()` 拆成「判据 + LIST + `_absorb_observation()`」，批处理路径
+把同一次 LIST 的结果喂给同一个 `_absorb_observation()`，两条路径因此不可能对「一个 pod
+意味着什么」产生分歧（正是 `tasks.py` 里 `reconcile_task` / `_absorb` 早就用的形状）。
+命名空间 LIST 失败**只影响该命名空间**，其余实例照常观测。
+
+**验证（真集群、2 个实例、同一命名空间）**——把旧形状（逐实例调 `reconcile_instance`）与
+新形状跑在同一个真实集群上：
+
+```
+OLD SHAPE listings for 2 instances in ONE namespace: 2
+  wl-hpc-hpc  wl-instance=dev
+  wl-hpc-hpc  wl-instance=dev2
+```
+
+新形状：**1 次** `list_pods('wl-hpc-hpc', 'wl-managed=true')`，返回 2 个 pod，
+`instance_name='test'` / `'probe2'` 各归其主。测试断言的是**调用参数本身**
+（`== [(ns, MANAGED_LABEL_SELECTOR)]`）加上两行各自 `running` 且各自对应自己的 pod——
+只断言「调用一次」的话，「只发一次但把同一个 pod 发给两行」也能骗过去。
+
+#### ⚠️ 测量这个改动时我犯的两个方法论错误（值得记住）
+
+两次 A/B 都是错的，而且两次都给出了「看起来像结论」的数字：
+
+1. 第一次：新形状的计时包含它自己的行 SELECT，而我手写的旧形状把 SELECT 放在计时区外
+   → 得出「新的慢 4.5 倍」。
+2. 第二次修正了 SELECT，但旧形状结尾 `rollback()`、新形状 `commit()` → 又得出
+   「commit 是瓶颈」。
+
+逐阶段插桩后才看到真相：
+
+```
+SELECT live rows                   131.94 ms
+group by namespace                   0.02 ms
+one LIST per namespace              17.20 ms
+group pods by label                  0.01 ms
+_absorb_observation(test)            3.35 ms
+_absorb_observation(probe2)          2.56 ms
+commit                               1.48 ms
+```
+
+**commit 只要 1.48 ms，SELECT 要 131.94 ms。** 在 2 个实例上这次合并每 tick 只省下约
+9 ms（一次 LIST 的边际成本）——它的收益随实例数增长，在 2 个实例上量不出来。
+
+#### 🔴 由此查出的真问题：加载一个 `Instance` 实体要 ~130 ms（**未修**）
+
+顺着那个 131.94 ms 查下去，分层定位（同一份数据、同一个查询）：
+
+| 路径 | 中位耗时 |
+| --- | --- |
+| 裸 `sqlite3`（开+查+关） | 1.38 ms |
+| `engine.connect()` + `text()` | 0.62 ms |
+| 引擎 + ORM `select(Instance)` | 1.22 ms |
+| **AsyncSession + `select(Instance)`** | **126.75 ms** |
+| AsyncSession + `text("SELECT 1")` | 0.38 ms |
+| AsyncSession + `select(Instance.id)` | 0.57 ms |
+
+不是锁竞争（**孤立副本一样慢**，中位 136 ms）、不是异步包装（`SELECT 1` 0.38 ms）、
+不是 SQL（编译出的语句只有 6 个 JOIN，返回 2 行、**1.79 ms**）。
+
+真因是**级联的 `selectin` 预加载**：`Instance` 的 4 个 `lazy="joined"` 关系指向
+`Workspace` / `User` / `ResourceGroup` / `ResourceSpec`，而这些实体各自又带一批 `selectin`
+关系（`User.group_links` / `role_links` / `ssh_keys` / `api_tokens` / `workspace_memberships`、
+`Workspace.members` / `resource_grants`、`ResourceGroup.specs` / `limits`）。**加载一行实例
+会连带发出约 10 条额外的 `SELECT … IN (…)`。**
+
+用户可见的代价（本机实测，8 次取样中位）：
+
+```
+GET /healthz                    1.1 ms
+GET /instances                170.7 ms
+GET /instances/11             159.7 ms    ← 单个实例也要这么久
+GET /users                     76.4 ms
+GET /workspaces                85.3 ms
+```
+
+**本次没有一并修**：把那些 `selectin` 改成按需加载会改变整个 API 的加载语义（哪些序列化器
+依赖它们要逐个审），而且它与「减少集群 LIST」是两件独立的事。**建议的下一步**是在调用点
+显式收窄（`reconcile_all()` 只需要 `instance.workspace.k8s_namespace` 与行自身的列，用
+`noload()` 关掉 owner / resource_group / resource_spec 以及 workspace 自己的 eager 关系），
+而不是改模型默认值。
+
+**本轮的其余验证**：门禁 `ruff check .` / `ruff format --check .`（166 文件）/ `mypy app`
+（135 文件）全部通过；`pytest` **741 passed**（上轮 738 + 新增 3）；真集群上第二个实例经
+新的批量对账**在无人干预下到达 `running`**，随后已删除，集群只剩实例 11、无残留工作负载。
+
+---
+
 ## 14. 已知问题与陷阱
 
 ### 14.1 安全（最高优先级）
@@ -2565,6 +2862,8 @@ Vuex `namespace: true` 拼写错误、`Admin/User.vue` 为 0 字节、
 | 命名空间 / 标签命名规则 | `backend/app/k8s/naming.py` |
 | 工作空间与资源 API | `backend/app/api/v1/workspaces.py`、`backend/app/api/v1/resources.py` |
 | Celery | `backend/app/workers/celery_app.py` |
+| **状态同步 / 对账（唯一把观测状态写回数据库的路径）** | `backend/app/services/reconcile.py`（`sweep_all`，两个调用者共用）、`backend/app/workers/sweeper.py`（进程内，`RECONCILE_INTERVAL_SECONDS` 默认 5 秒）、`backend/app/workers/tasks/reconcile.py`（Celery beat，30 秒）、`backend/app/services/instances.py`（`reconcile_all` / `reconcile_instance` / `expire_overdue`，**批处理入口自己 commit**） |
+| 实例状态实时刷新（前端） | `frontend/src/views/InstancesView.vue`（未安定状态时 3 秒自适应轮询 + `visibilitychange`） |
 | 前端主题 | `frontend/src/plugins/vuetify.ts` |
 | 设计令牌 | `frontend/src/styles/tokens.scss` |
 | 全局样式覆盖 | `frontend/src/styles/overrides.scss` |

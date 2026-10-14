@@ -21,6 +21,7 @@ from typing import Any, Protocol, runtime_checkable
 from app.core.errors import KubernetesError
 from app.k8s.naming import (
     GROUP_LABEL,
+    INSTANCE_LABEL,
     MANAGED_LABEL,
     MANAGED_LABEL_VALUE,
     WORKSPACE_LABEL,
@@ -417,6 +418,19 @@ class PodInfo:
     #: 5m0s restarting failed container=main pod=…`"). Matching on that would break
     #: the first time its wording changed.
     reason: str | None = None
+    #: Value of the platform's own ``wl-instance`` label, when the pod has one.
+    #:
+    #: Carried because the batch reconciler lists every managed pod in a namespace
+    #: in one call and then has to hand each pod back to its own row, so the label
+    #: has to survive this reduction. The pod's name cannot do that job: it is the
+    #: Deployment's name plus a ReplicaSet hash and a random suffix
+    #: (``wl-test-11-5894b9bd87-87rjt``) and Kubernetes truncates long names, so
+    #: parsing it would misattribute precisely the instances with the longest names.
+    #: ``wl-instance`` is in the pod template's labels, so every pod the platform
+    #: creates has it; pods from the platform's *other* workloads (task Jobs, which
+    #: are managed but belong to no instance) do not, which is exactly how a batch
+    #: listing tells the two apart.
+    instance_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -875,7 +889,16 @@ class FakeK8sGateway:
             labels = self.deployments.get(deployment_key)
             if wanted and (labels is None or not _labels_match(labels.labels, wanted)):
                 continue
-            found.append(pod)
+            # In a cluster the label is on the pod itself; this fake keeps it on the
+            # owning Deployment, which is where `apply_deployment` put it. Filling it
+            # in here is what lets the batch reconciler and the single-instance one
+            # read the same field from the same place.
+            found.append(
+                replace(
+                    pod,
+                    instance_name=(labels.labels.get(INSTANCE_LABEL) if labels else None),
+                )
+            )
         return found
 
     def apply_job(self, spec: JobSpec) -> None:

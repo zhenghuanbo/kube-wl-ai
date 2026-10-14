@@ -66,6 +66,24 @@ class Settings(BaseSettings):
     #: plus at most one patch per node that actually moved.
     node_sync_interval_seconds: float = 120.0
 
+    #: How often the API process reconciles observed cluster state into the
+    #: database, when it is the one doing it.
+    #:
+    #: Five seconds, because this interval *is* the delay a user sees between
+    #: pressing 创建 and the row saying 运行中 — and it is also the delay before a
+    #: crashed container stops being reported as starting, and before an instance
+    #: past its runtime cap is actually stopped. A sweep is one ``list_pods`` per
+    #: live instance, so the cost scales with how much is running rather than with
+    #: how often it runs. Set to ``0`` to turn the in-process reconciler off and
+    #: let the Celery beat task be the only sweeper — which is what a multi-worker
+    #: deployment should do, so that there is one sweeper rather than one per
+    #: process.
+    #:
+    #: Above roughly a hundred concurrent instances a sweep every five seconds
+    #: starts to be a load on the API server in its own right; at that point sweep
+    #: unsettled instances on this interval and settled ones far less often.
+    reconcile_interval_seconds: float = 5.0
+
     # --- Authentication ------------------------------------------------------
     auth_providers: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["local"])
 

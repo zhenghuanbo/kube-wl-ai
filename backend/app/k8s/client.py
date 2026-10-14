@@ -41,7 +41,7 @@ from app.k8s.gateway import (
     WorkloadRefs,
     WorkloadSpec,
 )
-from app.k8s.naming import MANAGED_LABEL, MANAGED_LABEL_VALUE, is_managed_namespace
+from app.k8s.naming import INSTANCE_LABEL, MANAGED_LABEL, MANAGED_LABEL_VALUE, is_managed_namespace
 from app.models.enums import NetworkType
 
 logger = get_logger(__name__)
@@ -276,6 +276,9 @@ def _pod_info(pod: Any) -> PodInfo:
         restart_count=restarts,
         message=message,
         reason=reason,
+        # The label, not the name: it is the only reliable way back to the owning
+        # row when a listing covers several instances at once.
+        instance_name=(pod.metadata.labels or {}).get(INSTANCE_LABEL),
     )
 
 

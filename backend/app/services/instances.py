@@ -33,7 +33,12 @@ from app.core.errors import BadRequestError, ConflictError, NotFoundError, Quota
 from app.core.logging import get_logger
 from app.k8s import InstanceObjects, K8sError, K8sGateway, run_gateway
 from app.k8s.gateway import PodInfo, VolumeMountSpec, WorkloadRefs
-from app.k8s.naming import INSTANCE_LABEL, WORKSPACE_LABEL, is_managed_workload
+from app.k8s.naming import (
+    INSTANCE_LABEL,
+    MANAGED_LABEL_SELECTOR,
+    WORKSPACE_LABEL,
+    is_managed_workload,
+)
 from app.k8s.workloads import SSH_PORT, build_instance_objects, ide_base_path
 from app.models.enums import (
     IdeType,
@@ -554,7 +559,7 @@ async def _apply(
         await run_gateway(gateway.apply_service, objects.ide_service)
 
     # No Ingress is applied any more: the IDE is published by the platform's own
-    # reverse proxy (``app/api/x/proxy.py``) instead of by a cluster ingress
+    # reverse proxy (``app/api/ide/proxy.py``) instead of by a cluster ingress
     # controller, so that the user never leaves the platform's origin. The
     # ``k8s_ingress`` column is left exactly as it was rather than cleared, so an
     # instance built before this change still names the object the delete path has
@@ -715,33 +720,40 @@ async def update_instance(
 # ---------------------------------------------------------------------------
 # Reconciliation
 # ---------------------------------------------------------------------------
-async def reconcile_instance(
-    session: AsyncSession, instance: Instance, gateway: K8sGateway
-) -> Instance:
-    """Pull the observed pod state into the row.
+def _has_a_pod(instance: Instance) -> bool:
+    """Whether this instance is supposed to have a pod right now.
 
-    Only instances that are supposed to have a pod are inspected. A stopped
-    instance has no pod by design, and asking about it would flip it to ``error``
-    on every sweep.
+    Only these are worth asking the cluster about. A stopped instance has no pod by
+    design, and asking would flip it to ``error`` on every sweep.
     """
-    if not instance.is_active or instance.status in (
-        InstanceStatus.STOPPED,
-        InstanceStatus.DELETING,
-    ):
-        return instance
+    return bool(
+        instance.is_active
+        and instance.k8s_deployment
+        and instance.status not in (InstanceStatus.STOPPED, InstanceStatus.DELETING)
+    )
 
-    namespace = instance_workspace_ns(instance)
-    if not instance.k8s_deployment:
-        return instance
 
-    selector = f"{INSTANCE_LABEL}={instance.name}"
-    try:
-        pods = await run_gateway(gateway.list_pods, namespace, selector)
-    except K8sError as exc:
-        instance.status_message = f"状态查询失败：{exc}"
-        await session.flush()
-        return instance
+async def _mark_query_failed(session: AsyncSession, instance: Instance, exc: Exception) -> Instance:
+    """Record that the cluster could not be read, without inventing a status.
 
+    Deliberately does not touch ``status``: a failed *query* is not an observation,
+    and a row that was ``running`` a moment ago is far more likely to still be
+    running than to have become an error.
+    """
+    instance.status_message = f"状态查询失败：{exc}"
+    await session.flush()
+    return instance
+
+
+async def _absorb_observation(
+    session: AsyncSession, instance: Instance, pods: list[PodInfo]
+) -> Instance:
+    """Fold the pods observed for one instance into its row.
+
+    Takes the pods instead of fetching them, so that a caller which listed a whole
+    namespace at once can serve many instances from that one listing. Performs no
+    cluster access of its own.
+    """
     if not pods:
         if instance.status in (InstanceStatus.RUNNING, InstanceStatus.CREATING):
             instance.status = InstanceStatus.CREATING
@@ -749,6 +761,8 @@ async def reconcile_instance(
         await session.flush()
         return instance
 
+    # Newest first, as `list_pods` returns them: during a rollout the pod that is
+    # coming up is the one worth reporting, and the one on its way out is not.
     pod = pods[0]
     previous = instance.status
     instance.pod_name = pod.name
@@ -765,12 +779,67 @@ async def reconcile_instance(
             current=instance.status.value,
         )
     await session.flush()
+    # Reloads server-side columns (`updated_at` has an `onupdate`). The HTTP
+    # reconcile endpoint serialises this very object into its response, so the
+    # refreshed value is not cosmetic there.
     await session.refresh(instance)
     return instance
 
 
+async def reconcile_instance(
+    session: AsyncSession, instance: Instance, gateway: K8sGateway
+) -> Instance:
+    """Pull one instance's observed pod state into its row.
+
+    One instance, one listing — used by the HTTP reconcile endpoint, where there is
+    a single instance to ask about. The periodic sweep uses :func:`reconcile_all`,
+    which serves a whole namespace from one listing instead. Both end in
+    :func:`_absorb_observation`, so the two cannot drift into disagreeing about what
+    a given pod means.
+    """
+    if not _has_a_pod(instance):
+        return instance
+
+    namespace = instance_workspace_ns(instance)
+    selector = f"{INSTANCE_LABEL}={instance.name}"
+    try:
+        pods = await run_gateway(gateway.list_pods, namespace, selector)
+    except K8sError as exc:
+        return await _mark_query_failed(session, instance, exc)
+
+    return await _absorb_observation(session, instance, pods)
+
+
 async def reconcile_all(session: AsyncSession, gateway: K8sGateway, *, limit: int = 200) -> int:
-    """Reconcile every live instance. Used by the periodic worker and by hand."""
+    """Reconcile every live instance, **commit** the result, and report how many moved.
+
+    Returns the number of instances whose status actually changed, not the number
+    examined. That is the meaning :func:`app.services.tasks.reconcile_all` already
+    had, and it is the only one that lets a caller's log line — or the CLI's printed
+    summary — be true. Counting "examined" is how ``app/cli.py`` came to print
+    "实例 N 个状态变化" over a sweep that changed nothing.
+
+    The commit is the point of this function, not a detail of it. Everything it
+    calls only flushes, and every caller opened a session with
+    ``async with factory() as session:`` — whose exit *closes* the session, and
+    closing rolls back an uncommitted transaction. So every sweep read the cluster
+    correctly, wrote the answer, and threw it away: instance statuses stayed
+    ``creating`` forever, and the runtime cap in :func:`expire_overdue` was never
+    enforced even once. The task reconciler looked healthy only because
+    :func:`app.services.tasks.reconcile_all` happens to commit for itself.
+
+    So a batch entry point owns its own commit. A caller that wants to compose
+    this into a longer transaction should use :func:`reconcile_instance` directly,
+    which stays flush-only on purpose.
+
+    The sweep lists pods once per *namespace*, not once per instance. That turns the
+    cost of a sweep from "one API server round trip per running instance, each one
+    re-serialising a pod list that Python then rebuilds object by object" into "one
+    per namespace in use" — a much smaller number, and one that grows far more
+    slowly than the number of instances. Pods are handed back to their rows by the
+    ``wl-instance`` label, which is an unambiguous key here: a workspace's
+    ``k8s_namespace`` is unique, and so is an instance name within a workspace.
+    """
     rows = list(
         (
             await session.scalars(
@@ -784,16 +853,54 @@ async def reconcile_all(session: AsyncSession, gateway: K8sGateway, *, limit: in
             )
         ).all()
     )
+
+    by_namespace: dict[str, list[Instance]] = {}
     for instance in rows:
-        await reconcile_instance(session, instance, gateway)
-    return len(rows)
+        if _has_a_pod(instance):
+            by_namespace.setdefault(instance_workspace_ns(instance), []).append(instance)
+
+    changed = 0
+    for namespace, group in by_namespace.items():
+        try:
+            pods = await run_gateway(gateway.list_pods, namespace, MANAGED_LABEL_SELECTOR)
+        except K8sError as exc:
+            # One namespace failing to list is not the sweep failing: every other
+            # instance still gets observed. The message is written per instance
+            # because the instance's own page is where it is read.
+            for instance in group:
+                await _mark_query_failed(session, instance, exc)
+            continue
+
+        by_instance: dict[str, list[PodInfo]] = {}
+        for pod in pods:
+            # Managed, but not an instance: a task Job's pod. It belongs to a row in
+            # another table, and this sweep has nothing to say about it.
+            if pod.instance_name is not None:
+                by_instance.setdefault(pod.instance_name, []).append(pod)
+
+        for instance in group:
+            before = instance.status
+            # Grouping preserved the newest-first order `list_pods` returns, so
+            # `pods[0]` is still the pod a single-instance listing would have picked.
+            await _absorb_observation(session, instance, by_instance.get(instance.name, []))
+            if instance.status != before:
+                changed += 1
+
+    await session.commit()
+    return changed
 
 
 async def expire_overdue(session: AsyncSession, gateway: K8sGateway, *, limit: int = 200) -> int:
-    """Stop instances whose deadline has passed.
+    """Stop instances whose deadline has passed, and **commit** the stop.
 
     Enforced here rather than only in the UI: a runtime cap the user can ignore
     by leaving a tab open is not a cap.
+
+    The commit matters for the same reason as in :func:`reconcile_all`, and the
+    consequence of its absence was worse: a stop that is rolled back leaves the
+    deployment scaled to zero in the cluster while the row still says ``running``,
+    so the next sweep sees no pods, concludes the instance is still coming up, and
+    the instance never stops and never expires.
     """
     now = datetime.now(UTC)
     rows = list(
@@ -823,6 +930,7 @@ async def expire_overdue(session: AsyncSession, gateway: K8sGateway, *, limit: i
         await session.flush()
         stopped += 1
 
+    await session.commit()
     if stopped:
         logger.info("instances_expired", count=stopped)
     return stopped

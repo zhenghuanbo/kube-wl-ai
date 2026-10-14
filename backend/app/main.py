@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +22,7 @@ from app.core.version import APP_NAME, VERSION
 from app.db.session import dispose_engine, init_engine
 from app.middleware.audit import AuditMiddleware
 from app.middleware.request_context import REQUEST_ID_HEADER, RequestContextMiddleware
+from app.workers.sweeper import start_reconciler
 
 logger = get_logger(__name__)
 
@@ -49,12 +51,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
         logger.info("startup", app_env=settings.app_env, version=VERSION)
         init_engine(settings)
-        yield
-        # Before the engine: an IDE request still streaming would otherwise find
-        # its database session gone when it next needs one.
-        await close_ide_http_client()
-        await dispose_engine()
-        logger.info("shutdown")
+        # Started after the engine, because its first tick opens a session. On a
+        # deployment that runs Celery, `RECONCILE_INTERVAL_SECONDS=0` makes this a
+        # no-op and leaves the beat task as the only sweeper.
+        reconciler = start_reconciler(settings)
+        try:
+            yield
+        finally:
+            if reconciler is not None:
+                reconciler.cancel()
+                # Awaiting the cancellation is what guarantees no tick is still
+                # mid-sweep — and about to open a session — while the engine is
+                # disposed below.
+                with suppress(asyncio.CancelledError):
+                    await reconciler
+            # Before the engine: an IDE request still streaming would otherwise
+            # find its database session gone when it next needs one.
+            await close_ide_http_client()
+            await dispose_engine()
+            logger.info("shutdown")
 
     app = FastAPI(
         title=f"{APP_NAME} API",

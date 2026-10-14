@@ -26,6 +26,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload, raiseload
 
 from app.auth import policy
 from app.core.config import Settings
@@ -218,6 +219,56 @@ async def authorized_keys(session: AsyncSession, user_id: int) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Loader options
+# ---------------------------------------------------------------------------
+# Loading one ``Instance`` costs far more than the row it returns, and the cost is
+# in the model's eager loaders rather than in the query.
+#
+# ``Instance`` joins its workspace, owner, resource group and resource spec
+# (``lazy="joined"``) — rightly, since the API renders all four. But each of those
+# entities carries eager *collections* of its own, and they cascade: a user's group
+# links, role links, SSH keys, API tokens and workspace memberships; a workspace's
+# members and resource grants; a resource group's specs and limits. Each one is a
+# separate ``SELECT ... IN (...)``, and the rows those return have eager loaders
+# too. Measured against the live database, fetching a single instance emits **72
+# statements and takes 132 ms** — for one row. The same query on a raw connection
+# takes 1.2 ms.
+#
+# That tax is paid by every sweep tick and by every request that lists or fetches an
+# instance (``GET /instances`` measured 170 ms).
+#
+# So each query states what it reads and refuses the rest, rather than the model
+# changing its defaults: those collections are used elsewhere on purpose (the
+# SSH-key endpoints read ``user.ssh_keys``), and making them non-eager would turn
+# every such use into an async lazy-load failure. ``raiseload`` doubles as a warning
+# system — a caller that starts reading something it did not declare gets
+# ``InvalidRequestError`` instead of a silent ``None``.
+#
+# Both shapes below come down to a single statement and about 1.2-1.5 ms.
+
+#: What a reconcile sweep reads. Every function on the sweep path — ``_has_a_pod``,
+#: ``instance_workspace_ns``, ``_absorb_observation``, ``_mark_query_failed``, and
+#: the ``stop_instance`` that :func:`expire_overdue` calls — reads the instance's own
+#: columns plus ``workspace.k8s_namespace``, and nothing else.
+_SWEEP_LOAD = (
+    raiseload("*"),
+    joinedload(Instance.workspace),
+)
+
+#: What the instance serialisers read. ``InstanceSummary.from_instance`` — which
+#: ``InstanceDetail`` inherits rather than overrides — reads ``workspace.k8s_namespace``,
+#: ``owner.username``, ``owner.display_name`` and ``resource_group.display_name``.
+#: Four scalar columns, so three relationships stay loaded and the resource spec is
+#: refused along with every collection hanging off the other three.
+_READ_LOAD = (
+    raiseload("*"),
+    joinedload(Instance.workspace),
+    joinedload(Instance.owner),
+    joinedload(Instance.resource_group),
+)
+
+
+# ---------------------------------------------------------------------------
 # Reads
 # ---------------------------------------------------------------------------
 async def list_instances(
@@ -233,7 +284,11 @@ async def list_instances(
     offset: int = 0,
     limit: int = 20,
 ) -> Page[Instance]:
-    stmt = select(Instance).order_by(Instance.created_at.desc(), Instance.id.desc())
+    stmt = (
+        select(Instance)
+        .options(*_READ_LOAD)
+        .order_by(Instance.created_at.desc(), Instance.id.desc())
+    )
     stmt = policy.scope_filter(stmt, Instance, actor)
 
     if not include_inactive:
@@ -256,7 +311,7 @@ async def list_instances(
 
 
 async def get_instance(session: AsyncSession, actor: User, instance_id: int) -> Instance:
-    instance = await session.get(Instance, instance_id)
+    instance = await session.get(Instance, instance_id, options=_READ_LOAD)
     if instance is None:
         raise NotFoundError("实例不存在", code="instance_not_found")
     policy.ensure_object_access(actor, instance)
@@ -782,7 +837,26 @@ async def _absorb_observation(
     # Reloads server-side columns (`updated_at` has an `onupdate`). The HTTP
     # reconcile endpoint serialises this very object into its response, so the
     # refreshed value is not cosmetic there.
-    await session.refresh(instance)
+    #
+    # The attributes are named because a bare ``refresh()`` reloads the row through
+    # the *mapper's* loaders, re-running the eager cascade the query above was
+    # narrowed to avoid — eighteen statements and 20 ms for this one row, and once
+    # per instance in the batch path. A refresh is cheap (one statement) only when
+    # the related rows are already in the identity map, which after a narrowed
+    # select they are not. So narrowing the select without narrowing this would move
+    # the cascade from once per sweep to once per instance rather than remove it.
+    # Naming the attributes keeps the reload to the columns this function writes.
+    await session.refresh(
+        instance,
+        attribute_names=[
+            "status",
+            "status_message",
+            "pod_name",
+            "node_name",
+            "last_seen_at",
+            "updated_at",
+        ],
+    )
     return instance
 
 
@@ -844,6 +918,7 @@ async def reconcile_all(session: AsyncSession, gateway: K8sGateway, *, limit: in
         (
             await session.scalars(
                 select(Instance)
+                .options(*_SWEEP_LOAD)
                 .where(
                     Instance.is_active.is_(True),
                     Instance.status.in_(LIVE_STATUSES),
@@ -907,6 +982,7 @@ async def expire_overdue(session: AsyncSession, gateway: K8sGateway, *, limit: i
         (
             await session.scalars(
                 select(Instance)
+                .options(*_SWEEP_LOAD)
                 .where(
                     Instance.is_active.is_(True),
                     Instance.expires_at.is_not(None),

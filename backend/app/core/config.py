@@ -72,10 +72,12 @@ class Settings(BaseSettings):
     #: Five seconds, because this interval *is* the delay a user sees between
     #: pressing 创建 and the row saying 运行中 — and it is also the delay before a
     #: crashed container stops being reported as starting, and before an instance
-    #: past its runtime cap is actually stopped. A sweep is one ``list_pods`` per
-    #: live instance, so the cost scales with how much is running rather than with
-    #: how often it runs. Set to ``0`` to turn the in-process reconciler off and
-    #: let the Celery beat task be the only sweeper — which is what a multi-worker
+    #: past its runtime cap is actually stopped. A sweep lists pods once per
+    #: *namespace* in use and loads every row it needs in one query, so its cost
+    #: tracks the number of namespaces rather than the number of instances.
+    #: Measured at about 19 ms for one instance, most of which is the listing
+    #: itself. Set to ``0`` to turn the in-process reconciler off and let the
+    #: Celery beat task be the only sweeper — which is what a multi-worker
     #: deployment should do, so that there is one sweeper rather than one per
     #: process.
     #:

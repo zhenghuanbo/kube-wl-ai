@@ -2716,15 +2716,81 @@ GET /users                     76.4 ms
 GET /workspaces                85.3 ms
 ```
 
-**本次没有一并修**：把那些 `selectin` 改成按需加载会改变整个 API 的加载语义（哪些序列化器
+**当时没有一并修**：把那些 `selectin` 改成按需加载会改变整个 API 的加载语义（哪些序列化器
 依赖它们要逐个审），而且它与「减少集群 LIST」是两件独立的事。**建议的下一步**是在调用点
-显式收窄（`reconcile_all()` 只需要 `instance.workspace.k8s_namespace` 与行自身的列，用
-`noload()` 关掉 owner / resource_group / resource_spec 以及 workspace 自己的 eager 关系），
-而不是改模型默认值。
+显式收窄（`reconcile_all()` 只需要 `instance.workspace.k8s_namespace` 与行自身的列），而不是
+改模型默认值 —— 这一步随后就做了，见 ⑥。
 
 **本轮的其余验证**：门禁 `ruff check .` / `ruff format --check .`（166 文件）/ `mypy app`
 （135 文件）全部通过；`pytest` **741 passed**（上轮 738 + 新增 3）；真集群上第二个实例经
 新的批量对账**在无人干预下到达 `running`**，随后已删除，集群只剩实例 11、无残留工作负载。
+
+#### ⑥ 收窄实例加载：一个查询从 72 条语句降到 1 条
+
+**做法**：在每个查询点声明它真正读的东西，其余一律拒绝。新增两个选项元组：`_SWEEP_LOAD`
+（对账用，只放行 `workspace`）与 `_READ_LOAD`（序列化用，放行 `workspace` / `owner` /
+`resource_group`），两者都以 `raiseload("*")` 开头，再显式 `joinedload()` 放行需要的那个。
+应用到四处：`list_instances`、`get_instance`（`session.get(..., options=...)`）、
+`reconcile_all`、`expire_overdue`。
+
+**为什么不改模型默认值**：那些集合在别处是**有意**用的（SSH 密钥接口就读 `user.ssh_keys`）。
+把 `selectin` 改成惰性，会把每一处这样的使用变成 async 惰性加载失败。`raiseload` 顺带成了
+告警机制：谁开始读一个他没声明的属性，会拿到 `InvalidRequestError`，而不是静默的 `None`。
+
+**踩到的两个坑**（都靠实测才发现，读代码看不出来）：
+
+1. **`raiseload` 链式调用会把路径移到子级**。`joinedload(Instance.owner).raiseload(User.ssh_keys)
+   .raiseload(User.api_tokens)` 直接报 `"User.api_tokens" does not link from relationship
+   "User.ssh_keys"` —— 同级多个选项必须写成 `.options(raiseload(a), raiseload(b), ...)`。
+2. **逐条 `raiseload` 只部分生效**。按 9 个集合逐个写，语句数只从 72 降到 14
+   （`user_groups` / `user_roles` / `ssh_keys` / `api_tokens` 仍在发查询）；换成
+   `raiseload("*")` 通配 + 显式放行后**降到 1 条**。所以最终形状里没有任何逐条的 `raiseload`。
+
+**真实函数前后对比**（同一份数据、直接调用服务函数，语句数由 `before_cursor_execute` 计数）：
+
+| 调用 | 语句数 | 中位耗时 | 倍数 |
+| --- | --- | --- | --- |
+| `reconcile_all()` 旧 | 74 | 151.00 ms | |
+| `reconcile_all()` 新 | **3** | **18.99 ms** | **8.0×** |
+| `list_instances()` 旧 | 73 | 123.60 ms | |
+| `list_instances()` 新 | **2** | **2.13 ms** | **58×** |
+
+HTTP 层（本机 10 次取样中位；`/healthz` 与两个未改动的接口作对照）：
+
+```
+GET /healthz                    1.1 ->   1.1 ms   (  1.0x)   对照：无 ORM
+GET /instances                170.7 ->  15.7 ms   ( 10.9x)
+GET /instances/11             159.7 ->  14.2 ms   ( 11.2x)
+GET /users                     76.4 ->  72.9 ms   (  1.0x)   未动
+GET /workspaces                85.3 ->  84.0 ms   (  1.0x)   未动
+```
+
+详情字段抽查确认收窄没有削掉序列化需要的数据：`workspaceName='wl-hpc-hpc'`
+`ownerUsername='zhenghuanbo'` `resourceGroupName='cpu'` `idePath='/x/zhenghuanbo/11/lab'`。
+（`resourceGroupName` 取的是 `resource_group.display_name` —— 所以 `resource_group` 必须留下。）
+
+**顺带修掉 batch 路径里按实例重复的那次级联**：`_absorb_observation()` 的
+`session.refresh(instance)` 走的是**映射器默认**策略，于是每个实例都要再来一遍级联（单实例
+就 18 条语句，且随实例数线性放大）。改成 `refresh(instance, attribute_names=[...])`，只重载
+该函数真正写的那几列，`reconcile_all()` 因此从 36.94 ms 再降到 18.99 ms。**这一步很关键**：
+收窄了 SELECT 却不收窄 `refresh`，等于把级联从「每 tick 一次」变成「每实例一次」，规模越大
+越糟。
+
+**`get_instance()` 在进程内测不出来**：单独测它是 0 条语句 / 0.05 ms —— 因为同一个会话里
+前一次 `list_instances()` 已经把它放进 identity map 了。又一个「同一个会话证明不了什么」的
+例子，它只能从 HTTP 层测（159.7 → 14.2 ms）。
+
+**还没收窄的同类加载点**（本次按约定只做 A+B）：`api/ide/proxy.py:285`（每次 IDE 请求都走）、
+`services/quota_guard.py:70`、`services/storages.py:841`、`services/usage.py:295`，以及
+`create_instance()` 里的重名检查。它们各自要读的字段不同，需要分别核实后再各自声明。
+
+**验证**：门禁全绿（`ruff check` / `ruff format --check` 166 文件 / `mypy app` 135 文件）；
+`pytest` **745 passed**（741 + 新增 4）。新增的 `tests/test_instance_load_shape.py` 是回归守卫：
+它数语句而不是测时间，上限设 8（收窄后实测 2 和 3，回退后是 73）。**并且验证过这个守卫
+不是装饰**：临时把 `_READ_LOAD` / `_SWEEP_LOAD` 换成空元组复跑，两项分别报出
+`statements without _READ_LOAD: 73 (ceiling 8)` 与 `73`，即真的会失败；验证用的临时文件已删除。
+另有 `test_the_read_shape_still_carries_what_the_detail_page_shows`（防止收窄过头）与
+`test_the_sweep_shape_refuses_an_attribute_it_never_declared`（钉住「误读要响亮失败」这一属性）。
 
 ---
 
@@ -2864,6 +2930,7 @@ Vuex `namespace: true` 拼写错误、`Admin/User.vue` 为 0 字节、
 | Celery | `backend/app/workers/celery_app.py` |
 | **状态同步 / 对账（唯一把观测状态写回数据库的路径）** | `backend/app/services/reconcile.py`（`sweep_all`，两个调用者共用）、`backend/app/workers/sweeper.py`（进程内，`RECONCILE_INTERVAL_SECONDS` 默认 5 秒）、`backend/app/workers/tasks/reconcile.py`（Celery beat，30 秒）、`backend/app/services/instances.py`（`reconcile_all` / `reconcile_instance` / `expire_overdue`，**批处理入口自己 commit**） |
 | 实例状态实时刷新（前端） | `frontend/src/views/InstancesView.vue`（未安定状态时 3 秒自适应轮询 + `visibilitychange`） |
+| **实例加载策略（收窄 eager 级联：一个查询 72 条语句 → 1 条）** | `backend/app/services/instances.py`（`_SWEEP_LOAD` / `_READ_LOAD`，都以 `raiseload("*")` 开头再显式放行）、回归守卫 `backend/tests/test_instance_load_shape.py` |
 | 前端主题 | `frontend/src/plugins/vuetify.ts` |
 | 设计令牌 | `frontend/src/styles/tokens.scss` |
 | 全局样式覆盖 | `frontend/src/styles/overrides.scss` |

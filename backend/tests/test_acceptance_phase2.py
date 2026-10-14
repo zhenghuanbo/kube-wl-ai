@@ -650,6 +650,7 @@ def _fullest_instance() -> InstanceObjects:
     return build_instance_objects(
         instance_id=1,
         instance_name="fullest",
+        owner_username="probe",
         namespace="wl-probe",
         workspace_labels={"wl-managed": "true"},
         image="library/ubuntu-dev:24.04",
@@ -664,7 +665,6 @@ def _fullest_instance() -> InstanceObjects:
         authorized_keys="ssh-ed25519 AAAAprobe probe@wl\n",
         node_selector={},
         tolerations=(),
-        ingress_host="",
     )
 
 

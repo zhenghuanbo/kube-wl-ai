@@ -14,7 +14,6 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, status
 
 from app.auth.policy import PermissionCheck
-from app.auth.tokens import create_ide_ticket
 from app.core.config import Settings
 from app.core.deps import AppSettings, CurrentUser, DbSession, require
 from app.k8s import get_gateway
@@ -148,9 +147,7 @@ async def create_instance(
     Validation (ownership, pool grant, quota) happens before anything reaches
     the cluster, so a rejected request never leaves a partial workload behind.
     """
-    instance = await instance_service.create_instance(
-        session, actor, payload, settings, get_gateway()
-    )
+    instance = await instance_service.create_instance(session, actor, payload, get_gateway())
     return _detail(instance, settings)
 
 
@@ -254,7 +251,6 @@ async def reconcile_instance(
         instance,
         workspace,
         pool,
-        settings,
         get_gateway(),
         replicas=0 if instance.status is InstanceStatus.STOPPED else 1,
     )
@@ -300,11 +296,21 @@ async def ide_access(
     _: Annotated[PermissionCheck, CanExec],
     instance_id: int,
 ) -> IdeAccess:
-    """Mint the short-lived ticket that opens the instance's web IDE.
+    """Where to open the instance's web IDE.
 
-    The ticket is scoped to this instance and namespace and expires in minutes,
-    so a URL pasted into a chat becomes useless almost immediately. It is a
-    distinct token *type*, so it can never be used as an API credential.
+    The URL is a path on the platform's own origin: the frontend proxies ``/x``
+    to the backend, which forwards to the instance's ClusterIP. Nothing here has
+    to be reachable from the browser directly.
+
+    **It carries no credential.** This used to mint a short-lived ticket and
+    append it as ``?ticket=``, and the plan was for the ingress to verify it —
+    but no verification was ever written (``decode_ide_ticket`` is called only
+    from tests), so the ticket was decoration. It is not minted here any more,
+    because a credential nothing checks is worse than none: it looks like
+    protection, it leaks into browser history and logs, and it invites the
+    assumption that the route behind it is guarded. It is not, yet — see the note
+    on :func:`app.api.x.proxy.ide_proxy` for what that means and where the check
+    belongs when it is added.
     """
     from app.core.errors import BadRequestError
 
@@ -312,17 +318,7 @@ async def ide_access(
     if instance.ide_type is IdeType.NONE:
         raise BadRequestError("该实例未启用 Web IDE", code="instance_has_no_ide")
 
-    ticket, expires_at = create_ide_ticket(
-        user_id=actor.id,
-        username=actor.username,
-        instance_id=instance.id,
-        namespace=instance_service.instance_workspace_ns(instance),
-        settings=settings,
-    )
-    from datetime import UTC, datetime
-
     path = instance_service.ide_path(instance)
-    return IdeAccess(
-        url=f"{path}?ticket={ticket}",
-        expires_in=int((expires_at - datetime.now(UTC)).total_seconds()),
-    )
+    if path is None:  # pragma: no cover - `ide_type` was just checked
+        raise BadRequestError("该实例未启用 Web IDE", code="instance_has_no_ide")
+    return IdeAccess(url=path)

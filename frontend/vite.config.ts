@@ -111,6 +111,11 @@ export default defineConfig(({ mode }) => {
         // needed to reach it from another machine.
         '/api': { target: devProxyTarget, changeOrigin: true },
         '/ws': { target: devProxyTarget, changeOrigin: true, ws: true },
+        // The instance IDE proxy. `ws: true` is required, not optional: a
+        // Jupyter kernel channel, the code-server extension host and the whole
+        // of ttyd's terminal are websockets, so without it a notebook would load
+        // and then refuse to run a cell.
+        '/x': { target: devProxyTarget, changeOrigin: true, ws: true },
       },
     },
     build: {

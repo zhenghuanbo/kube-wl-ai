@@ -379,6 +379,25 @@ class JobInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class ServiceInfo:
+    """Just enough of a Service to send traffic to it.
+
+    ``cluster_ip`` is the point of this type: the IDE proxy forwards to a Service
+    rather than to a pod, because a ClusterIP is stable for the instance's whole
+    life while a pod's IP changes every time the container restarts. Reading it
+    back is cheaper than predicting it, and the alternative — looking up the pod by
+    label on every asset request — would mean one API call per file the browser
+    loads.
+    """
+
+    name: str
+    namespace: str
+    #: Empty for a headless Service, and ``None`` while the cluster has not
+    #: assigned one yet.
+    cluster_ip: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class PodInfo:
     """The observed state of one pod."""
 
@@ -498,7 +517,12 @@ class K8sGateway(Protocol):
     def apply_service(self, spec: ServiceSpec) -> ServiceSpec:
         """Create or patch a Service and return it with any allocated NodePort."""
 
-    def apply_ingress(self, spec: IngressSpec) -> None: ...
+    def read_service(self, namespace: str, name: str) -> ServiceInfo | None:
+        """Read one Service; ``None`` when it does not exist.
+
+        Exists for the IDE proxy, which needs the ClusterIP it must forward to and
+        would otherwise have to predict an address only the cluster can assign.
+        """
 
     def apply_secret(self, spec: SecretSpec) -> None:
         """Create or replace a Secret."""
@@ -626,6 +650,8 @@ class FakeK8sGateway:
         #: namespace, exactly as they are in a cluster.
         self.deployments: dict[str, WorkloadSpec] = {}
         self.services: dict[str, ServiceSpec] = {}
+        #: ClusterIPs "assigned" by :meth:`apply_service`, keyed like ``services``.
+        self.service_ips: dict[str, str] = {}
         self.ingresses: dict[str, IngressSpec] = {}
         self.secrets: dict[str, SecretSpec] = {}
         self.pvcs: dict[str, PvcSpec] = {}
@@ -718,16 +744,25 @@ class FakeK8sGateway:
                 for port in spec.ports
             )
             spec = replace(spec, ports=ports)
-        self.services[f"{spec.namespace}/{spec.name}"] = spec
+        key = f"{spec.namespace}/{spec.name}"
+        self.services[key] = spec
+        # A ClusterIP is assigned by the cluster, so the fake has to invent one.
+        # Deterministic rather than random: a test asserting on this is asserting
+        # that the proxy forwards to the Service it was told to, not on a real
+        # cluster's numbering.
+        if spec.service_type == "ClusterIP":
+            self.service_ips.setdefault(key, f"10.43.0.{len(self.service_ips) + 2}")
         return spec
 
     def _allocate_node_port(self) -> int:
         self._next_node_port += 1
         return self._next_node_port
 
-    def apply_ingress(self, spec: IngressSpec) -> None:
-        self._record("apply_ingress", spec.namespace, spec.name)
-        self.ingresses[f"{spec.namespace}/{spec.name}"] = spec
+    def read_service(self, namespace: str, name: str) -> ServiceInfo | None:
+        key = f"{namespace}/{name}"
+        if key not in self.services:
+            return None
+        return ServiceInfo(name=name, namespace=namespace, cluster_ip=self.service_ips.get(key))
 
     def apply_secret(self, spec: SecretSpec) -> None:
         self._record("apply_secret", spec.namespace, spec.name)

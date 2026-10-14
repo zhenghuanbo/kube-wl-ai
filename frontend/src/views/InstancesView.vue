@@ -405,9 +405,14 @@ function reconcile(instance: InstanceSummary): void {
 /**
  * Open the web IDE.
  *
- * The ticket is fetched fresh on every click and expires in minutes, so opening
- * the tab is the only way to use it — a URL copied out of the address bar will
- * not work later.
+ * The backend answers with a path on this origin (`/x/{username}/{id}/lab`) and
+ * the frontend proxies `/x` to it, so the tab opens on the same host as the
+ * platform — no second hostname, and the same URL copied out of the address bar
+ * keeps working.
+ *
+ * It carries no credential, so `noopener` matters here for the usual reason and
+ * not as a ticket-hiding measure: the value in the URL is not a secret, because
+ * there is nothing secret to put in it yet. See `backend/app/api/ide/proxy.py`.
  */
 async function openIde(instance: InstanceSummary): Promise<void> {
   busyId.value = instance.id

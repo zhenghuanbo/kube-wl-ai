@@ -32,12 +32,14 @@ from app.k8s.gateway import (
     PvSpec,
     QuotaSpec,
     SecretSpec,
+    ServiceInfo,
     ServicePort,
     ServiceSpec,
     WorkloadRefs,
     WorkloadSpec,
 )
 from app.k8s.workloads import (
+    IDE_STRIPS_PREFIX,
     SERVICES_PER_INSTANCE,
     TASK_SHELL,
     InstanceObjects,
@@ -46,13 +48,14 @@ from app.k8s.workloads import (
     build_instance_objects,
     build_storage_objects,
     build_task_objects,
+    ide_base_path,
     ide_command,
-    ingress_path,
 )
 
 logger = get_logger(__name__)
 
 __all__ = [
+    "IDE_STRIPS_PREFIX",
     "SERVICES_PER_INSTANCE",
     "TASK_SHELL",
     "ContainerPort",
@@ -75,6 +78,7 @@ __all__ = [
     "PvcSpec",
     "QuotaSpec",
     "SecretSpec",
+    "ServiceInfo",
     "ServicePort",
     "ServiceSpec",
     "StorageObjects",
@@ -85,8 +89,8 @@ __all__ = [
     "build_storage_objects",
     "build_task_objects",
     "get_gateway",
+    "ide_base_path",
     "ide_command",
-    "ingress_path",
     "run_gateway",
     "set_gateway",
 ]

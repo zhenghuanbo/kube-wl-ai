@@ -105,8 +105,13 @@ export interface InstanceLogs {
 
 /** A short-lived, signed URL for an instance's web IDE. */
 export interface IdeAccess {
+  /**
+   * Where to open the IDE: a path on this origin, e.g. `/x/dana/7/lab`.
+   *
+   * No `expiresIn` any more — the URL carries no credential, so there is nothing
+   * to expire. See `app/api/x/proxy.py` for what guards it (nothing, for now).
+   */
   url: string
-  expiresIn: number
 }
 
 export interface SshKey {

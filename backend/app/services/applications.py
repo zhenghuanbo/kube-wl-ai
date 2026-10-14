@@ -325,7 +325,7 @@ async def launch_application(
         max_runtime_seconds=payload.max_runtime_seconds,
     )
 
-    instance = await instance_service.create_instance(session, actor, request, settings, gateway)
+    instance = await instance_service.create_instance(session, actor, request, gateway)
 
     # Counted only after the launch succeeded, so the figure means "times this
     # actually produced an instance".

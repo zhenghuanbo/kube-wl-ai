@@ -34,7 +34,7 @@ from app.core.logging import get_logger
 from app.k8s import InstanceObjects, K8sError, K8sGateway, run_gateway
 from app.k8s.gateway import PodInfo, VolumeMountSpec, WorkloadRefs
 from app.k8s.naming import INSTANCE_LABEL, WORKSPACE_LABEL, is_managed_workload
-from app.k8s.workloads import SSH_PORT, build_instance_objects, ingress_path
+from app.k8s.workloads import SSH_PORT, build_instance_objects, ide_base_path
 from app.models.enums import (
     IdeType,
     InstanceStatus,
@@ -268,7 +268,6 @@ async def create_instance(
     session: AsyncSession,
     actor: User,
     payload: InstanceCreate,
-    settings: Settings,
     gateway: K8sGateway,
 ) -> Instance:
     workspace = await workspace_for_actor(session, actor, payload.workspace_id)
@@ -345,7 +344,7 @@ async def create_instance(
     await storage_service.ensure_attachment_claims(session, workspace, attached, gateway)
     await storage_service.record_attachments(session, instance.id, attached)
 
-    await apply_cluster_state(session, instance, workspace, pool, settings, gateway)
+    await apply_cluster_state(session, instance, workspace, pool, gateway)
 
     logger.info(
         "instance_created",
@@ -394,7 +393,6 @@ async def apply_cluster_state(
     instance: Instance,
     workspace: Workspace,
     pool: ResourceGroup,
-    settings: Settings,
     gateway: K8sGateway,
     *,
     replicas: int = 1,
@@ -445,6 +443,7 @@ async def apply_cluster_state(
     objects = build_instance_objects(
         instance_id=instance.id,
         instance_name=instance.name,
+        owner_username=owner.username,
         namespace=workspace.k8s_namespace,
         workspace_labels={
             WORKSPACE_LABEL: workspace.name,
@@ -462,7 +461,6 @@ async def apply_cluster_state(
         authorized_keys=keys,
         node_selector=pool_node_selector(pool),
         tolerations=tuple(pool.k8s_tolerations or ()),
-        ingress_host=settings.instance_ingress_host,
         extra_mounts=extra_mounts,
     )
 
@@ -555,9 +553,12 @@ async def _apply(
         instance.k8s_ide_service = objects.ide_service.name
         await run_gateway(gateway.apply_service, objects.ide_service)
 
-    if objects.ingress is not None:
-        instance.k8s_ingress = refs.ingress
-        await run_gateway(gateway.apply_ingress, objects.ingress)
+    # No Ingress is applied any more: the IDE is published by the platform's own
+    # reverse proxy (``app/api/x/proxy.py``) instead of by a cluster ingress
+    # controller, so that the user never leaves the platform's origin. The
+    # ``k8s_ingress`` column is left exactly as it was rather than cleared, so an
+    # instance built before this change still names the object the delete path has
+    # to collect.
 
     # Left null, always, and naming each object before its call cannot change
     # that: ``refs.pvc`` is None because an instance creates no claim of its own.
@@ -845,10 +846,28 @@ def ssh_command(instance: Instance, settings: Settings) -> str | None:
 
 
 def ide_path(instance: Instance) -> str | None:
-    """The IDE path, or ``None`` when the instance serves no web IDE."""
+    """Where a browser should open this instance's IDE, or ``None`` if it has none.
+
+    A path on the *platform's own* origin — the frontend proxies ``/x`` to the
+    backend and the backend forwards to the instance's ClusterIP — rather than an
+    absolute URL on some other host. That is the whole point of the proxy route:
+    the user stays on one origin, so nothing has to be reconfigured per cluster
+    and no extra hostname has to resolve.
+
+    The landing page is appended here rather than left to the IDE's own redirect,
+    because "where the IDE happens to send ``/``" is a per-product detail. Jupyter
+    serves its UI at ``lab``; the terminal and code-server are already at their
+    root.
+    """
     if instance.ide_type is IdeType.NONE:
         return None
-    return ingress_path(instance.id)
+    # `owner` is non-optional on the model (the foreign key guarantees it), and
+    # the relationship is eager-loaded, so this is not a lazy access on a closed
+    # session. `ssh_command` reads the same relationship.
+    base = ide_base_path(instance.owner.username, instance.id)
+    if instance.ide_type is IdeType.JUPYTER:
+        return f"{base}lab"
+    return base
 
 
 def to_summary(instance: Instance) -> InstanceSummary:

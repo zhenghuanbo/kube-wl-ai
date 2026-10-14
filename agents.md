@@ -17,7 +17,7 @@
 | **用户 / 用户组** | 一个实验室 = 一个用户组；用户归属于组 |
 | **工作空间** | **等于一个 K8s namespace**。一个组可创建多个工作空间；**一个用户只属于一个工作空间**（无切换器） |
 | **资源组** | 服务器分组，分「公共 / 专用」，配置 CPU/GPU/内存规格与最大运行时长，**授权给工作空间** |
-| **容器实例** | 选镜像 + 资源组 + 规格 + 存储 → K8s Deployment/Service/Ingress/PVC，支持 SSH、终端、Jupyter、VSCode |
+| **容器实例** | 选镜像 + 资源组 + 规格 + 存储 → K8s Deployment/Service/PVC，支持 SSH、终端、Jupyter、VSCode；IDE 由**平台后端反代**（`/x/{用户名}/{实例 id}/`）提供，**不建 Ingress** |
 | **应用程序** | 带介绍信息的可复用实例形态 |
 | **自定义任务** | 直接运行 shell 命令，结束即退出（K8s Job） |
 | **存储** | **一个存储目录 = 一个存储卷**。静态 `hostPath` PV + 显式绑定的 PVC；三种粒度：用户卷 / 组共享 / 全局共享。增删改查只给全局管理员，普通用户只读 |
@@ -586,7 +586,13 @@ scope 限不住它们。更糟的是 `effective_role_codes` 只对 `group_admin`
 - 实现优先级：**LDAP（FreeIPA）** → OIDC（预留）→ Local（应急/测试，生产可禁用）。
 - Access JWT 15 分钟（前端内存持有）+ Refresh token 7 天，**轮换且哈希入库**，
   存于 `httpOnly + Secure + SameSite=Lax` Cookie。
-- WebSocket 握手使用**短期一次性 ticket**，不复用 access token。
+- `WS /ws/terminal/{id}` 从 `token` 查询参数读**同一个 access token**，按普通 HTTP 请求的方式校验；
+  **每个请求重新读一次角色**，所以撤掉 `instance:exec` 会立刻关掉已建立的入口。这条路径**没有**独立
+  的握手票据机制——本文档早先写的"WebSocket 握手使用短期一次性 ticket"与代码不符，已改正。
+- **IDE 反代路由 `GET /x/{用户名}/{实例 id}/…`（含 websocket）目前不鉴权。** 知道用户名与自增的
+  实例 id 就能打开别人的 IDE。这是**已知且有意推迟**的缺口（用户明确表示"暂时先不实现访问服务的
+  鉴权凭证（票据）"），见 §14.1 与"IDE 暴露改为平台后端反代"一节。——**不要在任何地方把它描述成
+  已鉴权，也不要说票据在保护它。**
 - 首次登录 JIT 开户；FreeIPA 组映射本地实验室组；命中约定 IPA 组者自动获得 `observer`。
 - **LDAP 不可用时明确报错，绝不隐式放行。**
 
@@ -631,13 +637,17 @@ scope 限不住它们。更糟的是 `effective_role_codes` 只对 `group_admin`
 
 - 每个工作空间一个 namespace，标签 `wl-managed=true`；配套 `ResourceQuota` + `LimitRange` +
   默认拒绝 `NetworkPolicy`。
-- **实例** → `Deployment(replicas=1)` + `Service(ClusterIP)` + 可选 `Ingress(/x/{id}/)`。
+- **实例** → `Deployment(replicas=1)` + **两个 Service**（SSH `NodePort`、IDE `ClusterIP`）+ PVC。
+  **不再创建 Ingress**：IDE 由平台后端自己的反代（`/x/{用户名}/{实例 id}/`）访问那个 `ClusterIP`。
 - **任务** → `batch/v1 Job`（`backoffLimit=0`、`ttlSecondsAfterFinished`）。
 - **GPU** → `resources.limits["nvidia.com/gpu"]`（整卡），`nodeSelector` 走资源组与加速卡型号标签 + tolerations。
 - **SSH（唯一方案）**：实例内运行 `sshd` + `Service type=NodePort`；用户公钥存 `ssh_keys`，
   以 Secret 挂载为 `authorized_keys`。
 - **浏览器终端**：`WS /ws/terminal/{id}` → K8s `exec`。
-- **IDE**：`ide_type=none|jupyter|vscode|webssh`，经 Ingress `/x/{id}/` 暴露，后端签发短时票据。
+- **IDE**：`ide_type=none|jupyter|vscode|webssh`，由平台后端反代暴露在 `/x/{用户名}/{实例 id}/`
+  （Jupyter 用 `…/lab`，vscode 与 webssh 用根路径）。**这条路由不做任何鉴权**，IDE 自身也以关闭认证
+  的方式启动（`--ServerApp.token=` / `code-server --auth none` / `ttyd --writable`），
+  所以**拿到 URL 就等于拿到该用户的 shell**。
 - **协调**：beat 周期 reconcile（指数退避）+ K8s watcher → Redis pub/sub → SSE 推送。
 - **命令注入防护**：Job 命令必须用 `command` / `args` 数组，**禁止 shell 字符串拼接**。
 - **测试隔离**：单元测试一律使用 `K8sGateway` 的 Fake 实现，不接触真实集群。
@@ -870,10 +880,10 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 | --- | --- |
 | 数据模型 | `instances`，迁移 `64a763f3755e`。资源形态**快照**在行上（改规格不影响已建实例）；`gpu_type` 为 `VARCHAR(32)`；`expires_at` 可空表示「无期限」；`UNIQUE(workspace_id, name)` |
 | 命名 | 实例对象名 `wl-{name}-{id}`，超长截断并附哈希；`k8s_ssh_service` 与 `k8s_ide_service` **分列**——哪个是 NodePort 是安全事实，且逗号拼接会撑爆 `VARCHAR(63)` |
-| 对象集 | Deployment（`Recreate` 策略，避免两份开发环境争抢同一个 home 卷）+ **两个 Service**（仅 SSH 为 NodePort，IDE 恒为 ClusterIP）+ Ingress `/x/{id}/` + PVC + `authorized_keys` Secret |
+| 对象集 | Deployment（`Recreate` 策略，避免两份开发环境争抢同一个 home 卷）+ **两个 Service**（仅 SSH 为 NodePort，IDE 恒为 ClusterIP）+ PVC + `authorized_keys` Secret。*（本期还额外建一个 Ingress `/x/{id}/`；后已取消，见"IDE 暴露改为平台后端反代"）* |
 | SSH | 用户自助登记公钥，指纹按 OpenSSH 格式（`SHA256:` + SHA-256(blob)）本地计算，不依赖 `ssh-keygen`；未登记则**不建 Secret 也不挂卷**，容器内 sshd 不接受任何密钥 |
 | 终端 | `WS /ws/terminal/{id}`：二进制帧＝按键，文本帧＝控制（`resize`）。按类型而非内容分帧——嗅探 JSON 会在用户粘贴 JSON 时误判。容器侧阻塞套接字由工作线程驱动 |
-| IDE 票据 | `GET /instances/{id}/ide-access` 签发 `typ=ide` 的短时 JWT，锁定 `instance` 与 `namespace`；与访问令牌**类型互斥**，无法互相冒用 |
+| IDE 票据 | `GET /instances/{id}/ide-access` 签发 `typ=ide` 的短时 JWT，锁定 `instance` 与 `namespace`；与访问令牌**类型互斥**，无法互相冒用。**但入口处从未校验过它**——`decode_ide_ticket` 至今没有生产调用点，所以这张票据当时也没有真正保护任何东西。后来 IDE 改走平台后端反代，该接口不再签发票据、只返回 `/x/{用户名}/{id}/lab`；`create_ide_ticket` / `decode_ide_ticket` 保留且有测试覆盖，但没有调用者 |
 | 配额 | 独立内核：实例数 / CPU / 内存 / 存储 / GPU(按型号) + 资源组公平上限（并发数、单实例卡数）。停止**不释放**配额——否则重启会因自己占用的容量而失败 |
 | 生命周期 | create / start / stop / delete / reconcile / logs（含 `previous=true` 看崩溃前日志）；`expire_overdue` 在服务端强制超时，UI 关掉也拦得住 |
 | API | `/instances`（9 个端点）+ `/ssh-keys`（3 个），OpenAPI 由 49 增至 **58** 个路径 |
@@ -889,8 +899,10 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 - 终端协议实测：对 `WS /ws/terminal/{id}` 做裸握手，未带 token 与非法 token 均先收到
   `{"type":"error",...}` 文本帧、再以 **1008** 关闭，不会挂起也不会 500。
 - 前端联调：Vite dev server 下 5 个新模块均编译为 200，`/api` 代理登录 200。
-- 对象集实测（`FakeK8sGateway`）：一次创建产出 1 Deployment / 2 Service / 1 Ingress / 1 PVC；
-  Jupyter 命令含 `--ServerApp.base_url=/x/{id}/`（否则经 Ingress 后所有静态资源 404）；
+- 对象集实测（`FakeK8sGateway`）：一次创建产出 1 Deployment / 2 Service / 1 Ingress / 1 PVC
+  （其中的 Ingress 后已不再创建）；Jupyter 命令含 `--ServerApp.base_url=/x/{id}/`，当时的理由是
+  "否则经 Ingress 后所有静态资源 404"——**"入口路径前缀必须与 IDE 的 base path 一致"这条结论仍然成立**，
+  只是入口从 Ingress 换成了平台反代，`base_url` 也随之变成 `/x/{用户名}/{id}/`；
   SSH Service 端口名 `ssh`、IDE 为 `ide` 且类型分别为 `NodePort` / `ClusterIP`。
 - 配额实测：4 核配额下第 3 个 2 核实例返回 409 且 `detail.resource=cpu`；
   资源组公平上限单独生效（并发数满时即使 CPU 有余也 409）；停止一个实例**不**腾出配额。
@@ -2242,6 +2254,132 @@ workload behind"同理：对**平台侧校验**成立，对**集群侧拒绝**�
   那一行的 `k8s_secret` 当年就是 NULL，因此没有任何东西能引用并清理它。属于本次修复前
   造成的既成事实，手工删掉即可。
 
+### ✅ 后续增量 — IDE 暴露改为平台后端反代（已完成）
+
+实例的 IDE 过去是"建一个 `Ingress` 指向 IDE 的 `ClusterIP`，再把 `/x/{id}/` 这个地址发给用户"。
+这条路解决了"怎么把流量送进集群"，但它**给不出一个用户真的点得开的地址**，而且方向从一开始就偏了。
+
+**为什么 Ingress 在这个场景里是错的选择**
+
+1. **它会逼出一个新主机名。** Ingress 是集群边缘的入口，用户拿到的地址必然带着它的 host
+   （`https://<某个集群域名>/x/8/…`），于是**这个地址离开了平台自己的源**。而平台已经有一个用户能登录、
+   能被信任的源；为 IDE 再引入一个域名意味着多一份证书、多一条 DNS、多一套 CORS/Cookie 边界，
+   而且用户要在两个源之间被来回搬运 —— 票据和 Cookie 都过不去。反代让 IDE 落在**平台自己的源**上，
+   `/x/…` 只是一个普通的同源相对路径，前端 `window.open()` 直接就能用，不需要知道任何主机名。
+2. **它无法按请求决定。** Ingress 规则是声明式的、长期存在的：路由此刻"给谁"在创建时就被写死了。
+   而"这个请求该不该放行"必须**每次请求**重新判断（用户可能已被移出工作空间、实例可能已被停掉）。
+   反代天然位于请求路径上，这里就能判断；Ingress 只能在它前面再接一层（`auth-url`），最终还是需要
+   一个后端端点 —— 那不如直接反代。
+3. **它要求集群先有一个 ingress controller，而线上并没有。** 实测 `kubectl get ingressclass` 为空，
+   `kubectl get ingress -n wl-hpc-hpc` 里那条规则的 `CLASS=<none>`、`ADDRESS=` 为空 ——
+   对象建出来了，却**没有任何东西会去实现它**。这是一个"创建成功、永不生效"的失败形态。
+
+现在的形态：**平台后端自己反代**（`backend/app/api/ide/proxy.py`），router 注册在**根路径**
+（`app/main.py` 的 `app.include_router(ide_router)`）而不是 `/api/v1` 下 —— 因为它服务的不是平台的
+JSON API，而是别人的 HTML / JS / websocket。三条路径：`GET /x/{用户名}/{实例 id}`
+（307 跳到带斜杠的形式）、`/x/{用户名}/{实例 id}/{rest:path}`（所有 HTTP 方法，外加一条 websocket 路由），
+全部 `include_in_schema=False`。
+
+路径里那一段是**用户名而不是实例 id**，地址栏因此可读。要说清楚的是：**这不构成任何保护** ——
+用户名本来就是可见的，实例 id 又是自增整数，所以它只是"看起来更友好"，不是一个安全边界。
+
+**每个 IDE 对前缀的期望不一样：`IDE_STRIPS_PREFIX`**
+
+反代把请求转给实例的 `ClusterIP` 时，前缀是留还是剥，取决于上游是谁：
+
+| IDE | 交给用户的 URL | 前缀 | 原因 |
+| --- | --- | --- | --- |
+| jupyter | `/x/{用户名}/{id}/lab` | **保留** | `--ServerApp.base_url=/x/{用户名}/{id}/`，它的路由表本身就长在前缀下 |
+| webssh | `/x/{用户名}/{id}/` | **保留** | ttyd 的 `--base-path`，由 `ide_command()` 显式传入（所以现有镜像不用改） |
+| vscode | `/x/{用户名}/{id}/` | **剥掉** | code-server 没有 base path 参数 |
+
+code-server 是唯一的例外，也是唯一需要**回程改写**的：剥掉前缀后它的响应里会出现根相对的
+`Location`（重定向），回程必须把前缀加回去，否则浏览器会被甩到平台根下的无关路径。
+`IDE_STRIPS_PREFIX = {JUPYTER: False, VSCODE: True, WEBSSH: False}` 就是这张表。
+
+**真实集群端到端验证**
+
+三个实例，镜像都是 `10.28.0.194:30002/library/ubuntu-dev:24.04`：
+
+- **实例 8（`jupyter`）**：`GET /x/zhenghuanbo/8/lab` → 200 且 `<title>JupyterLab</title>`；
+  `/api/contents/` 返回真实目录列表；一个页面静态资源 200 / 237731 字节；
+  **并经由反代真正跑起了一个内核** —— `POST /x/zhenghuanbo/8/api/kernels` 返回 **201**，
+  再通过反代的那条 kernel websocket 执行了一个 cell，拿回 `PROXY_WS_OK 42`，
+  `execute_reply` 的 `status=ok`。这一步才是关键：**它证明的不是"页面能打开"，而是"代码能跑"。**
+- **实例 9（`webssh`）**：ttyd 的 HTML 200；它的 websocket 经反代协商出 `tty` 子协议，
+  并返回了真实的 shell 横幅与提示符。
+- **实例 10（`vscode`）**：code-server 的 HTML 200，HTML 里引用的 **8 个资源全部 200**；
+  workbench 的 socket **既经后端（8000）也经 Vite dev server（5181）** 连上，
+  并吐出了真实的 VS Code 协议帧。
+
+三个实例事后全部删除；命名空间配额归零，且**集群里不存在任何 Ingress**。
+
+**只有真实集群才会暴露的 bug：websocket 握手头被转发了两次**
+
+反代最初把调用方的 websocket 握手头（`Sec-WebSocket-Key`、`Sec-WebSocket-Version`…）原样转给上游，
+但 `websockets` 客户端**自己会生成一套握手**，于是上游收到重复的握手头，tornado 直接回 HTTP 400，
+而反代把它当作 403 抛给了浏览器。
+
+症状极容易误判：**页面能打开、内核能创建，但执行 cell 没有反应。** 修法是在 `_forward_headers` 里
+过滤掉 `sec-websocket-*`，并用一个针对该函数的单元测试钉住。
+
+**教训要记下来：用 `httpx` mock 出来的测试套件看不见 websocket 握手 bug。** 这类问题只在真实握手、
+真实 tornado 上出现 —— HTTP 层面的 mock 永远是绿的。
+
+**第二个 bug：一个 `api_route` 声明多个方法会撞 operation id**
+
+把多个 HTTP 方法写进同一个 `api_route` 时，FastAPI 的 `generate_unique_id` 只用
+`list(route.methods)[0]` 生成 id，于是每个方法拿到**同一个** operation id；OpenAPI 生成时告警，
+并且 `/api/v1/openapi.json`（连带 `/docs`）**返回 500**。
+
+用 `include_in_schema=False` 解决 —— 这同时也是语义上正确的：这条路由说的是别人的协议
+（ttyd / Jupyter / code-server 的 HTML、JS、websocket），**不吐平台的统一错误信封**，
+本来就不该出现在平台的 OpenAPI 契约里。
+
+**两个副产品**
+
+- `apply_ingress` **已删除**（gateway 的 Protocol、Fake 与真实 client 三处一并去掉，连同 client 里
+  随之无用的 `IngressSpec` 导入）。留着它的理由是"将来改回 Ingress 不必重写"，但那个将来并不存在：
+  这里不适合用 Ingress 的三个原因（新主机名、无法按请求决定、线上没有 controller）都不是临时状况。
+  与其留一条能建对象却没人调用的路径，不如让"平台不建 Ingress"在代码里也没有例外 —— 想改回去时
+  重新写这三十行，比留着一个会腐烂的分支便宜。**`IngressSpec` 类型与 Fake 的 `ingresses` 存储保留**，
+  因为后者是"历史 Ingress 被删掉了"这件事唯一可观测的地方（见下一条）。
+- `instance.k8s_ingress` 这一列**刻意保留**：`delete_instance` 仍然从这一列拼出要删的对象清单，
+  所以**本次改动之前创建的 Ingress 依然能被删掉**。删掉这一列会让那些历史对象永远无法被平台清理。
+  保留的是一个**字符串列**和一个删除路径，不是一条创建路径 —— 这两件事必须分开看：前者是清理历史，
+  后者是继续制造需要清理的东西。
+
+**同时去掉/加上**：`Settings.instance_ingress_host` 整个删除；`build_instance_objects()` 增加
+`owner_username` 参数、去掉 `ingress_host`；`create_instance` / `apply_cluster_state` 不再需要
+`settings` 参数。前端的 `vite.config.ts` 与 `nginx.conf` 都补了 `/x` 代理规则（nginx 为此需要一条
+新的 `map $http_upgrade $connection_upgrade`，否则 websocket 过不去）。`requirements.txt` 现在
+直接声明 `httpx>=0.28.1` 与 `websockets>=14.0`（此前只是传递依赖，既然直接用就该直接声明）。
+`GET /instances/{id}/ide-access` **不再签发票据**，只返回该实例的 IDE 地址
+（Jupyter 是 `/x/{用户名}/{id}/lab`，vscode/webssh 是 `/x/{用户名}/{id}/`）；
+`IdeAccess.expires_in` 从后端 schema 与前端类型中一并移除。`create_ide_ticket` / `decode_ide_ticket`
+保留且仍有测试，但 `decode_ide_ticket` **没有生产调用者**。
+
+**没有解决的那件事：这条路由不鉴权**
+
+必须写清楚，因为这是本次改动最重要的属性：**`/x/` 对任何能访问平台的人都是一扇敞开的门。**
+用户名是可见的、实例 id 是自增的，所以打开别人的 IDE 只需要改两个数字。而三个 IDE 又都以关闭认证的
+方式启动（`--ServerApp.token=`、`code-server --auth none`、`ttyd --writable`），理由同样是
+"前面会有一层鉴权"——**而那一层从来没有存在过**（票据签发过，却从未被校验）。
+
+也就是说：**系统现在处于"两层同时为空"的状态。** 本次改动既没有改善也没有恶化这一点，
+它只是把入口从"一个从不生效的 Ingress"换成了"一条真实存在、但不鉴权的反代"。
+用户明确表示**暂时先不实现访问服务的鉴权凭证（票据）**，所以这是**已知、有意、经用户同意**的缺口，
+不是疏漏 —— 但任何读过本文档的人都必须知道它，因此 §14.1 里也单列了一条。
+
+补鉴权的位置**只有一处**：`_resolve_target`。**真正提供内容的两条路由**（HTTP 反代与 websocket）
+都先经过它，在这里加一次判断就能覆盖全部。第三条（`GET /x/{用户名}/{id}` 的 307 跳转）**刻意不解析
+实例** —— 它只是把地址补成带斜杠的形式，不做任何转发，也因此不需要判断；它指向的目标会再走一遍
+上面那两条，所以"跳转本身不鉴权"不会漏掉任何东西（但它也**不是**一个可以顺手加检查的地方：在那儿
+加检查只会让重定向失败，内容照样由后面的路由提供）。它现在对"没这个实例 / 不是你的 / 这个实例没有 IDE"
+**一律返回 `NOT_FOUND`**，刻意不区分 —— 如果对"不是你的"回 403、对"不存在"回 404，就能靠状态码把
+"谁有哪些实例"枚举出来。只有 `NOT_RUNNING` 是**单独**的：对一个自己刚点过"访问"、只是已停止的实例
+回答"没有这个实例"，那是在撒谎，用户会以为实例被删了。
+
 ### 有意推迟（非遗漏）
 
 - **OIDC** 仅预留扩展点：`OidcProvider.exchange_code()` 明确抛错说明。大学的统一身份是
@@ -2257,11 +2395,17 @@ workload behind"同理：对**平台侧校验**成立，对**集群侧拒绝**�
   CPU/GPU 无关。镜像已写好并逐条验证：`deploy/images/ubuntu-dev/`（该目录的 README 记录了
   平台对实例镜像的完整契约、以及只有跑起来才会暴露的四个坑）。**剩下的是人工动作**：用
   `PUSH=1 deploy/images/ubuntu-dev/build.sh` 推到 `library/`。
-- **`vscode` 走不通子路径（平台侧缺口）。** ingress 暴露在 `/x/{id}/` 且没有
-  `rewrite-target`，所以上游收到的是带前缀的完整路径。Jupyter 靠 `--ServerApp.base_url`、
-  ttyd 靠镜像包装器补的 `--base-path` 都能对上，但 **code-server 不支持 base path**，没有
-  等价参数，因此 VS Code 实例的静态资源会 404。修它需要平台为该 `ide_type` 加
-  `nginx.ingress.kubernetes.io/rewrite-target`——镜像无法发明一个二进制里没有的功能。
+- ~~**`vscode` 走不通子路径（平台侧缺口）**~~ **这条判断是错的，已实测推翻。** 当初的理由是
+  "code-server 不支持 base path，没有等价参数，所以 VS Code 实例的静态资源会 404，修它需要
+  `rewrite-target`"。实测：code-server 的 HTML 里 **8 个资源引用全部是相对路径**
+  （`./_static/…`、`./manifest.json`、`stable-<hash>/static/…`），经反代后 8 个全部返回 200；
+  workbench 的 websocket 用的就是页面自身的路径，也能连上并吐出真实的 VS Code 协议帧。
+  **结论：code-server 不需要 base path —— 它的 HTML 只用相对引用，所以在反代里把前缀剥掉就够了。**
+  真正需要保留的是"各 IDE 对前缀的期望不同"这个事实：Jupyter（`--ServerApp.base_url`）与
+  ttyd（`--base-path`）要**收到完整前缀**，只有 code-server 要**剥掉前缀**（并在回程给根相对的
+  `Location` 加回前缀）——这就是 `IDE_STRIPS_PREFIX` 的全部内容。
+  **诚实的边界**：以上是在 HTTP 状态码 / 静态资源 / websocket 协议帧这一层验证的，
+  **没有用真实浏览器打开过页面**，渲染层的最后一公里未经人工确认。
 - `app/workers/celery_app.py` 的 `beat_schedule` 已接入 `reconcile-workloads`（30 秒）、
   `rollup-usage`（20 分钟）与 `sync-images`（默认每天一次，`IMAGE_SYNC_INTERVAL_SECONDS`
   可调）。最后一个是镜像从「推送到 Harbor」变成「选择器里可见」的唯一自动途径。
@@ -2295,6 +2439,18 @@ workload behind"同理：对**平台侧校验**成立，对**集群侧拒绝**�
    `legacy/backend/config.py` 曾硬编码 `SECRET_KEY`。文件已在归档时清除，但
    **凭证本身必须在集群侧吊销并轮换**。
 2. 旧 `k8sclient.py` / `test.py` 硬编码 Windows 绝对路径 `D:\vscodeProject\...`（已在 `legacy/`，勿复制）。
+3. **IDE 反代路由不鉴权（当前最大的已知风险，且是有意推迟的）。**
+   `GET /x/{用户名}/{实例 id}` 这条路由（以及它下面的全部 HTTP 方法与 websocket）**不校验任何身份**：
+   用户名可见，实例 id 是自增整数，所以**猜出别人的 URL 就能打开别人的 IDE**。而三个 IDE 都按
+   "前面会有一层鉴权"的假设**关闭了自身认证**（`--ServerApp.token=`、`code-server --auth none`、
+   `ttyd --writable`），本该做这件事的票据又从未被校验 —— 即**两层同时为空**。
+   实际后果不是"看到别人的代码"而是"**以那个用户的身份执行任意代码**"：容器挂着他的 home 卷、
+   能用他的算力、并且能访问集群内部（实例的 NetworkPolicy 入站全放行、出站覆盖所有命名空间）。
+   **在补上鉴权之前不要把它暴露到平台可达范围之外**（例如直接给实例开 NodePort、或加装 Ingress
+   而不加 `auth-url`）。补的位置只有一处：`app/api/ide/proxy.py` 的 `_resolve_target` ——
+   它现在对"没这个实例 / 不是你的 / 这个实例没有 IDE"一律返回 `NOT_FOUND`（不泄漏存在性），
+   另外单独返回 `NOT_RUNNING`（对自己刚点过"访问"的已停止实例回答"没有这个实例"是撒谎）。
+   详见"IDE 暴露改为平台后端反代"一节。
 
 ### 14.2 旧前端缺陷（仅供参考，不要再犯）
 
@@ -2343,8 +2499,10 @@ Vuex `namespace: true` 拼写错误、`Admin/User.vue` 为 0 字节、
   同理：测试里 `get_settings()` 必须走 `Depends` 注入，直接调用会绕过依赖覆盖拿到进程级单例。
 - **实例停止后重建对象不得把它启动**：`apply_cluster_state` 既是创建路径也是 `/reconcile` 修复路径，
   若不带 `replicas` 就会把用户刻意停止的实例翻回 `creating`。**幂等的「修复」必须保留被修复对象的既有意图状态。**
-- **一个实例不止一个 Service**：SSH 是 `NodePort`、IDE 是 `ClusterIP`（只经后端鉴权的 Ingress 进入）。
-  把两个端口放进同一个 NodePort Service，等于在校内每个节点地址上发布一个**免鉴权的 IDE**。
+- **一个实例不止一个 Service**：SSH 是 `NodePort`、IDE 是 `ClusterIP`（**只经平台后端反代进入**，
+  不建 Ingress）。把两个端口放进同一个 NodePort Service，等于在校内每个节点地址上发布一个**免鉴权的
+  IDE** —— 而反代这条路**今天同样免鉴权**（见 §14.1 第 3 条），所以这条注意事项保住的是
+  "不要再多开一个入口"，**不是"IDE 已经安全了"**。
 - **审计动作名是稳定接口**：`action` 表示*尝试的操作*，`status` 表示结果。
   服务层成功路径写 `user:create` 这类域名动作，中间件兜底路径经 `canonical_resource()` 归一化，
   所以同一种操作无论成败都只有一个 action 字符串。不要把结果编进动作名（`*_failed` 已废弃）。

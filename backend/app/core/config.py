@@ -188,9 +188,11 @@ class Settings(BaseSettings):
     storage_class_share: str = ""
 
     # --- Instances -----------------------------------------------------------
-    #: Host the per-instance IDE ingress rules are published under. Empty means
-    #: "match any host", which is what a single-ingress-controller lab wants.
-    instance_ingress_host: str = ""
+    # No `instance_ingress_host`: the IDE is no longer published through an
+    # Ingress. It is served by the platform's own reverse proxy
+    # (`app/api/x/proxy.py`) under `ide_base_path`, so there is no separate host
+    # to name — and a setting that silently changed nothing would be worse than
+    # no setting at all.
     #: Address users are told to SSH to. Defaults to the node's own hostname
     #: when empty, which is only right for single-node clusters; production must
     #: set it to the cluster's external address.

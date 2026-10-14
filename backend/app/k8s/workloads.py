@@ -1,17 +1,22 @@
 """Turning an instance into the Kubernetes objects that realise it.
 
 This module is the platform's *convention* layer: which ports an IDE listens on,
-what its argv looks like, how an instance's home directory is mounted, and how
-the ingress path is chosen. It is deliberately pure — it takes plain values and
-returns gateway dataclasses — so every rule here is testable without a database
-or a cluster.
+what its argv looks like, how an instance's home directory is mounted, and what
+URL prefix an IDE is served under. It is deliberately pure — it takes plain
+values and returns gateway dataclasses — so every rule here is testable without a
+database or a cluster.
 
 Two security decisions are encoded here rather than left to callers:
 
 * **SSH gets its own Service.** Only the SSH Service is ``NodePort``; the IDE
-  Service stays ``ClusterIP`` and is reachable solely through the ingress, which
-  the backend authenticates. Putting both ports on one NodePort Service would
-  expose an unauthenticated IDE on every node's IP.
+  Service stays ``ClusterIP`` and is reached solely by the platform's own reverse
+  proxy (``app/api/x/proxy.py``). Putting both ports on one NodePort Service
+  would expose an unauthenticated IDE on every node's IP.
+
+  Neither the proxy nor the ``Ingress`` it replaced authenticates anyone today,
+  so the IDE is an open door to whoever can reach the platform — see the note on
+  the proxy route. What the ``ClusterIP`` still buys is that the exposure is one
+  known port on one known host instead of every node's address.
 * **argv, never a shell string.** Commands are tuples. A user-supplied value can
   therefore never become a command, which is the plan's explicit requirement.
   The one apparent exception is :data:`TASK_SHELL`: a custom task exists to run
@@ -27,7 +32,6 @@ from dataclasses import dataclass
 
 from app.k8s.gateway import (
     ContainerPort,
-    IngressSpec,
     JobSpec,
     PvcSpec,
     PvSpec,
@@ -87,20 +91,51 @@ IDE_PORT_NAME = "ide"
 SERVICES_PER_INSTANCE = 2
 
 
-def ide_command(ide_type: IdeType, *, instance_id: int) -> tuple[str, ...] | None:
+def ide_base_path(owner_username: str, instance_id: int) -> str:
+    """The URL prefix an instance's web IDE is served under, e.g. ``/x/li/42/``.
+
+    Keyed on the owner's username *and* the instance id: the username puts the
+    instance under the person who owns it, the id keeps two instances of the same
+    person apart. The trailing slash is load-bearing, not cosmetic — every IDE
+    resolves its own assets relative to this path, so without it the browser
+    resolves them one level up.
+
+    This used to be ``/x/{id}/`` alone, back when the prefix was also the
+    ``Ingress`` path. It now names the platform's own reverse-proxy route
+    (``app/api/x/proxy.py``), which is why the username had to join: the route has
+    to find the instance before it can forward anything, and "whose instance" is
+    the natural key for a person-facing URL.
+    """
+    return f"/x/{owner_username}/{instance_id}/"
+
+
+def ide_command(
+    ide_type: IdeType, *, owner_username: str, instance_id: int
+) -> tuple[str, ...] | None:
     """The argv that starts ``ide_type``, or ``None`` to use the image default.
 
-    Jupyter needs its base URL to match the ingress prefix, or every asset and
-    websocket request 404s behind the proxy — which is the single most common
-    way a Jupyter ingress is misconfigured.
+    Two of the three IDEs have to be *told* their URL prefix, or every asset and
+    websocket request they generate 404s behind the proxy — the single most common
+    way a Jupyter reverse proxy is misconfigured:
 
-    The IDEs run with authentication disabled *inside* the container because the
-    ingress in front of them is authenticated by the backend. Enabling a second
-    password here would mean shipping one to the user and rotating it, for no
-    additional protection.
+    * **Jupyter** takes it as ``--ServerApp.base_url``.
+    * **ttyd** takes it as ``--base-path``. It is passed here rather than left to
+      the image's wrapper, which would otherwise guess ``/x/{id}/`` from
+      ``WL_INSTANCE_ID`` and disagree with the route the browser is on.
+    * **code-server** has no equivalent option (4.141.0 offers only
+      ``--abs-proxy-base-path``, which concerns its own port-forwarding). As it
+      happens its assets are all relative, so the proxy *strips* the prefix for
+      this IDE instead — see :data:`IDE_STRIPS_PREFIX`. Told here rather than
+      worked around: the argv cannot invent a flag the binary lacks.
+
+    The IDEs run with authentication disabled *inside* the container. That is
+    only safe because something in front is meant to authenticate them; today
+    nothing does, so the proxy route is an open door for anyone who can reach the
+    platform. Recorded here rather than left implicit — see the note on
+    :func:`app.api.x.proxy.ide_proxy`.
     """
     if ide_type is IdeType.JUPYTER:
-        base_url = f"/x/{instance_id}/"
+        base_url = ide_base_path(owner_username, instance_id)
         return (
             "jupyter",
             "lab",
@@ -126,19 +161,35 @@ def ide_command(ide_type: IdeType, *, instance_id: int) -> tuple[str, ...] | Non
             "ttyd",
             "--port",
             str(IDE_PORTS[IdeType.WEBSSH]),
+            # Explicit, so the image wrapper sees a caller-supplied base path and
+            # does not add its own.
+            "--base-path",
+            ide_base_path(owner_username, instance_id),
             "--writable",
             "bash",
         )
     return None
 
 
-def ingress_path(instance_id: int) -> str:
-    """The ingress prefix for an instance, e.g. ``/x/42/``.
-
-    Keyed on the instance id rather than its name so the path cannot collide
-    across workspaces, and cannot be guessed from a display name.
-    """
-    return f"/x/{instance_id}/"
+#: Whether the reverse proxy must strip ``/x/{username}/{id}`` before forwarding.
+#:
+#: Not a preference — it follows from what each binary can be told:
+#:
+#: * ``False`` for jupyter and ttyd: they are started *with* the prefix and
+#:   generate their asset URLs already carrying it, so the request must arrive
+#:   intact. Stripping would leave their output pointing at paths the proxy
+#:   cannot route.
+#: * ``True`` for code-server: it cannot be told a prefix and always answers as if
+#:   it owned ``/``. Its responses reference everything relatively, so if the
+#:   prefix is stripped and the browser sits at a path ending in ``/``, the
+#:   browser re-adds the prefix to every relative URL by itself.
+#:
+#: ``none`` has no IDE and therefore no opinion; it is absent from the mapping.
+IDE_STRIPS_PREFIX: dict[IdeType, bool] = {
+    IdeType.JUPYTER: False,
+    IdeType.VSCODE: True,
+    IdeType.WEBSSH: False,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,7 +208,6 @@ class InstanceObjects:
     #: columns, and which one is the NodePort is a security-relevant fact.
     ssh_service: ServiceSpec | None = None
     ide_service: ServiceSpec | None = None
-    ingress: IngressSpec | None = None
     ssh_secret: SecretSpec | None = None
 
     @property
@@ -171,6 +221,7 @@ def build_instance_objects(
     *,
     instance_id: int,
     instance_name: str,
+    owner_username: str,
     namespace: str,
     workspace_labels: dict[str, str],
     image: str,
@@ -185,7 +236,6 @@ def build_instance_objects(
     authorized_keys: str | None,
     node_selector: dict[str, str],
     tolerations: tuple[dict[str, object], ...],
-    ingress_host: str,
     extra_mounts: tuple[VolumeMountSpec, ...] = (),
 ) -> InstanceObjects:
     """Build the full object set for an instance.
@@ -230,7 +280,7 @@ def build_instance_objects(
         memory_mb=memory_mb,
         gpu_type=gpu_type,
         gpu_count=gpu_count,
-        command=ide_command(ide_type, instance_id=instance_id),
+        command=ide_command(ide_type, owner_username=owner_username, instance_id=instance_id),
         env={
             "WL_INSTANCE_ID": str(instance_id),
             "WL_WORKSPACE": workspace_labels.get("wl-workspace", ""),
@@ -265,31 +315,22 @@ def build_instance_objects(
             namespace=namespace,
             selector=selector,
             ports=(ServicePort(name=IDE_PORT_NAME, port=ide_port, target_port=ide_port),),
-            # ClusterIP on purpose: the ingress is the only way in, and the
-            # backend authenticates it. A NodePort here would publish an
-            # unauthenticated IDE on every node address.
+            # ClusterIP on purpose: the platform's own reverse proxy is the only
+            # way in (``app/api/x/proxy.py``), and it reaches this Service by
+            # ClusterIP. A NodePort here would publish an unauthenticated IDE on
+            # every node address, which is worse than the proxy for exactly the
+            # same reason an ingress would have been better — the difference is
+            # only that the proxy exists.
             service_type="ClusterIP",
             labels=labels,
         )
 
-    ingress = None
-    if ide_port is not None:
-        ingress = IngressSpec(
-            name=f"{base}-ide",
-            namespace=namespace,
-            host=ingress_host,
-            path=ingress_path(instance_id),
-            service_name=f"{base}-ide",
-            service_port=ide_port,
-            annotations={
-                # Websockets are not optional for any of these IDEs, and the
-                # timeouts are raised because a Jupyter kernel can sit idle.
-                "nginx.ingress.kubernetes.io/proxy-read-timeout": "3600",
-                "nginx.ingress.kubernetes.io/proxy-send-timeout": "3600",
-                "nginx.ingress.kubernetes.io/proxy-body-size": "0",
-            },
-            labels=labels,
-        )
+    # No Ingress. The IDE used to be published through one at `/x/{id}/`, which
+    # only works if the cluster has an ingress controller *and* the platform's
+    # origin is that controller's host — so the user-facing URL changed hostname
+    # and the browser left the platform's origin. The proxy route replaces it and
+    # keeps one origin. `WorkloadRefs.ingress` stays in the model because
+    # instances built before this change still have one to collect on deletion.
 
     ssh_secret = None
     if ssh_secret_name and authorized_keys:
@@ -305,7 +346,6 @@ def build_instance_objects(
         services=tuple(
             service.name for service in (ssh_service, ide_service) if service is not None
         ),
-        ingress=f"{base}-ide" if ingress else None,
         # No `pvc`: the home claim belongs to the storage volume, not to this
         # instance. Recording it here would be actively dangerous — the delete
         # path removes the claims a workload lists, and deleting an instance must
@@ -319,7 +359,6 @@ def build_instance_objects(
         deployment=deployment,
         ssh_service=ssh_service,
         ide_service=ide_service,
-        ingress=ingress,
         ssh_secret=ssh_secret,
     )
 

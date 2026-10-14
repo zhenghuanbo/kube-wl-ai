@@ -23,7 +23,6 @@ from kubernetes.stream import stream
 from app.core.logging import get_logger
 from app.k8s.gateway import (
     ExecSession,
-    IngressSpec,
     JobInfo,
     JobSpec,
     K8sError,
@@ -37,6 +36,7 @@ from app.k8s.gateway import (
     PvSpec,
     QuotaSpec,
     SecretSpec,
+    ServiceInfo,
     ServiceSpec,
     WorkloadRefs,
     WorkloadSpec,
@@ -650,48 +650,6 @@ class RealK8sGateway:
             ),
         )
 
-    def apply_ingress(self, spec: IngressSpec) -> None:
-        body = k8s.V1Ingress(
-            metadata=k8s.V1ObjectMeta(
-                name=spec.name,
-                namespace=spec.namespace,
-                labels=spec.labels or None,
-                annotations=spec.annotations or None,
-            ),
-            spec=k8s.V1IngressSpec(
-                rules=[
-                    k8s.V1IngressRule(
-                        host=spec.host,
-                        http=k8s.V1HTTPIngressRuleValue(
-                            paths=[
-                                k8s.V1HTTPIngressPath(
-                                    path=spec.path,
-                                    path_type="Prefix",
-                                    backend=k8s.V1IngressBackend(
-                                        service=k8s.V1IngressServiceBackend(
-                                            name=spec.service_name,
-                                            port=k8s.V1ServiceBackendPort(number=spec.service_port),
-                                        )
-                                    ),
-                                )
-                            ]
-                        ),
-                    )
-                ]
-            ),
-        )
-        api = self._networking
-        try:
-            api.read_namespaced_ingress(spec.name, spec.namespace)
-            api.replace_namespaced_ingress(spec.name, spec.namespace, body)
-        except ApiException as exc:
-            if not self._is_not_found(exc):
-                raise self._raise(f"update ingress {spec.name}", exc) from exc
-            try:
-                api.create_namespaced_ingress(spec.namespace, body)
-            except ApiException as create_exc:
-                raise self._raise(f"create ingress {spec.name}", create_exc) from create_exc
-
     def apply_secret(self, spec: SecretSpec) -> None:
         body = k8s.V1Secret(
             metadata=k8s.V1ObjectMeta(
@@ -885,6 +843,26 @@ class RealK8sGateway:
             if self._is_not_found(exc):
                 raise K8sError(f"deployment {name} not found in {namespace}") from exc
             raise self._raise(f"scale deployment {name}", exc) from exc
+
+    def read_service(self, namespace: str, name: str) -> ServiceInfo | None:
+        """Read one Service, for its ClusterIP.
+
+        The IDE proxy needs the address to forward to. Returning ``None`` for a
+        missing Service rather than raising is deliberate: a request for an
+        instance whose Service was never created is a user-visible "not ready",
+        not a cluster fault to be reported as a 502.
+        """
+        try:
+            service = self._core.read_namespaced_service(name, namespace)
+        except ApiException as exc:
+            if self._is_not_found(exc):
+                return None
+            raise self._raise(f"read service {name}", exc) from exc
+        return ServiceInfo(
+            name=name,
+            namespace=namespace,
+            cluster_ip=service.spec.cluster_ip if service.spec else None,
+        )
 
     def read_pod(self, namespace: str, name: str) -> PodInfo | None:
         try:

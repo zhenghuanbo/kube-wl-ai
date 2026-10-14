@@ -176,8 +176,12 @@ class SshKeyCreate(ApiModel):
 
 
 class IdeAccess(ApiModel):
-    """A short-lived, signed URL for an instance's web IDE."""
+    """Where to open an instance's web IDE.
+
+    A path on the platform's own origin, carrying no credential. There is no
+    ``expires_in`` any more: nothing expires, because nothing is issued — the
+    route behind this path is not authenticated yet. See
+    :func:`app.api.x.proxy.ide_proxy`.
+    """
 
     url: str
-    #: Seconds until the ticket stops being accepted.
-    expires_in: int

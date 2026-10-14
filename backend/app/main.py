@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.ide import ide_router
+from app.api.ide.proxy import close_ide_http_client
 from app.api.v1 import health
 from app.api.v1.router import api_router
 from app.api.wellknown import router as wellknown_router
@@ -48,6 +50,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         logger.info("startup", app_env=settings.app_env, version=VERSION)
         init_engine(settings)
         yield
+        # Before the engine: an IDE request still streaming would otherwise find
+        # its database session gone when it next needs one.
+        await close_ide_http_client()
         await dispose_engine()
         logger.info("shutdown")
 
@@ -89,6 +94,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # protocol, not the REST envelope.
     app.include_router(terminal_router)
     app.include_router(wellknown_router)
+    # The instance IDE proxy. At the root, not under the versioned prefix: it
+    # serves whole applications and their websockets, not the platform's own API.
+    app.include_router(ide_router)
     app.include_router(api_router, prefix=settings.api_v1_prefix)
 
     return app

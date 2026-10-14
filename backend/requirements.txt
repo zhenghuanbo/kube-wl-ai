@@ -34,6 +34,14 @@ PyJWT>=2.10.1
 argon2-cffi>=23.1.0
 cryptography>=44.0.0
 
+# --- Instance IDE reverse proxy ----------------------------------------------
+# Both are imported directly by app/api/ide/proxy.py, so they are declared here
+# rather than left to arrive transitively. `websockets` would happen to be
+# installed anyway as part of `uvicorn[standard]`, but relying on a dependency of
+# a dependency for a direct import is how a production image ends up missing it.
+httpx>=0.28.1
+websockets>=14.0
+
 # --- Kubernetes --------------------------------------------------------------
 kubernetes>=31.0.0
 kubernetes-asyncio>=31.1.0

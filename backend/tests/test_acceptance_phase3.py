@@ -9,12 +9,18 @@ platform is responsible for — rather than against a live cluster.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.tokens import IDE_TOKEN_TYPE, create_access_token, decode_ide_ticket
+from app.auth.tokens import (
+    IDE_TOKEN_TYPE,
+    create_access_token,
+    create_ide_ticket,
+    decode_ide_ticket,
+)
 from app.core.config import Settings
 from app.core.errors import UnauthorizedError
 from app.k8s import FakeExecSession, FakeK8sGateway
@@ -258,8 +264,10 @@ async def test_creating_an_instance_applies_the_full_object_set(
     assert deployment.cpu_milli == 2000
     assert deployment.memory_mb == 4096
     assert deployment.replicas == 1
-    # Jupyter must be told the ingress prefix or every asset 404s.
-    assert f"--ServerApp.base_url=/x/{body['id']}/" in (deployment.command or ())
+    # Jupyter must be told its prefix or every asset 404s. The prefix is the same
+    # path the browser will use, because the platform proxies it rather than
+    # publishing the IDE on a hostname of its own.
+    assert f"--ServerApp.base_url=/x/dana/{body['id']}/" in (deployment.command or ())
     # The claim is dana's home volume, and it is mounted under her own name.
     assert deployment.pvc_name == world.home_volume.pvc_name
     assert deployment.mount_path == "/home/dana"
@@ -268,11 +276,14 @@ async def test_creating_an_instance_applies_the_full_object_set(
     assert len(services) == 2
     ssh = next(spec for spec in services.values() if spec.service_type == "NodePort")
     ide = next(spec for spec in services.values() if spec.service_type == "ClusterIP")
-    # Only SSH is reachable from a node address; the IDE stays behind the ingress.
+    # Only SSH is reachable from a node address. The IDE is a ClusterIP, so the
+    # only way to it is the platform's own proxy — no node address, and no second
+    # route for an ingress controller to pick up later.
     assert [port.name for port in ssh.ports] == ["ssh"]
     assert [port.name for port in ide.ports] == ["ide"]
+    assert ide.ports[0].node_port is None
 
-    assert len([k for k in gateway.ingresses if k.startswith(prefix)]) == 1
+    assert [k for k in gateway.ingresses if k.startswith(prefix)] == []
     # Nothing is created in the cluster's storage layer: the home claim already
     # exists (registered with the volume), and the instance owns no scratch disk.
     assert [k for k in gateway.pvcs if k.startswith(prefix)] == []
@@ -281,7 +292,10 @@ async def test_creating_an_instance_applies_the_full_object_set(
     assert deployment.ssh_secret_name is None
 
     assert body["sshNodePort"] == ssh.ports[0].node_port
-    assert body["idePath"] == f"/x/{body['id']}/"
+    # The URL names the owner, because the proxy route has to find the instance
+    # from the address alone — and it ends at JupyterLab's page, not at the bare
+    # prefix, which Jupyter redirects.
+    assert body["idePath"] == f"/x/dana/{body['id']}/lab"
     assert body["sshCommand"] == f"ssh -p {ssh.ports[0].node_port} dana@<节点地址>"
 
 
@@ -339,7 +353,12 @@ async def test_a_malformed_public_key_is_rejected(client: AsyncClient, world: Wo
 async def test_ide_none_creates_no_ingress_or_ide_service(
     client: AsyncClient, world: World, gateway: FakeK8sGateway
 ) -> None:
-    """An instance with no web IDE must not publish a route to itself."""
+    """An instance with no web IDE must not publish a route to itself.
+
+    Every instance asserts the no-ingress half now, since none of them get one;
+    what is specific to this case is that there is no IDE Service either, so the
+    proxy has nothing to forward to and answers 404.
+    """
     await act_as(client, "dana")
     body = await make_instance(client, world, ideType="none", sshEnabled=False)
 
@@ -353,25 +372,36 @@ async def test_ide_none_creates_no_ingress_or_ide_service(
     assert ticket.status_code == 400
 
 
-async def test_ide_access_ticket_is_scoped_and_short_lived(
-    client: AsyncClient, world: World, settings
+async def test_the_ide_ticket_is_unused_by_the_endpoint_but_still_sound(
+    client: AsyncClient, world: World, settings: Settings
 ) -> None:
-    """The ticket must name one instance and be useless as an API credential."""
+    """The endpoint mints nothing; the machinery it used to call still holds up.
+
+    ``/ide-access`` now answers with a bare path, because the ingress that was
+    supposed to verify the ticket never did — ``decode_ide_ticket`` had no caller
+    outside this file. The functions are kept because they are what the proxy's
+    authentication step will call when it is added, and because the property they
+    guarantee — a ticket names exactly one instance and is useless as an API
+    credential — is the reason to prefer them over a session cookie.
+    """
     await act_as(client, "dana")
     body = await make_instance(client, world)
 
-    response = await client.get(f"/api/v1/instances/{body['id']}/ide-access")
+    issued = (await client.get(f"/api/v1/instances/{body['id']}/ide-access")).json()
+    assert issued == {"url": f"/x/dana/{body['id']}/lab"}
 
-    assert response.status_code == 200, response.text
-    issued = response.json()
-    assert issued["url"].startswith(f"/x/{body['id']}/?ticket=")
-    assert 0 < issued["expiresIn"] <= 120
-
-    ticket = issued["url"].split("ticket=", 1)[1]
+    ticket, expires_at = create_ide_ticket(
+        user_id=world.user_a.id,
+        username="dana",
+        instance_id=body["id"],
+        namespace="wl-lab-a-alpha",
+        settings=settings,
+    )
     claims = decode_ide_ticket(ticket, settings)
     assert claims["instance"] == body["id"]
     assert claims["namespace"] == "wl-lab-a-alpha"
     assert claims["typ"] == IDE_TOKEN_TYPE
+    assert 0 < int((expires_at - datetime.now(UTC)).total_seconds()) <= 120
 
     # An ordinary access token must not be accepted where a ticket is expected.
     access, _ = create_access_token(user_id=world.user_a.id, username="dana", settings=settings)
@@ -765,6 +795,9 @@ async def test_delete_removes_every_object_and_hides_the_row(
     assert removed.status_code == 200, removed.text
     assert [key for key in gateway.deployments if key.startswith(prefix)] == []
     assert [key for key in gateway.services if key.startswith(prefix)] == []
+    # Never created for this instance, so this only proves the absence. The paths
+    # that still *name* an ingress are the legacy ones recorded before the platform
+    # proxied them itself; `tests/test_ide_proxy.py` covers that cleanup.
     assert [key for key in gateway.ingresses if key.startswith(prefix)] == []
     assert [key for key in gateway.pvcs if key.startswith(prefix)] == []
 

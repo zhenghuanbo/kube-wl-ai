@@ -236,19 +236,18 @@ def main() -> int:
         f"/resource-groups/{pool_id}/limits",
         token=admin,
         body={
-            "maxConcurrentInstances": 5,
-            "maxGpuPerInstance": 1,
             "maxGpuPerUser": 1,
-            "maxCpuMilliPerUser": 4000,
-            "maxMemoryMbPerUser": 8192,
+            "maxCpuCoresPerUser": 4,
+            "maxMemoryGbPerUser": 8,
             "maxStorageGbPerUser": 20,
-            "maxConcurrentTasks": 2,
         },
     )
-    check("设置资源组公平上限（含任务并发数）", status == 200, str(limits))
+    check("设置资源组公平上限", status == 200, str(limits))
     check(
-        "任务并发总数被记录",
-        isinstance(limits, dict) and limits.get("maxConcurrentTasks") == 2,
+        "上限按核与 GB 记录（不再是 milli/MB）",
+        isinstance(limits, dict)
+        and limits.get("maxCpuCoresPerUser") == 4
+        and limits.get("maxMemoryGbPerUser") == 8,
         str(limits),
     )
 

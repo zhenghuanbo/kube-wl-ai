@@ -900,11 +900,28 @@ async def list_quotas(
 async def quota_limits_for_groups(
     session: AsyncSession, group_ids: Sequence[int]
 ) -> dict[str, int]:
-    """Sum the per-user allowances of the given resource groups.
+    """Total the pools' allowances, in the units the ``quotas`` table speaks.
 
-    Summing is deliberate: a workspace granted two pools may use its allowance
-    in each, and because one user has exactly one workspace (plan D7) the
-    per-user ceiling *is* the per-workspace ceiling.
+    Milli-cores and mebibytes, because that is what a namespace ``ResourceQuota`` is
+    written in; the pool rows store cores and GB because that is what an
+    administrator types. This is the one place the two spellings meet.
+
+    **Counting workloads is no longer here.** It used to be
+    ``sum(max_concurrent_instances)``, which is only a per-workspace ceiling if a
+    workspace has exactly one user — the same premise this docstring used to state
+    outright ("the per-user ceiling *is* the per-workspace ceiling"). A workspace
+    holds several users, so summing per-user allowances would hand it one allowance
+    per member. Counts are enforced per user on their quota profile, and the
+    namespace's object counts come from the workspace's quota profile.
+
+    A pool that says "not checked" (``-1``) contributes **nothing at all**: when no
+    granted pool checks a dimension, that dimension is left out of the result
+    entirely, so the caller omits the corresponding Kubernetes key instead of
+    inventing a ceiling nobody asked for.
+
+    The GPU number is the exception: it comes from the specs the granted pools
+    *offer* (the largest per model), not from their ``max_gpu_per_user``, which is a
+    per-person fairness rule rather than a namespace total.
     """
     if not group_ids:
         return {}
@@ -921,19 +938,17 @@ async def quota_limits_for_groups(
     if not limits:
         return {}
 
-    totals = {
-        QuotaResource.CPU.value: 0,
-        QuotaResource.MEMORY.value: 0,
-        QuotaResource.STORAGE.value: 0,
-        QuotaResource.INSTANCE.value: 0,
-        QuotaResource.TASK.value: 0,
-    }
-    for limit in limits:
-        totals[QuotaResource.CPU.value] += limit.max_cpu_milli_per_user
-        totals[QuotaResource.MEMORY.value] += limit.max_memory_mb_per_user
-        totals[QuotaResource.STORAGE.value] += limit.max_storage_gb_per_user
-        totals[QuotaResource.INSTANCE.value] += limit.max_concurrent_instances
-        totals[QuotaResource.TASK.value] += limit.max_concurrent_tasks
+    cpu_cores = [row.max_cpu_cores_per_user for row in limits if row.max_cpu_cores_per_user >= 0]
+    memory_gb = [row.max_memory_gb_per_user for row in limits if row.max_memory_gb_per_user >= 0]
+    storage_gb = [row.max_storage_gb_per_user for row in limits if row.max_storage_gb_per_user >= 0]
+
+    totals: dict[str, int] = {}
+    if cpu_cores:
+        totals[QuotaResource.CPU.value] = sum(cpu_cores) * 1000
+    if memory_gb:
+        totals[QuotaResource.MEMORY.value] = sum(memory_gb) * 1024
+    if storage_gb:
+        totals[QuotaResource.STORAGE.value] = sum(storage_gb)
 
     # GPUs are tracked per model, so they cannot be summed into one number.
     specs = await gpu_counts_for_groups(session, group_ids)
@@ -994,11 +1009,17 @@ async def upsert_quotas(
     limits: dict[str, int],
     units: dict[str, str] | None = None,
 ) -> list[Quota]:
-    """Set the limit for each resource key, creating rows as needed.
+    """Replace the limits of a scope with exactly ``limits``.
 
-    ``used_value`` is preserved: recomputing a limit must never silently reset
-    the consumption counter, or a user could exceed their quota by asking an
-    administrator to edit it.
+    Two rules, both about not letting a stale number stay in force:
+
+    * ``used_value`` is preserved: recomputing a limit must never silently reset
+      the consumption counter, or a user could exceed their quota by asking an
+      administrator to edit it.
+    * A row whose resource is **not** in ``limits`` is deleted. That used to be
+      left alone, so a ceiling that had lost its source stayed enforced — which is
+      how the workspace ``instance`` and ``task`` rows outlived the columns they
+      were derived from.
     """
     existing = {
         quota.resource: quota
@@ -1023,6 +1044,10 @@ async def upsert_quotas(
             quota.is_active = True
             if resource in resolved_units:
                 quota.unit = resolved_units[resource]
+
+    for resource, quota in existing.items():
+        if resource not in limits:
+            await session.delete(quota)
 
     await session.flush()
     return await list_quotas(session, scope_type=scope_type, scope_id=scope_id)

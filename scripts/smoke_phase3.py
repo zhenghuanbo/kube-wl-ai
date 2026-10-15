@@ -188,8 +188,8 @@ def main() -> int:
     pool_id = int(pool["id"])
 
     status, _ = call("PUT", f"/resource-groups/{pool_id}/limits", token=admin, body={
-        "maxConcurrentInstances": 5, "maxGpuPerInstance": 1, "maxGpuPerUser": 1,
-        "maxCpuMilliPerUser": 4000, "maxMemoryMbPerUser": 8192, "maxStorageGbPerUser": 20,
+        "maxGpuPerUser": 1, "maxCpuCoresPerUser": 4,
+        "maxMemoryGbPerUser": 8, "maxStorageGbPerUser": 20,
     })
     check("设置资源组公平上限", status == 200)
 
@@ -333,6 +333,7 @@ def main() -> int:
     # 每用户存储上限现在校验的是存储卷的容量（见 smoke_phase5 的存储段）。
 
     # --- quota -------------------------------------------------------------
+    # 每用户 4 核：两个 2000m 实例正好用满，第三个必须被拒。
     status, second = call("POST", "/instances", token=token, body=payload("dev-two"))
     check("第二个实例创建成功（2×2000m = 4000m 上限）", status == 201, str(second))
 
@@ -341,6 +342,10 @@ def main() -> int:
     check("配额错误指明资源类型",
           isinstance(third, dict)
           and str(third.get("error", {}).get("detail", {}).get("resource")) == "cpu",
+          str(third))
+    check("配额错误指明是哪一层挡住的（这里是资源组）",
+          isinstance(third, dict)
+          and str(third.get("error", {}).get("detail", {}).get("layer")) == "pool",
           str(third))
 
     # --- lifecycle ---------------------------------------------------------

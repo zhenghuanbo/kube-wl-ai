@@ -1,8 +1,9 @@
 """Workspaces — the tenancy boundary of the platform.
 
 A workspace is exactly one Kubernetes namespace. It belongs to one group, may be
-granted several resource groups, and holds at most one user (plan D7): a user
-belongs to a single workspace and there is no workspace switcher, because the
+granted several resource groups, and may hold **several users** — the cardinality
+constraint is on the other side: a user belongs to at most one workspace
+(``uq_workspace_members_user``), and there is no workspace switcher, because the
 underlying storage and namespace are what give the work its identity.
 """
 
@@ -57,6 +58,14 @@ class Workspace(Base, TimestampMixin):
         ForeignKey("users.id", ondelete="SET NULL"), index=True
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    #: Compute quota profile for this namespace. ``NULL`` means "follow the current
+    #: default profile for workspaces". The profile's cpu/memory/gpu are what
+    #: ``apply_cluster_state`` pushes into the namespace ``ResourceQuota``, so the
+    #: platform's own check and the cluster's admission rule are the same numbers.
+    quota_profile_id: Mapped[int | None] = mapped_column(
+        ForeignKey("quota_profiles.id", ondelete="RESTRICT"), index=True
+    )
 
     group: Mapped[Group] = relationship(lazy="joined")
     members: Mapped[list[WorkspaceMember]] = relationship(

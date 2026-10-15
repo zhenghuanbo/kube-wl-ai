@@ -215,11 +215,11 @@ def main() -> int:
             f"/resource-groups/{pool_id}/limits",
             token=admin,
             body={
-                "maxConcurrentInstances": 3,
-                "maxGpuPerInstance": 1,
                 "maxGpuPerUser": 4,
-                "maxCpuMilliPerUser": 6000,
-                "maxMemoryMbPerUser": 12288,
+                # Cores and GB, not milli/bytes: these are the numbers an
+                # administrator reads off the form.
+                "maxCpuCoresPerUser": 6,
+                "maxMemoryGbPerUser": 12,
                 "maxStorageGbPerUser": 50,
             },
         )
@@ -396,7 +396,11 @@ def main() -> int:
     )
     check("配额按资源组上限汇总", by_resource.get("cpu") == 6000, str(by_resource))
     check("内存配额同步汇总", by_resource.get("memory") == 12288, str(by_resource))
-    check("实例数配额同步汇总", by_resource.get("instance") == 3, str(by_resource))
+    check(
+        "不再有实例数配额：能建几个实例归用户配额模板管，不从资源池求和",
+        "instance" not in by_resource,
+        str(by_resource),
+    )
     check(
         "GPU 按型号取最大规格而非求和",
         by_resource.get("gpu:a100") == 2,

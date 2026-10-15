@@ -24,7 +24,6 @@ from app.auth import policy
 from app.core.errors import BadRequestError, ConflictError, NotFoundError
 from app.core.logging import get_logger
 from app.k8s import (
-    SERVICES_PER_INSTANCE,
     K8sError,
     K8sGateway,
     LimitSpec,
@@ -35,6 +34,7 @@ from app.k8s import (
 from app.k8s.naming import namespace_for
 from app.models.enums import QuotaResource, QuotaScope, WorkspaceRole, WorkspaceStatus
 from app.models.group import Group
+from app.models.quota_profile import QuotaProfile
 from app.models.resource import Quota, ResourceGroup, ResourceGroupSpec, ResourceSpec
 from app.models.user import User
 from app.models.workspace import Workspace, WorkspaceMember, WorkspaceResourceGrant
@@ -47,6 +47,7 @@ from app.schemas.workspace import (
     WorkspaceSummary,
     WorkspaceUpdate,
 )
+from app.services import quota_profiles as profile_service
 from app.services import resources as resource_service
 
 logger = get_logger(__name__)
@@ -56,13 +57,13 @@ QUOTA_NAME = "wl-quota"
 LIMIT_RANGE_NAME = "wl-limits"
 NETWORK_POLICY_NAME = "wl-default"
 
-#: Units used purely for display; the API never does arithmetic on them.
+#: Units used purely for display; the API never does arithmetic on them. No entries
+#: for workload counts: those are not workspace ceilings any more, they are per-user
+#: ceilings on a quota profile, and a namespace object count is not a "quota" here.
 _QUOTA_UNITS: dict[str, str] = {
     QuotaResource.CPU.value: "m",
     QuotaResource.MEMORY.value: "MB",
     QuotaResource.STORAGE.value: "GB",
-    QuotaResource.INSTANCE.value: "个",
-    QuotaResource.TASK.value: "个",
 }
 
 
@@ -393,8 +394,6 @@ async def _desired_quota(
         limits = {
             QuotaResource.CPU.value: 0,
             QuotaResource.MEMORY.value: 0,
-            QuotaResource.INSTANCE.value: 0,
-            QuotaResource.TASK.value: 0,
             QuotaResource.STORAGE.value: 0,
         }
 
@@ -416,8 +415,6 @@ async def _desired_quota(
     cpu_milli = limits.get(QuotaResource.CPU.value, 0)
     memory_mb = limits.get(QuotaResource.MEMORY.value, 0)
     storage_gb = limits.get(QuotaResource.STORAGE.value, 0)
-    instances = limits.get(QuotaResource.INSTANCE.value, 0)
-    tasks = limits.get(QuotaResource.TASK.value, 0)
 
     if cpu_milli:
         # Requests and limits are kept equal so a workspace cannot be scheduled
@@ -435,21 +432,18 @@ async def _desired_quota(
     # storage: the per-user cap (`max_storage_gb_per_user`) is checked when a
     # volume is registered and says nothing about the group's total.
     hard["requests.storage"] = f"{storage_gb}Gi"
-    if instances:
-        hard["count/deployments.apps"] = str(instances)
-        # Two per instance, not one: an instance with both an IDE and SSH creates
-        # a ClusterIP and a NodePort. Sizing this as one Service per instance let
-        # a single instance consume a two-instance workspace's entire allowance,
-        # so the second instance failed with `exceeded quota: count/services`
-        # *after* its Deployment had been applied.
-        hard["count/services"] = str(SERVICES_PER_INSTANCE * instances)
-    if tasks:
-        # Exactly the task allowance: a workspace may run its jobs and nothing
-        # more, so the platform's counter and the cluster's cannot disagree.
-        hard["count/jobs.batch"] = str(tasks)
-        # One pod per instance or task, and no spare capacity for anything the
-        # platform did not create.
-        hard["pods"] = str(instances + tasks)
+
+    # The namespace's object counts come from the workspace's own quota profile, not
+    # from the pools. They used to be `sum(max_concurrent_instances)`, which is only
+    # a workspace ceiling if the workspace has one user — with several it would hand
+    # the namespace one allowance per member. They are also the *coarse* backstop:
+    # the ceiling a person actually meets is the count on their own profile.
+    #
+    # Only when a pool is granted: with none, `pods` is already pinned to zero above
+    # and adding the profile's numbers would re-open the namespace.
+    if group_ids:
+        profile = await profile_service.resolve_workspace_profile(session, workspace)
+        hard.update(_object_count_limits(profile))
 
     gpu_total = sum(
         value for key, value in limits.items() if key.startswith(f"{QuotaResource.GPU.value}:")
@@ -459,6 +453,24 @@ async def _desired_quota(
         hard["limits.nvidia.com/gpu"] = str(gpu_total)
 
     return QuotaSpec(name=QUOTA_NAME, hard=hard), network_type, limit_spec
+
+
+def _object_count_limits(profile: QuotaProfile) -> dict[str, str]:
+    """The namespace object counts a workspace profile asks for.
+
+    ``-1`` means "not checked", so that key is left out of the manifest entirely
+    rather than written as a number. Writing it as ``0`` would be the opposite of
+    what was asked for: Kubernetes reads an absent resource as unlimited, and a
+    ``0`` as "none at all", so the only faithful translation of "do not check this"
+    is to say nothing.
+    """
+    wanted = (
+        ("count/deployments.apps", profile.max_deployments),
+        ("count/services", profile.max_services),
+        ("count/jobs.batch", profile.max_jobs),
+        ("pods", profile.max_pods),
+    )
+    return {key: str(value) for key, value in wanted if value is not None and value >= 0}
 
 
 async def _effective_network_type(session: AsyncSession, group_ids: Sequence[int]) -> object:

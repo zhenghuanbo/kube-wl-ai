@@ -22,6 +22,7 @@ from app.models.enums import (
     InstanceStatus,
     NetworkType,
     NodeStatus,
+    QuotaProfileKind,
     QuotaResource,
     QuotaScope,
     ResourceGroupKind,
@@ -40,6 +41,7 @@ from app.models.enums import (
 from app.models.group import Group, UserGroupLink
 from app.models.image import Image
 from app.models.instance import Instance
+from app.models.quota_profile import QuotaProfile
 from app.models.rbac import Permission, Role, RolePermission, UserRole
 from app.models.resource import (
     GPU_MODELS,
@@ -90,6 +92,8 @@ __all__ = [
     "NodeStatus",
     "Permission",
     "Quota",
+    "QuotaProfile",
+    "QuotaProfileKind",
     "QuotaResource",
     "QuotaScope",
     "RefreshToken",

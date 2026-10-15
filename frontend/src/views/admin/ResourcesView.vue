@@ -151,11 +151,9 @@ const poolForm = reactive({
   isDefault: false,
   specIds: [] as number[],
   limits: {
-    maxConcurrentInstances: 2,
-    maxGpuPerInstance: 1,
     maxGpuPerUser: 2,
-    maxCpuMilliPerUser: 8000,
-    maxMemoryMbPerUser: 16384,
+    maxCpuCoresPerUser: 8,
+    maxMemoryGbPerUser: 16,
     maxStorageGbPerUser: 100,
   },
 })
@@ -177,11 +175,9 @@ async function openPool(pool?: ResourceGroupSummary): Promise<void> {
       isDefault: detail.isDefault,
       specIds: detail.specs.map((spec) => spec.id),
       limits: {
-        maxConcurrentInstances: detail.limits?.maxConcurrentInstances ?? 2,
-        maxGpuPerInstance: detail.limits?.maxGpuPerInstance ?? 1,
         maxGpuPerUser: detail.limits?.maxGpuPerUser ?? 2,
-        maxCpuMilliPerUser: detail.limits?.maxCpuMilliPerUser ?? 8000,
-        maxMemoryMbPerUser: detail.limits?.maxMemoryMbPerUser ?? 16384,
+        maxCpuCoresPerUser: detail.limits?.maxCpuCoresPerUser ?? 8,
+        maxMemoryGbPerUser: detail.limits?.maxMemoryGbPerUser ?? 16,
         maxStorageGbPerUser: detail.limits?.maxStorageGbPerUser ?? 100,
       },
     })
@@ -198,11 +194,9 @@ async function openPool(pool?: ResourceGroupSummary): Promise<void> {
       isDefault: false,
       specIds: [],
       limits: {
-        maxConcurrentInstances: 2,
-        maxGpuPerInstance: 1,
         maxGpuPerUser: 2,
-        maxCpuMilliPerUser: 8000,
-        maxMemoryMbPerUser: 16384,
+        maxCpuCoresPerUser: 8,
+        maxMemoryGbPerUser: 16,
         maxStorageGbPerUser: 100,
       },
     })
@@ -985,41 +979,38 @@ onMounted(async () => {
             class="mb-4"
           />
 
-          <h4 class="text-subtitle-2 mb-2">单用户上限</h4>
+          <h4 class="text-subtitle-2 mb-1">单用户上限</h4>
+          <p class="text-caption text-medium-emphasis mb-2">
+            该资源池内单个用户最多可占用的资源。<code>-1</code> 表示不校验该维度，<code>0</code>
+            表示完全不允许。 可创建的实例、应用、自定义业务数量不在这里，而在用户关联的配额模板中：
+            「最多能拥有几个」属于用户，而不是资源池。
+          </p>
           <v-row dense>
             <v-col cols="12" sm="4">
               <v-text-field
-                v-model.number="poolForm.limits.maxCpuMilliPerUser"
+                v-model.number="poolForm.limits.maxCpuCoresPerUser"
                 type="number"
-                label="CPU（milli）"
+                label="CPU（核）"
+                hint="-1 表示不限制"
+                persistent-hint
               />
             </v-col>
             <v-col cols="12" sm="4">
               <v-text-field
-                v-model.number="poolForm.limits.maxMemoryMbPerUser"
+                v-model.number="poolForm.limits.maxMemoryGbPerUser"
                 type="number"
-                label="内存（MB）"
+                label="内存（GB）"
+                hint="-1 表示不限制"
+                persistent-hint
               />
             </v-col>
             <v-col cols="12" sm="4">
               <v-text-field
                 v-model.number="poolForm.limits.maxGpuPerUser"
                 type="number"
-                label="加速卡数量"
-              />
-            </v-col>
-            <v-col cols="12" sm="4">
-              <v-text-field
-                v-model.number="poolForm.limits.maxConcurrentInstances"
-                type="number"
-                label="并发实例数"
-              />
-            </v-col>
-            <v-col cols="12" sm="4">
-              <v-text-field
-                v-model.number="poolForm.limits.maxGpuPerInstance"
-                type="number"
-                label="单实例加速卡"
+                label="加速卡（张）"
+                hint="-1 表示不限制"
+                persistent-hint
               />
             </v-col>
             <v-col cols="12" sm="4">
@@ -1027,6 +1018,8 @@ onMounted(async () => {
                 v-model.number="poolForm.limits.maxStorageGbPerUser"
                 type="number"
                 label="存储（GB）"
+                hint="-1 表示不限制"
+                persistent-hint
               />
             </v-col>
           </v-row>

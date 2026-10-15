@@ -30,6 +30,11 @@ class UserSummary(ApiModel):
     roles: list[str]
     primary_group_id: int | None = None
     primary_group_name: str | None = None
+    #: The quota template this user follows, or ``None`` for the kind's default.
+    #: ``None`` does not mean "no quota": it means "follow the default", which is
+    #: what makes promoting a new default move everyone who never asked for one of
+    #: their own.
+    quota_profile_id: int | None = None
 
     @classmethod
     def from_user(cls, user: User) -> UserSummary:
@@ -48,6 +53,7 @@ class UserSummary(ApiModel):
             roles=policy.effective_role_codes(user),
             primary_group_id=primary.id if primary else None,
             primary_group_name=primary.display_name if primary else None,
+            quota_profile_id=user.quota_profile_id,
         )
 
 

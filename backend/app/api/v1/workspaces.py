@@ -1,7 +1,7 @@
 """Workspace endpoints.
 
-A workspace is the tenancy boundary: it owns a Kubernetes namespace, holds at
-most one user, and is the thing resource groups are granted to.
+A workspace is the tenancy boundary: it owns a Kubernetes namespace, may hold
+several users, and is the thing resource groups are granted to.
 """
 
 from __future__ import annotations
@@ -13,10 +13,11 @@ from fastapi import APIRouter, Depends, Query, status
 from app.auth.policy import PermissionCheck
 from app.core.deps import CurrentUser, DbSession, require
 from app.k8s import get_gateway
-from app.models.enums import WorkspaceStatus
+from app.models.enums import QuotaProfileKind, WorkspaceStatus
 from app.models.workspace import Workspace
 from app.schemas.base import ApiMessage
 from app.schemas.common import Page, PageMeta
+from app.schemas.quota_profile import QuotaProfileAssign
 from app.schemas.workspace import (
     WorkspaceCreate,
     WorkspaceDetail,
@@ -28,6 +29,7 @@ from app.schemas.workspace import (
     WorkspaceSummary,
     WorkspaceUpdate,
 )
+from app.services import quota_profiles as quota_profile_service
 from app.services import workspaces as workspace_service
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
@@ -39,6 +41,9 @@ CanUpdate = Depends(require("workspace:update"))
 CanDelete = Depends(require("workspace:delete"))
 CanAssign = Depends(require("workspace:assign_member"))
 CanGrant = Depends(require("workspace:grant_resource"))
+#: Not folded into `CanUpdate`: this is the permission that moves a ceiling, and a
+#: group administrator may rename a workspace without being able to re-quota it.
+CanAssignQuota = Depends(require("quota_profile:assign"))
 
 
 def _pages(total: int, page_size: int) -> int:
@@ -161,6 +166,31 @@ async def reconcile_workspace(
     """
     workspace = await workspace_service.get_workspace(session, actor, workspace_id)
     return await workspace_service.apply_cluster_state(session, workspace, get_gateway())
+
+
+@router.put("/{workspace_id}/quota-profile", response_model=WorkspaceDetail)
+async def set_workspace_quota_profile(
+    session: DbSession,
+    actor: CurrentUser,
+    _: Annotated[PermissionCheck, CanAssignQuota],
+    workspace_id: int,
+    payload: QuotaProfileAssign,
+) -> WorkspaceDetail:
+    """Attach a quota template, or clear it to follow the default.
+
+    The namespace's ceilings are re-applied straight away. They are *derived* from
+    the template, so a change that only took effect at the next reconcile would look
+    like it had been ignored — and the user would have no way to tell the difference
+    from a failure.
+    """
+    workspace = await workspace_service.get_workspace(session, actor, workspace_id)
+    profile = await quota_profile_service.profile_for_assignment(
+        session, payload.profile_id, QuotaProfileKind.WORKSPACE
+    )
+    workspace.quota_profile_id = profile.id if profile else None
+    await session.flush()
+    await workspace_service.apply_cluster_state(session, workspace, get_gateway())
+    return await _detail(session, workspace)
 
 
 # --- members -----------------------------------------------------------------

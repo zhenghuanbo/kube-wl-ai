@@ -120,6 +120,19 @@ class GpuDeviceStatus(StrEnum):
     UNHEALTHY = "unhealthy"
 
 
+class QuotaProfileKind(StrEnum):
+    """Which population a quota profile is written for.
+
+    One table serves both kinds because an administrator thinks of a profile as a
+    named set of ceilings they attach to *somebody*. The two differ only in which
+    dimensions apply: a user profile also counts objects, a workspace profile also
+    bounds the Kubernetes objects in its namespace.
+    """
+
+    USER = "user"
+    WORKSPACE = "workspace"
+
+
 class QuotaScope(StrEnum):
     """What a quota row is attached to."""
 
@@ -141,6 +154,10 @@ class QuotaResource(StrEnum):
     GPU = "gpu"
     STORAGE = "storage"
     INSTANCE = "instance"
+    #: Applications are a count-only dimension. Launching one consumes the
+    #: instance allowance, so there is nothing extra to charge for the application
+    #: itself — only "how many may I have registered".
+    APPLICATION = "application"
     TASK = "task"
 
 

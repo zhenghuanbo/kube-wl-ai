@@ -17,6 +17,7 @@ from app.api.v1 import (
     images,
     instances,
     monitor,
+    quota_profiles,
     rbac,
     resources,
     storages,
@@ -34,6 +35,7 @@ api_router.include_router(users.router)
 api_router.include_router(groups.router)
 api_router.include_router(rbac.router)
 api_router.include_router(resources.router)
+api_router.include_router(quota_profiles.router)
 api_router.include_router(workspaces.router)
 api_router.include_router(instances.router)
 api_router.include_router(applications.router)

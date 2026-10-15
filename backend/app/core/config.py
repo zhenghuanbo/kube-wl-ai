@@ -222,6 +222,36 @@ class Settings(BaseSettings):
     #: leaked URL is useless.
     ide_ticket_seconds: int = 120
 
+    # --- Compute quota -------------------------------------------------------
+    # The ceilings a freshly seeded default profile carries, and the Kubernetes
+    # object counts a workspace namespace may hold when its own profile does not
+    # say otherwise. Every one of these is a *default*, not a constant: an
+    # administrator edits the profile to change a real ceiling, and these exist so
+    # that "what a new tenant gets" is visible in configuration instead of being
+    # buried in the code that creates the row.
+    #
+    # `-1` is the sentinel for "do not check this dimension" (see
+    # `app.models.quota_profile.UNLIMITED`). It is a number rather than `None`
+    # because every dimension uses it uniformly, and because `0` has to keep
+    # meaning "none allowed".
+    default_user_quota_cpu_cores: int = 24
+    default_user_quota_memory_gb: int = -1
+    default_user_quota_gpu: int = 8
+    default_user_quota_max_instances: int = 10
+    default_user_quota_max_applications: int = 10
+    default_user_quota_max_tasks: int = 10
+
+    default_workspace_quota_cpu_cores: int = 24
+    default_workspace_quota_memory_gb: int = -1
+    default_workspace_quota_gpu: int = 8
+    #: Object counts for a workspace namespace. These are the *coarse* backstop
+    #: that stops a runaway client filling a namespace with objects; the real
+    #: per-object ceilings are the user profiles' instance/application/task counts.
+    workspace_default_max_pods: int = 500
+    workspace_default_max_deployments: int = 200
+    workspace_default_max_services: int = 400
+    workspace_default_max_jobs: int = 200
+
     # --- Validators ----------------------------------------------------------
     @field_validator("cors_origins", "auth_providers", mode="before")
     @classmethod

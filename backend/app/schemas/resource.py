@@ -84,23 +84,25 @@ class ResourceGroupUpdate(ApiModel):
 
 
 class ResourceGroupLimitsRead(ApiModel):
-    max_concurrent_instances: int
-    max_concurrent_tasks: int
-    max_gpu_per_instance: int
+    """Per-user ceilings inside one pool, in cores and GB.
+
+    No workload counts: how many instances, applications or tasks one person may
+    hold is a property of the person and lives on their quota profile, so that the
+    question has one answer rather than two that can disagree.
+    """
+
     max_gpu_per_user: int
-    max_cpu_milli_per_user: int
-    max_memory_mb_per_user: int
+    max_cpu_cores_per_user: int
+    max_memory_gb_per_user: int
     max_storage_gb_per_user: int
 
 
 class ResourceGroupLimitsUpdate(ApiModel):
-    max_concurrent_instances: int | None = Field(default=None, ge=1, le=100)
-    max_concurrent_tasks: int | None = Field(default=None, ge=0, le=200)
-    max_gpu_per_instance: int | None = Field(default=None, ge=0, le=16)
-    max_gpu_per_user: int | None = Field(default=None, ge=0, le=64)
-    max_cpu_milli_per_user: int | None = Field(default=None, ge=100)
-    max_memory_mb_per_user: int | None = Field(default=None, ge=128)
-    max_storage_gb_per_user: int | None = Field(default=None, ge=0)
+    #: ``-1`` means "do not check this dimension"; ``0`` still means "none at all".
+    max_gpu_per_user: int | None = Field(default=None, ge=-1, le=1024)
+    max_cpu_cores_per_user: int | None = Field(default=None, ge=-1, le=4096)
+    max_memory_gb_per_user: int | None = Field(default=None, ge=-1, le=65536)
+    max_storage_gb_per_user: int | None = Field(default=None, ge=-1, le=65536)
 
 
 # ---------------------------------------------------------------------------

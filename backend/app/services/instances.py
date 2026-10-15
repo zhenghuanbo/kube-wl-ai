@@ -30,7 +30,7 @@ from sqlalchemy.orm import joinedload, raiseload
 
 from app.auth import policy
 from app.core.config import Settings
-from app.core.errors import BadRequestError, ConflictError, NotFoundError, QuotaExceededError
+from app.core.errors import BadRequestError, ConflictError, NotFoundError
 from app.core.logging import get_logger
 from app.k8s import InstanceObjects, K8sError, K8sGateway, run_gateway
 from app.k8s.gateway import PodInfo, VolumeMountSpec, WorkloadRefs
@@ -44,14 +44,11 @@ from app.k8s.workloads import SSH_PORT, build_instance_objects, ide_base_path
 from app.models.enums import (
     IdeType,
     InstanceStatus,
-    QuotaResource,
     WorkspaceStatus,
 )
 from app.models.instance import Instance
 from app.models.resource import (
     ResourceGroup,
-    ResourceSpec,
-    gpu_resource_key,
 )
 from app.models.ssh_key import SshKey
 from app.models.user import User
@@ -60,10 +57,8 @@ from app.schemas.instance import InstanceCreate, InstanceSummary, InstanceUpdate
 from app.services import storages as storage_service
 from app.services.quota_guard import (
     LIVE_INSTANCE_STATUSES,
-    Usage,
-    check_quota,
-    workspace_quotas,
-    workspace_usage,
+    Request,
+    enforce_compute_quota,
 )
 from app.services.workload_common import (
     Page,
@@ -355,17 +350,21 @@ async def create_instance(
 
     max_runtime = _resolve_runtime(payload.max_runtime_seconds, pool)
 
-    quotas = await workspace_quotas(session, workspace.id)
-    usage = await workspace_usage(session, workspace.id)
-    check_quota(
-        quotas,
-        usage,
-        cpu_milli=spec.cpu_milli,
-        memory_mb=spec.memory_mb,
-        gpu_type=spec.gpu_type,
-        gpu_count=spec.gpu_count,
+    # Every ceiling that applies to this submission, in one call: the owner's own
+    # quota profile, the pool's per-user limits, and the workspace's ceiling.
+    await enforce_compute_quota(
+        session,
+        owner=owner,
+        workspace=workspace,
+        pool=pool,
+        request=Request(
+            cpu_milli=spec.cpu_milli,
+            memory_mb=spec.memory_mb,
+            gpu_type=spec.gpu_type,
+            gpu_count=spec.gpu_count,
+            instances=1,
+        ),
     )
-    _check_pool_instance_caps(pool, usage, spec)
 
     instance = Instance(
         name=payload.name,
@@ -426,23 +425,6 @@ def _resolve_runtime(requested: int | None, pool: ResourceGroup) -> int | None:
             f"运行时长超出资源组上限（{cap} 秒）", code="runtime_exceeds_pool_limit"
         )
     return requested
-
-
-def _check_pool_instance_caps(pool: ResourceGroup, usage: Usage, spec: ResourceSpec) -> None:
-    """Per-pool fairness limits, which apply on top of the workspace quota."""
-    limits = pool.limits
-    if limits is None:
-        return
-    if usage.instances + 1 > limits.max_concurrent_instances:
-        raise QuotaExceededError(
-            f"并发实例数超出资源组上限（{limits.max_concurrent_instances}）",
-            detail={"resource": QuotaResource.INSTANCE.value},
-        )
-    if spec.gpu_count > limits.max_gpu_per_instance:
-        raise QuotaExceededError(
-            f"单实例加速卡数超出资源组上限（{limits.max_gpu_per_instance}）",
-            detail={"resource": gpu_resource_key(spec.gpu_type)},
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -1134,7 +1116,6 @@ __all__ = [
     "Instance",
     "InstanceObjects",
     "Page",
-    "Usage",
     "add_ssh_key",
     "apply_cluster_state",
     "authorized_keys",

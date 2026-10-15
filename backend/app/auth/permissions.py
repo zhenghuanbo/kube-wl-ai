@@ -75,6 +75,18 @@ PERMISSIONS: tuple[PermissionSpec, ...] = (
     PermissionSpec("node:sync", "resource", "同步集群节点"),
     PermissionSpec("quota:read", "resource", "查看配额"),
     PermissionSpec("quota:update", "resource", "调整配额"),
+    #: Compute quota profiles. Readable by a group administrator so a workspace's
+    #: ceiling can be explained to whoever asks; every write is global-admin only,
+    #: because these rows decide what *every* tenant is allowed.
+    PermissionSpec("quota_profile:read", "resource", "查看配额模板"),
+    PermissionSpec("quota_profile:create", "resource", "创建配额模板"),
+    PermissionSpec("quota_profile:update", "resource", "编辑配额模板"),
+    PermissionSpec("quota_profile:delete", "resource", "删除配额模板"),
+    #: Attaching a template to a user or a workspace is the step that changes
+    #: somebody's ceiling without changing the template, so it is its own code
+    #: rather than riding on `user:update` or `workspace:update` — a group
+    #: administrator may rename a workspace without being able to re-quota it.
+    PermissionSpec("quota_profile:assign", "resource", "分配配额模板"),
     # Images ------------------------------------------------------------------
     PermissionSpec("image:read", "image", "查看镜像"),
     PermissionSpec("image:create", "image", "登记/制作镜像"),
@@ -216,7 +228,7 @@ _GROUP_ADMIN = _USER | frozenset(
         workspace:assign_member workspace:grant_resource
         image:share
         resource_group:read resource_spec:read runtime_limit:read
-        node:read quota:read
+        node:read quota:read quota_profile:read
         usage:export monitor:read_group audit:read
         role:read permission:read
         """

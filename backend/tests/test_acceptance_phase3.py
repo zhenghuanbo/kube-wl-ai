@@ -114,11 +114,9 @@ async def build_world(admin_client: AsyncClient, seeded: AsyncSession, settings:
     limits = await admin_client.put(
         f"/api/v1/resource-groups/{pool_id}/limits",
         json={
-            "maxConcurrentInstances": 5,
-            "maxGpuPerInstance": 1,
             "maxGpuPerUser": 1,
-            "maxCpuMilliPerUser": 4000,
-            "maxMemoryMbPerUser": 8192,
+            "maxCpuCoresPerUser": 4,
+            "maxMemoryGbPerUser": 8,
             "maxStorageGbPerUser": 20,
         },
     )
@@ -479,26 +477,37 @@ async def test_cpu_quota_is_enforced_across_instances(client: AsyncClient, world
     assert third.json()["error"]["detail"]["resource"] == "cpu"
 
 
-def test_the_concurrency_cap_is_enforced_with_cpu_to_spare() -> None:
-    """A pool may cap instance count independently of how much CPU is left.
+async def test_the_user_instance_count_is_enforced_with_cpu_to_spare(
+    client: AsyncClient, admin_client: AsyncClient, world: World
+) -> None:
+    """A person's instance allowance is checked on its own, with compute to spare.
 
-    Asserted against the fairness rule directly: the workspace quota is derived
-    from the grant at provisioning time, so it cannot be tightened through the
-    pool afterwards, and an HTTP-level test could only ever observe the CPU cap.
+    The workspace has CPU left for a second instance; what runs out is the owner's
+    own count. This used to be a per-pool ``max_concurrent_instances``, which put
+    "how many may I have" on the pool rather than on the person, and so handed every
+    member of a workspace their own copy of the same number.
     """
-    from app.core.errors import QuotaExceededError
-    from app.models.resource import ResourceGroup, ResourceGroupLimit, ResourceSpec
-    from app.services.instances import Usage, _check_pool_instance_caps
+    await act_as(admin_client, "root2")
+    listed = await admin_client.get("/api/v1/quota-profiles", params={"kind": "user"})
+    assert listed.status_code == 200, listed.text
+    default = next(row for row in listed.json() if row["isDefault"])
+    tightened = await admin_client.patch(
+        f"/api/v1/quota-profiles/{default['id']}", json={"maxInstances": 1}
+    )
+    assert tightened.status_code == 200, tightened.text
 
-    limits = ResourceGroupLimit(max_concurrent_instances=2, max_gpu_per_instance=1)
-    pool = ResourceGroup(name="capped", limits=limits)
-    spec = ResourceSpec(name="cpu", cpu_milli=1000, memory_mb=1024, gpu_count=0)
+    await act_as(client, "dana")
+    await make_instance(client, world, name="one")
 
-    _check_pool_instance_caps(pool, Usage(instances=1), spec)
+    second = await client.post("/api/v1/instances", json=create_payload(world, name="two"))
 
-    with pytest.raises(QuotaExceededError) as caught:
-        _check_pool_instance_caps(pool, Usage(instances=2), spec)
-    assert caught.value.detail["resource"] == "instance"
+    assert second.status_code == 409, second.text
+    assert second.json()["error"]["code"] == "quota_exceeded"
+    detail = second.json()["error"]["detail"]
+    # Which layer refused is part of the answer: the owner's profile, not the pool
+    # and not the workspace.
+    assert (detail["layer"], detail["resource"]) == ("user", "instance")
+    assert (detail["used"], detail["limit"]) == (1, 1)
 
 
 async def test_a_stopped_instance_keeps_its_quota(client: AsyncClient, world: World) -> None:

@@ -29,6 +29,7 @@ from app.db.base import Base
 from app.db.session import dispose_engine, get_session, init_engine
 from app.k8s import FakeK8sGateway
 from app.main import create_app
+from app.services.quota_profiles import ensure_default_profiles
 from tests import factories
 
 
@@ -57,13 +58,23 @@ def settings(db_url: str) -> Settings:
 
 @pytest.fixture
 async def engine(settings: Settings) -> AsyncGenerator[AsyncEngine]:
-    """A fresh schema per test."""
+    """A fresh schema per test, carrying the quota templates an installation starts with.
+
+    ``create_all`` builds the schema without running the migrations, so the rows the
+    migration seeds have to be written here as well. Without them every submission in
+    every test would fail to resolve its owner's quota profile — the suite would be
+    disagreeing with a real deployment rather than testing one.
+    """
     # Import so every table is registered on Base.metadata.
     import app.models  # noqa: F401
 
     eng = create_async_engine(settings.database_url, connect_args={"check_same_thread": False})
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(eng, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as seeding:
+        await ensure_default_profiles(seeding, settings)
+        await seeding.commit()
     yield eng
     await eng.dispose()
 

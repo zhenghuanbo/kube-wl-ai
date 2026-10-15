@@ -36,6 +36,7 @@ from app.schemas.application import (
 from app.schemas.instance import InstanceCreate
 from app.services import instances as instance_service
 from app.services import workload_events as events
+from app.services.quota_guard import enforce_application_quota
 from app.services.workload_common import Page, workspace_for_actor
 
 logger = get_logger(__name__)
@@ -156,6 +157,10 @@ async def create_application(
     await _validate_launch_defaults(
         session, workspace, payload.resource_group_id, payload.resource_spec_id
     )
+
+    # Only the count is gated here: an application reserves no compute until it is
+    # launched, and that launch is gated as an instance.
+    await enforce_application_quota(session, owner=actor)
 
     app = Application(
         name=payload.name,

@@ -10,10 +10,11 @@ from app.auth import policy
 from app.core.audit import record_audit
 from app.core.deps import CurrentUser, DbSession, require
 from app.core.errors import PermissionDeniedError
-from app.models.enums import UserSource
+from app.models.enums import QuotaProfileKind, UserSource
 from app.schemas.auth import GroupMembership
 from app.schemas.base import ApiMessage
 from app.schemas.common import Page, PageMeta
+from app.schemas.quota_profile import QuotaProfileAssign
 from app.schemas.user import (
     PasswordReset,
     UserCreate,
@@ -25,6 +26,7 @@ from app.schemas.user import (
     UserSummary,
     UserUpdate,
 )
+from app.services import quota_profiles as quota_profile_service
 from app.services import users as user_service
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -399,3 +401,40 @@ async def read_user_permissions(user_id: int, session: DbSession, actor: Current
     if not policy.is_global_admin(actor) and user.id != actor.id:
         raise PermissionDeniedError("仅管理员可查看他人权限清单")
     return sorted(policy.effective_permissions(user))
+
+
+@router.put(
+    "/{user_id}/quota-profile",
+    response_model=UserDetail,
+    summary="Set the quota template a user follows",
+    dependencies=[Depends(require("quota_profile:assign"))],
+)
+async def set_user_quota_profile(
+    user_id: int,
+    payload: QuotaProfileAssign,
+    request: Request,
+    session: DbSession,
+    actor: CurrentUser,
+) -> UserDetail:
+    """Attach a quota template, or clear it to follow the default.
+
+    A separate operation from editing the user, and a separate permission: this is
+    the step that changes somebody's ceiling, and it must not be reachable by
+    whoever may merely rename an account.
+    """
+    user = await user_service.get_user(session, actor, user_id)
+    profile = await quota_profile_service.profile_for_assignment(
+        session, payload.profile_id, QuotaProfileKind.USER
+    )
+    user.quota_profile_id = profile.id if profile else None
+    await session.flush()
+    record_audit(
+        session,
+        action="quota_profile:assign_user",
+        actor=actor,
+        object_type="user",
+        object_id=user_id,
+        detail={"quota_profile_id": user.quota_profile_id},
+        request=request,
+    )
+    return UserDetail.from_user(user)

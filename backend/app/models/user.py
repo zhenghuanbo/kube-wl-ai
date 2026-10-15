@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, str_enum
@@ -47,6 +47,15 @@ class User(Base, TimestampMixin):
     is_superuser: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    #: Compute quota profile. ``NULL`` means "follow the current default profile
+    #: for users", so promoting another profile to default moves everybody who
+    #: never asked for an individual one — which is the point of the default.
+    #: ``RESTRICT`` because deleting a profile that somebody is on would silently
+    #: change their ceiling; the service refuses it too.
+    quota_profile_id: Mapped[int | None] = mapped_column(
+        ForeignKey("quota_profiles.id", ondelete="RESTRICT"), index=True
+    )
 
     group_links: Mapped[list[UserGroupLink]] = relationship(
         back_populates="user",

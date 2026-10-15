@@ -81,13 +81,15 @@ IDE_PORT_NAME = "ide"
 #: `ide_type=none`) but both together are the bound a namespace quota has to
 #: cover, and a quota is a maximum rather than a prediction.
 #:
-#: It lives here, next to the code that creates the Services, because the
-#: workspace quota (``app/services/workspaces.py``) has to size itself from it.
-#: Sizing that quota as one Service per instance is what capped a two-instance
+#: It lives here, next to the code that creates the Services, because a workspace's
+#: `count/services` allowance has to cover the instances its `count/deployments.apps`
+#: allowance permits, unless an administrator has deliberately configured otherwise.
+#: Sizing that allowance as one Service per instance is what capped a two-instance
 #: workspace at a single usable instance: the first one's SSH + IDE pair consumed
 #: the whole allowance, and the second instance's Services were rejected with
 #: ``exceeded quota: count/services`` after its Deployment had already been
-#: created.
+#: created. Both numbers now come from the workspace's quota profile, whose defaults
+#: keep the 2:1 ratio.
 SERVICES_PER_INSTANCE = 2
 
 

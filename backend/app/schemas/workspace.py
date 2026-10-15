@@ -65,6 +65,7 @@ class WorkspaceSummary(ApiModel):
             ),
             created_at=workspace.created_at,
             updated_at=workspace.updated_at,
+            quota_profile_id=workspace.quota_profile_id,
         )
 
     id: int
@@ -80,6 +81,10 @@ class WorkspaceSummary(ApiModel):
     is_active: bool
     member_count: int = 0
     resource_group_count: int = 0
+    #: The quota template this workspace follows, or ``None`` for the default. Its
+    #: compute dimensions become the namespace's ``ResourceQuota``; ``None`` means
+    #: "follow the default" rather than "no quota".
+    quota_profile_id: int | None = None
     created_at: datetime
     updated_at: datetime
 

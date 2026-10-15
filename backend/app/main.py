@@ -19,9 +19,10 @@ from app.core.config import Settings, get_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
 from app.core.version import APP_NAME, VERSION
-from app.db.session import dispose_engine, init_engine
+from app.db.session import dispose_engine, get_session_factory, init_engine
 from app.middleware.audit import AuditMiddleware
 from app.middleware.request_context import REQUEST_ID_HEADER, RequestContextMiddleware
+from app.services.quota_profiles import ensure_default_profiles
 from app.workers.sweeper import start_reconciler
 
 logger = get_logger(__name__)
@@ -51,6 +52,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
         logger.info("startup", app_env=settings.app_env, version=VERSION)
         init_engine(settings)
+        # Before anything can be submitted: a new installation has no quota
+        # templates, and every submission resolves the owner's profile. Creating
+        # them here means the first administrator to log in finds a working system
+        # rather than a 500 on the first instance.
+        async with get_session_factory()() as session:
+            await ensure_default_profiles(session, settings)
+            await session.commit()
         # Started after the engine, because its first tick opens a session. On a
         # deployment that runs Celery, `RECONCILE_INTERVAL_SECONDS=0` makes this a
         # no-op and leaves the beat task as the only sweeper.

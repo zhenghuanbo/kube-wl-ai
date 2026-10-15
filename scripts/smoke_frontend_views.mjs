@@ -224,12 +224,11 @@ const RESOURCE_GROUP = {
   k8sLabelSelector: { 'gpu-type': 'a100' },
   k8sTolerations: [],
   limits: {
-    id: 1,
-    maxConcurrentInstances: 4,
-    maxGpuPerInstance: 1,
+    // Cores and GB, matching what the API actually returns: there is no `id` on
+    // this object, and the milli/MB fields are gone.
     maxGpuPerUser: 2,
-    maxCpuMilliPerUser: 32000,
-    maxMemoryMbPerUser: 131072,
+    maxCpuCoresPerUser: 32,
+    maxMemoryGbPerUser: 128,
     maxStorageGbPerUser: 500,
   },
   specs: [

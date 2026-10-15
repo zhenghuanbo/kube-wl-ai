@@ -108,11 +108,9 @@ async def build_world(admin_client: AsyncClient, seeded: AsyncSession, settings:
     limits = await admin_client.put(
         f"/api/v1/resource-groups/{pool_id}/limits",
         json={
-            "maxConcurrentInstances": 5,
-            "maxGpuPerInstance": 1,
             "maxGpuPerUser": 1,
-            "maxCpuMilliPerUser": 4000,
-            "maxMemoryMbPerUser": 8192,
+            "maxCpuCoresPerUser": 4,
+            "maxMemoryGbPerUser": 8,
             "maxStorageGbPerUser": 20,
         },
     )

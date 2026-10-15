@@ -202,6 +202,22 @@ class ResourceGroupLimit(Base, TimestampMixin):
     Modelled per resource group rather than globally because a pool of eight
     A100s and a pool of two H100s need very different fairness rules; a single
     platform-wide number would either strangle one or overrun the other.
+
+    Units are **cores** and **GB**, matching the quota profiles and what an
+    administrator types into a form. Conversion to milli-cores and MiB happens
+    where a manifest is built, never in storage. ``-1`` means "not checked", the
+    same sentinel the profiles use.
+
+    Counting *how many* workloads one person may hold is deliberately absent here.
+    That is a property of the person rather than of the pool, so it lives on their
+    quota profile (``max_instances`` / ``max_applications`` / ``max_tasks``). A
+    second count in this table would give one question two answers, which is
+    exactly the state this change removes.
+
+    These ceilings are compared against what the user has reserved **in this pool
+    only**; the profile's ceilings are compared against everything they hold
+    anywhere. Keeping both means "this pool is busy" and "this person is busy" are
+    separate, answerable questions.
     """
 
     __tablename__ = "resource_group_limits"
@@ -212,15 +228,14 @@ class ResourceGroupLimit(Base, TimestampMixin):
         ForeignKey("resource_groups.id", ondelete="CASCADE"), nullable=False, index=True
     )
 
-    max_concurrent_instances: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
-    #: Concurrent one-shot tasks. Separate from instances because a job that
-    #: runs for ten minutes and an interactive session that lives for a day put
-    #: very different pressure on the same pool.
-    max_concurrent_tasks: Mapped[int] = mapped_column(Integer, nullable=False, default=4)
-    max_gpu_per_instance: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    #: Accelerators one user may hold in this pool at once.
     max_gpu_per_user: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
-    max_cpu_milli_per_user: Mapped[int] = mapped_column(Integer, nullable=False, default=8000)
-    max_memory_mb_per_user: Mapped[int] = mapped_column(Integer, nullable=False, default=16384)
+    #: Cores one user may reserve in this pool. ``-1`` = not checked.
+    max_cpu_cores_per_user: Mapped[int] = mapped_column(Integer, nullable=False, default=8)
+    #: Memory in GB one user may reserve in this pool. ``-1`` = not checked.
+    max_memory_gb_per_user: Mapped[int] = mapped_column(Integer, nullable=False, default=16)
+    #: The one dimension still enforced outside the compute gate: storage is
+    #: charged when a volume is registered, not when a workload runs.
     max_storage_gb_per_user: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
 
     resource_group: Mapped[ResourceGroup] = relationship(back_populates="limits")

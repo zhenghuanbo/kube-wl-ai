@@ -56,13 +56,22 @@ export interface ResourceGroupSummary {
   updatedAt: string
 }
 
+/**
+ * Per-user ceilings inside one pool, in cores and GB.
+ *
+ * Not milli-cores and mebibytes: these are the numbers an administrator types and
+ * compares against what somebody asked for, and the conversion into Kubernetes'
+ * units happens once, where a manifest is built. `-1` means "do not check this
+ * dimension"; `0` still means "none at all".
+ *
+ * There are no workload counts here. How many instances, applications and custom
+ * tasks one person may hold is a property of the person and lives on their quota
+ * profile, so that the question has one answer rather than two that can disagree.
+ */
 export interface ResourceGroupLimits {
-  id: number
-  maxConcurrentInstances: number
-  maxGpuPerInstance: number
   maxGpuPerUser: number
-  maxCpuMilliPerUser: number
-  maxMemoryMbPerUser: number
+  maxCpuCoresPerUser: number
+  maxMemoryGbPerUser: number
   maxStorageGbPerUser: number
 }
 
@@ -232,6 +241,12 @@ export interface WorkspaceSummary {
   isActive: boolean
   memberCount: number
   resourceGroupCount: number
+  /**
+   * The quota template this workspace follows, or `null` for the default. `null` is
+   * "follow the default", not "no quota" — the namespace's object counts come from
+   * whichever template this resolves to.
+   */
+  quotaProfileId: number | null
   createdAt: string
   updatedAt: string
 }

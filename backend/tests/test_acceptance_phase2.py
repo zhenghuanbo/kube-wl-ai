@@ -97,11 +97,11 @@ async def make_pool(
     name: str,
     kind: str = "private",
     group_id: int | None = None,
-    cpu_milli: int = 8000,
-    memory_mb: int = 16384,
+    cpu_cores: int = 8,
+    memory_gb: int = 16,
     max_gpu_per_user: int = 2,
 ) -> dict:
-    """Create a resource pool with one CPU spec and its fairness limits."""
+    """Create a resource pool with one CPU spec and its per-user fairness limits."""
     created = await client.post(
         "/api/v1/resource-groups",
         json={
@@ -119,11 +119,9 @@ async def make_pool(
     limited = await client.put(
         f"/api/v1/resource-groups/{pool['id']}/limits",
         json={
-            "maxConcurrentInstances": 2,
-            "maxGpuPerInstance": 1,
             "maxGpuPerUser": max_gpu_per_user,
-            "maxCpuMilliPerUser": cpu_milli,
-            "maxMemoryMbPerUser": memory_mb,
+            "maxCpuCoresPerUser": cpu_cores,
+            "maxMemoryGbPerUser": memory_gb,
             "maxStorageGbPerUser": 100,
         },
     )
@@ -162,7 +160,10 @@ async def test_pool_creation_seeds_a_limits_row(admin_client: AsyncClient, world
     body = created.json()
     assert body["limits"] is not None
     assert body["limits"]["maxGpuPerUser"] == 2
-    assert body["limits"]["maxConcurrentInstances"] == 2
+    # Cores and GB, the units an administrator types, rather than the milli-cores
+    # and mebibytes Kubernetes is written in.
+    assert body["limits"]["maxCpuCoresPerUser"] == 8
+    assert body["limits"]["maxMemoryGbPerUser"] == 16
 
 
 async def test_resource_group_catalogue_is_readable_by_a_plain_user(
@@ -330,7 +331,13 @@ async def test_creating_a_workspace_provisions_the_namespace(
     quota = gateway.quotas["wl-lab-a-alice"]
     assert quota.hard["requests.cpu"] == "8"
     assert quota.hard["requests.memory"] == "16384Mi"
-    assert quota.hard["count/deployments.apps"] == "2"
+    # The object counts come from the workspace's quota profile, not from the pool:
+    # `sum(max_concurrent_instances)` was only a per-workspace ceiling while a
+    # workspace had exactly one user. These are the configured defaults.
+    assert quota.hard["count/deployments.apps"] == "200"
+    assert quota.hard["count/jobs.batch"] == "200"
+    assert quota.hard["count/services"] == "400"
+    assert quota.hard["pods"] == "500"
     limits = gateway.limit_ranges["wl-lab-a-alice"]
     assert limits.default_cpu == "4"
     # This pool offers exactly one spec, so the ceiling equals the default. The case
@@ -673,12 +680,8 @@ async def test_granting_the_same_pool_twice_conflicts(
 async def test_quota_is_the_sum_of_the_granted_pools(
     admin_client: AsyncClient, world: World
 ) -> None:
-    first = await make_pool(
-        admin_client, name="pool-one", kind="public", cpu_milli=4000, memory_mb=8192
-    )
-    second = await make_pool(
-        admin_client, name="pool-two", kind="public", cpu_milli=2000, memory_mb=4096
-    )
+    first = await make_pool(admin_client, name="pool-one", kind="public", cpu_cores=4, memory_gb=8)
+    second = await make_pool(admin_client, name="pool-two", kind="public", cpu_cores=2, memory_gb=4)
 
     workspace = (
         await admin_client.post(
@@ -698,7 +701,10 @@ async def test_quota_is_the_sum_of_the_granted_pools(
 
     assert by_resource["cpu"] == 6000
     assert by_resource["memory"] == 12288
-    assert by_resource["instance"] == 4
+    assert by_resource["storage"] == 200
+    # No `instance` row: how many instances a person may hold is a ceiling on their
+    # quota profile, not something summed from the pools they can reach.
+    assert "instance" not in by_resource
 
 
 # ---------------------------------------------------------------------------
@@ -755,11 +761,9 @@ async def _make_pool_granting_no_storage(admin_client: AsyncClient, name: str) -
     limited = await admin_client.put(
         f"/api/v1/resource-groups/{pool['id']}/limits",
         json={
-            "maxConcurrentInstances": 2,
-            "maxGpuPerInstance": 0,
             "maxGpuPerUser": 0,
-            "maxCpuMilliPerUser": 8000,
-            "maxMemoryMbPerUser": 16384,
+            "maxCpuCoresPerUser": 8,
+            "maxMemoryGbPerUser": 16,
             "maxStorageGbPerUser": 0,
         },
     )
@@ -781,11 +785,14 @@ async def _workspace_on(
 async def test_the_service_allowance_covers_the_services_an_instance_creates(
     admin_client: AsyncClient, world: World, gateway: FakeK8sGateway
 ) -> None:
-    """One Service per instance caps a two-instance workspace at one instance.
+    """The service allowance must cover the instances the deployment allowance permits.
 
-    Anchored to what :func:`build_instance_objects` actually declares rather than
-    to the number two, so giving an instance a third Service fails here instead
-    of in a workspace that cannot start its second instance.
+    Anchored to what :func:`build_instance_objects` actually declares rather than to
+    the number two, so giving an instance a third Service fails here instead of in a
+    workspace that cannot start its second instance. Both allowances now come from
+    the workspace's quota profile, whose defaults keep the 2:1 ratio — an
+    administrator who edits one without the other breaks this relationship, which is
+    exactly what the assertion is for.
     """
     pool = await make_pool(admin_client, name="svc-pool", kind="public")
     workspace = await _workspace_on(admin_client, world, name="svc-ws", pool_ids=[pool["id"]])
@@ -793,13 +800,59 @@ async def test_the_service_allowance_covers_the_services_an_instance_creates(
     hard = gateway.quotas[workspace["k8sNamespace"]].hard
     per_instance = _services_declared(_fullest_instance())
 
-    # The regression, stated as the relationship that was violated.
     assert per_instance == SERVICES_PER_INSTANCE
-    assert int(hard["count/services"]) == per_instance * int(hard["count/deployments.apps"])
-    # Two instances that each want an IDE and SSH must both fit — this workspace's
-    # pool allows two instances, and the failure that prompted the fix was the
-    # second one being refused after its Deployment had already been created.
+    assert int(hard["count/services"]) >= per_instance * int(hard["count/deployments.apps"])
     assert int(hard["count/services"]) >= 4
+
+
+async def test_attaching_a_workspace_quota_profile_moves_its_object_counts(
+    admin_client: AsyncClient, world: World, gateway: FakeK8sGateway
+) -> None:
+    """The namespace object counts are *derived*, so attaching a template must apply it.
+
+    Clearing the attachment has to go back to the default rather than to nothing:
+    ``None`` means "follow the default", not "no ceiling".
+    """
+    pool = await make_pool(admin_client, name="profile-pool", kind="public")
+    workspace = await _workspace_on(admin_client, world, name="profiled", pool_ids=[pool["id"]])
+
+    created = await admin_client.post(
+        "/api/v1/quota-profiles",
+        json={
+            "kind": "workspace",
+            "name": "small-space",
+            "maxPods": 40,
+            "maxDeployments": 20,
+            "maxServices": 40,
+            "maxJobs": 20,
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    attached = await admin_client.put(
+        f"/api/v1/workspaces/{workspace['id']}/quota-profile",
+        json={"profileId": created.json()["id"]},
+    )
+    assert attached.status_code == 200, attached.text
+    assert attached.json()["quotaProfileId"] == created.json()["id"]
+
+    hard = gateway.quotas[workspace["k8sNamespace"]].hard
+    assert hard["pods"] == "40"
+    assert hard["count/deployments.apps"] == "20"
+    assert hard["count/services"] == "40"
+    assert hard["count/jobs.batch"] == "20"
+    # Compute still comes from the granted pools at this point: only the object
+    # counts are profile-driven yet, and this records that boundary rather than
+    # letting it drift silently.
+    assert hard["requests.cpu"] == "8"
+    assert hard["requests.memory"] == "16384Mi"
+
+    cleared = await admin_client.put(
+        f"/api/v1/workspaces/{workspace['id']}/quota-profile", json={"profileId": None}
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["quotaProfileId"] is None
+    assert gateway.quotas[workspace["k8sNamespace"]].hard["pods"] == "500"
 
 
 async def test_storage_is_bounded_even_when_no_pool_grants_any(
@@ -1100,7 +1153,10 @@ async def test_a_user_can_read_their_own_quota(
     response = await client.get(f"/api/v1/quotas?scopeType=workspace&scopeId={workspace['id']}")
 
     assert response.status_code == 200, response.text
-    assert {row["resource"] for row in response.json()} >= {"cpu", "memory", "instance"}
+    # No `instance` row any more: holding N instances is a per-user ceiling on a
+    # quota profile, not a workspace quota. What the workspace has is its compute
+    # and storage ceiling.
+    assert {row["resource"] for row in response.json()} >= {"cpu", "memory", "storage"}
 
 
 async def test_adjusting_a_quota_never_resets_consumption(

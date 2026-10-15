@@ -42,7 +42,7 @@ from app.models.workspace import Workspace
 from app.schemas.task import TaskCreate, TaskSummary, TaskUpdate
 from app.services import storages as storage_service
 from app.services import workload_events as events
-from app.services.quota_guard import check_quota, workspace_quotas, workspace_usage
+from app.services.quota_guard import Request, enforce_compute_quota
 from app.services.workload_common import (
     Page,
     pool_node_selector,
@@ -172,16 +172,20 @@ async def create_task(
     # volume is an error the submitter sees rather than a job whose home is empty.
     await storage_service.require_user_volume(session, owner)
 
-    quotas = await workspace_quotas(session, workspace.id)
-    usage = await workspace_usage(session, workspace.id)
-    check_quota(
-        quotas,
-        usage,
-        cpu_milli=spec.cpu_milli,
-        memory_mb=spec.memory_mb,
-        gpu_type=spec.gpu_type,
-        gpu_count=spec.gpu_count,
-        tasks=1,
+    # Every ceiling that applies to this submission, in one call: the owner's own
+    # quota profile, the pool's per-user limits, and the workspace's ceiling.
+    await enforce_compute_quota(
+        session,
+        owner=owner,
+        workspace=workspace,
+        pool=pool,
+        request=Request(
+            cpu_milli=spec.cpu_milli,
+            memory_mb=spec.memory_mb,
+            gpu_type=spec.gpu_type,
+            gpu_count=spec.gpu_count,
+            tasks=1,
+        ),
     )
 
     task = Task(

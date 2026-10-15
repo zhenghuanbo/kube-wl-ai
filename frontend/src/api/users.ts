@@ -17,6 +17,12 @@ export interface UserSummary {
   roles: Role[]
   primaryGroupId: number | null
   primaryGroupName: string | null
+  /**
+   * The quota template this user follows, or `null` for the default. `null` is
+   * "follow the default", not "no quota": promoting a new default moves everyone
+   * who never asked for a template of their own.
+   */
+  quotaProfileId: number | null
 }
 
 export interface UserDetail extends UserSummary {

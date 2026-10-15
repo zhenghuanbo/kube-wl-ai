@@ -482,25 +482,48 @@ async def _effective_network_type(session: AsyncSession, group_ids: Sequence[int
 
 
 async def _effective_limit_spec(session: AsyncSession, group_ids: Sequence[int]) -> LimitSpec:
-    """Default pod resources, taken from the smallest offered spec.
+    """Pod resource defaults and ceilings, taken from the offered specs.
 
-    Using the smallest spec keeps an un-annotated pod from defaulting to a shape
-    the user never asked for and cannot afford.
+    These are two different numbers, and using one for both broke every pool whose
+    catalogue was not uniform. The *defaults* come from the smallest offered spec,
+    so a pod that declares nothing does not silently take a shape the user never
+    asked for and cannot afford. The *ceilings* come from the largest, because a
+    ``max`` set to the smallest spec makes every larger spec unschedulable — and
+    unschedulable in the worst possible way: a ``LimitRange`` is admission control,
+    so the pod is rejected before it ever exists. Nothing is left for the reconciler
+    to look at, the instance never leaves ``creating``, and the pool quietly offers a
+    spec it can never run. A pool listing both 2cpu and 4cpu could only ever run
+    2cpu.
     """
-    smallest: ResourceSpec | None = None
+    min_cpu: int | None = None
+    max_cpu: int | None = None
+    min_memory: int | None = None
+    max_memory: int | None = None
     if group_ids:
-        smallest = await session.scalar(
-            select(ResourceSpec)
-            .join(ResourceGroupSpec, ResourceGroupSpec.resource_spec_id == ResourceSpec.id)
-            .where(
-                ResourceGroupSpec.resource_group_id.in_(group_ids),
-                ResourceSpec.is_active.is_(True),
+        # Both ends in one round trip. The two dimensions are taken independently,
+        # because the widest CPU and the largest memory need not come from the same
+        # spec.
+        min_cpu, max_cpu, min_memory, max_memory = (
+            await session.execute(
+                select(
+                    func.min(ResourceSpec.cpu_milli),
+                    func.max(ResourceSpec.cpu_milli),
+                    func.min(ResourceSpec.memory_mb),
+                    func.max(ResourceSpec.memory_mb),
+                )
+                .select_from(ResourceSpec)
+                .join(ResourceGroupSpec, ResourceGroupSpec.resource_spec_id == ResourceSpec.id)
+                .where(
+                    ResourceGroupSpec.resource_group_id.in_(group_ids),
+                    ResourceSpec.is_active.is_(True),
+                )
             )
-            .order_by(ResourceSpec.cpu_milli, ResourceSpec.memory_mb)
-            .limit(1)
-        )
+        ).one()
 
-    if smallest is None:
+    if min_cpu is None or max_cpu is None or min_memory is None or max_memory is None:
+        # These pools offer nothing. The namespace still needs a LimitRange, and the
+        # values stay modest rather than absent: an absent ``max`` is *unlimited* to
+        # Kubernetes, which is the trap this whole function exists to avoid.
         return LimitSpec(
             name=LIMIT_RANGE_NAME,
             default_cpu="500m",
@@ -509,16 +532,16 @@ async def _effective_limit_spec(session: AsyncSession, group_ids: Sequence[int])
             default_request_memory="512Mi",
         )
 
-    cpu = _cpu_quantity(smallest.cpu_milli)
-    memory = f"{smallest.memory_mb}Mi"
+    default_cpu = _cpu_quantity(min_cpu)
+    default_memory = f"{min_memory}Mi"
     return LimitSpec(
         name=LIMIT_RANGE_NAME,
-        default_cpu=cpu,
-        default_memory=memory,
-        default_request_cpu=cpu,
-        default_request_memory=memory,
-        max_cpu=cpu,
-        max_memory=memory,
+        default_cpu=default_cpu,
+        default_memory=default_memory,
+        default_request_cpu=default_cpu,
+        default_request_memory=default_memory,
+        max_cpu=_cpu_quantity(max_cpu),
+        max_memory=f"{max_memory}Mi",
     )
 
 

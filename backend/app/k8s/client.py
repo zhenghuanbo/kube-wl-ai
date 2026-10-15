@@ -22,6 +22,7 @@ from kubernetes.stream import stream
 
 from app.core.logging import get_logger
 from app.k8s.gateway import (
+    DeploymentStatus,
     ExecSession,
     JobInfo,
     JobSpec,
@@ -866,6 +867,29 @@ class RealK8sGateway:
             namespace=namespace,
             cluster_ip=service.spec.cluster_ip if service.spec else None,
         )
+
+    def read_deployment_status(self, namespace: str, name: str) -> DeploymentStatus | None:
+        """Read a Deployment's own account of whether it could create pods.
+
+        A pod refused at admission never exists, so no pod listing can show the
+        problem — the controller records it as a ``ReplicaFailure`` condition instead.
+        That condition is the only place a workload which can *never* start is
+        distinguishable from one that has simply not started yet.
+        """
+        try:
+            deployment = self._apps.read_namespaced_deployment(name, namespace)
+        except ApiException as exc:
+            if self._is_not_found(exc):
+                return None
+            raise self._raise(f"read deployment {name}", exc) from exc
+
+        failure: str | None = None
+        status = deployment.status
+        for condition in (status.conditions if status else None) or []:
+            if condition.type == "ReplicaFailure" and condition.status == "True":
+                failure = condition.message or condition.reason or "副本控制器无法创建容器"
+                break
+        return DeploymentStatus(name=name, namespace=namespace, failure=failure)
 
     def read_pod(self, namespace: str, name: str) -> PodInfo | None:
         try:

@@ -2794,6 +2794,84 @@ GET /workspaces                85.3 ->  84.0 ms   (  1.0x)   未动
 
 ---
 
+### ✅ 后续增量 — 比「最小规格」大的实例永远创建不出来（已完成）
+
+**现象**：用户在网页创建了一个 4 CPU 的 VS Code 实例（id 16），页面一直「创建中 / 等待容器创建」，
+但集群里**一个 pod 都没有**，Deployment 停在 `0/1`。
+
+**排查的关键在「没有 pod」本身**：镜像拉不动、PVC 不存在、节点调度不上去，都会留下一个
+Pending / ContainerCreating 的 pod —— 可见的东西。**完全没有 pod，说明创建 pod 的请求被 API server
+拒绝了**，而准入控制发生在对象落库之前。决定性证据在 ReplicaSet 的事件里：
+
+```
+Warning FailedCreate  Error creating: pods "wl-vscode-test-16-76dbc87745-hfbtx" is forbidden:
+                      maximum cpu usage per Container is 2, but limit is 4
+```
+
+#### 缺陷 A：上限取了「最小规格」
+
+`services/workspaces.py` 的 `_effective_limit_spec()` 用**同一个** `smallest` 规格同时决定了
+`default_cpu` / `default_request_cpu` **和 `max_cpu`**（memory 同理）。它原来的 docstring 写着
+「Using the smallest spec keeps an un-annotated pod from defaulting to a shape the user never asked
+for」——这个理由对 `default*` 完全成立，对 `max` 则正好相反：**上限等于最小规格，等于目录里所有更大
+的规格永远无法调度**。而 LimitRange 是准入控制，所以失败方式是最难查的那种：pod 根本不存在，
+没有任何东西留给对账去看。本池子提供 `2cpu-8g` 与 `4cpu-8g` 两档，于是较大的那档**必定失败**。
+
+而且平台的配额模型里**根本没有「每实例 CPU 上限」这个概念**（`resource_group_limits` 只有
+`max_cpu_milli_per_user` / `max_memory_mb_per_user` / `max_gpu_per_instance` /
+`max_concurrent_instances`）。按策略 4 CPU 完全合法，唯一说不的就是这个 LimitRange —— 平台一边在
+目录里提供它，一边禁止它。
+
+**更糟的推论**：取的是「所有已授予资源组里最小的规格」。以后往池子里加一个更小的规格（例如
+500m/1Gi），下一次工作空间重下发就会把 `max.cpu` **降低**，于是**已经在跑的实例将无法再启动**
+（`start_instance` 只是把 ReplicaSet 扩到 1，重建 pod 同样被拒）。
+
+**修法**：一次往返同时取两端（`func.min` / `func.max`）。`default*` 取最小，`max_cpu` /
+`max_memory` 取最大，并且**两个维度各自独立**取最大——最大的 CPU 与最大的内存未必来自同一个规格，
+这一点由测试刻意交叉两个规格来钉住。
+
+#### 缺陷 B：失败了却永远显示「创建中」
+
+sweep 唯一的输入是 pod，而「还没起来」和「永远起不来」产生**逐字节相同**的观测，于是走
+`_absorb_observation` 的空分支 → `creating` + 「等待容器启动」，永不升级、永不报错。原因是平台
+**从不读 Deployment 的状态、条件或事件**：gateway 只有 `read_pod` / `read_job` / `read_service` /
+`read_pvc` / `read_pv`，那条 `ReplicaFailure` 一直摆在那里没人问。
+
+**修法**：
+- gateway 增加 `read_deployment_status()`（Protocol / 真实 client / Fake 三处），读 `ReplicaFailure`
+  条件的 `message`；
+- `_absorb_observation()` 多接一个 `deployment_failure`：没有 pod **且** Deployment 有抱怨时落
+  `status=error` + `集群拒绝创建容器：<集群原话>`；
+- **只在没有 pod 时才去问**。健康实例永不付这笔钱，`test_a_healthy_instance_is_never_asked_about_its_deployment`
+  钉住了这一点（它断言 `gateway.calls` 里没有 `read_deployment_status`）。
+- `error` 本来就在 `LIVE_INSTANCE_STATUSES` 里，所以 sweep 会继续观察一个已被判失败的实例，
+  **pod 一出现就自行转 `running`**，旧消息被清掉——修好的因必须是可观测的。
+
+**为什么不是「每命名空间一次 LIST」**：那要先给 Deployment 打上 `wl-instance` 标签再批量列，
+为了一个「只在已经出错时才存在」的场景加一个常数因子不划算。取舍写在了 `_deployment_failure()` 的
+docstring 里，包括最坏情况：一个命名空间里**全部**实例都没有 pod 时（一个坏掉的上限会同时打断所有
+实例），代价是每实例一次 GET，而不是每命名空间一次。
+
+#### 验证
+
+- 门禁全绿；`pytest` **751 passed**（745 + 新增 6）。
+- **两个守卫都验证过不是装饰**：A 把 `max_*` 改回取最小 → 新测试报 `assert '4' == '8'`；B 让
+  `_deployment_failure()` 恒返回 `None` → 3 个测试分别报 `assert 0 == 1`、
+  `creating is not InstanceStatus.ERROR`、`'creating' == 'error'`。两处临时改动都已还原并复查。
+- **真集群、就是那个故障实例 16**：修前 `kubectl create --dry-run=server` 一个 4 CPU 的 pod →
+  `Forbidden: ... maximum cpu usage per Container is 2, but limit is 4`（精确复现）；执行
+  `POST /api/v1/workspaces/1/reconcile` 重下发后 `max.cpu` 由 2 变 4、而 `default.cpu` 仍是 2 →
+  同一个 pod 变成 `created (server dry run)`。**用服务端 dry-run 是有意的**：它走完整准入链
+  （含 LimitRange）但不落库，所以能在不删除、不改动任何既有对象的前提下证明准入结果。
+- 随后实例 16 的 ReplicaSet 重试成功，实例**自行**由 `error` 变 `running`（sweep 在一个 tick 内
+  观测到 pod），`GET /x/zhenghuanbo/16/` 返回 200 —— 缺陷 A 与 B、以及用户最初报的现象，在同一个
+  实例上一并闭环。
+- 一处**方法误差认领**：`podName` / `lastSeenAt` 在**列表**接口里恒为 `None`（二者只存在于
+  `InstanceDetail`），所以一度看起来像「running 却没有 pod」。是接口字段问题，不是 bug；记录在此
+  以免下次再被同一件事误导。
+
+---
+
 ## 14. 已知问题与陷阱
 
 ### 14.1 安全（最高优先级）
@@ -2931,6 +3009,7 @@ Vuex `namespace: true` 拼写错误、`Admin/User.vue` 为 0 字节、
 | **状态同步 / 对账（唯一把观测状态写回数据库的路径）** | `backend/app/services/reconcile.py`（`sweep_all`，两个调用者共用）、`backend/app/workers/sweeper.py`（进程内，`RECONCILE_INTERVAL_SECONDS` 默认 5 秒）、`backend/app/workers/tasks/reconcile.py`（Celery beat，30 秒）、`backend/app/services/instances.py`（`reconcile_all` / `reconcile_instance` / `expire_overdue`，**批处理入口自己 commit**） |
 | 实例状态实时刷新（前端） | `frontend/src/views/InstancesView.vue`（未安定状态时 3 秒自适应轮询 + `visibilitychange`） |
 | **实例加载策略（收窄 eager 级联：一个查询 72 条语句 → 1 条）** | `backend/app/services/instances.py`（`_SWEEP_LOAD` / `_READ_LOAD`，都以 `raiseload("*")` 开头再显式放行）、回归守卫 `backend/tests/test_instance_load_shape.py` |
+| **实例规格上限（比最小规格大的实例永远创建不出来）** | `backend/app/services/workspaces.py`（`_effective_limit_spec`：`default*` 取最小规格、`max_cpu`/`max_memory` 取最大，且两个维度各自独立）、`backend/app/services/instances.py`（`_deployment_failure` + `_absorb_observation` 的 `error` 升级与自愈）、`backend/app/k8s/gateway.py`（`DeploymentStatus` / `read_deployment_status`，Fake 用 `deployment_failures` 脚本化）、回归守卫 `backend/tests/test_reconcile_sweeper.py` 与 `backend/tests/test_acceptance_phase2.py` |
 | 前端主题 | `frontend/src/plugins/vuetify.ts` |
 | 设计令牌 | `frontend/src/styles/tokens.scss` |
 | 全局样式覆盖 | `frontend/src/styles/overrides.scss` |

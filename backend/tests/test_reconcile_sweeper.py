@@ -365,3 +365,134 @@ async def test_the_reconciler_starts_when_asked(app: Any, settings: Settings) ->
     task.cancel()
     with suppress(asyncio.CancelledError):
         await task
+
+
+# ---------------------------------------------------------------------------
+# A pod the cluster refuses is a failure, not an eternal "starting"
+# ---------------------------------------------------------------------------
+# The sweep's only input used to be pods, and a pod refused at admission is never
+# created — so "not started yet" and "never going to start" produced byte-identical
+# observations, and an instance whose container the cluster would never accept sat on
+# 创建中 (status_message "等待容器启动") with no pod to show for it. The reason existed
+# the whole time, in the Deployment's ReplicaFailure condition, unread.
+async def _instance_with_no_pod(
+    client: httpx.AsyncClient, world: World, gateway: FakeK8sGateway
+) -> tuple[int, str]:
+    """Create an instance the way a user does and leave its pod missing."""
+    await act_as(client, "dana")
+    body = await make_instance(client, world)
+    return int(body["id"]), _deployment(gateway)
+
+
+def _refuse(gateway: FakeK8sGateway, deployment: str, reason: str) -> None:
+    """Script the ``ReplicaFailure`` a cluster records when admission says no."""
+    gateway.deployment_failures[f"{LAB_A_NAMESPACE}/{deployment}"] = reason
+
+
+async def test_a_pod_the_cluster_refuses_becomes_an_error_not_a_wait(
+    client: httpx.AsyncClient,
+    world: World,
+    gateway: FakeK8sGateway,
+    reload_from_db: Any,
+) -> None:
+    """The bug this exists for: the row said "waiting" and always would."""
+    instance_id, deployment = await _instance_with_no_pod(client, world, gateway)
+    reason = "maximum cpu usage per Container is 2, but limit is 4"
+    _refuse(gateway, deployment, reason)
+
+    counters = await reconcile_service.sweep_all(gateway)
+
+    assert counters["instances"] == 1, "creating -> error is a change and must be counted"
+    row = await reload_from_db(Instance, instance_id)
+    assert row.status is InstanceStatus.ERROR
+    assert row.status_message is not None, "an error with no reason is barely better than a wait"
+    assert reason in row.status_message, "the cluster's own words are the useful part"
+
+
+async def test_a_pod_that_has_not_started_yet_is_still_just_starting(
+    client: httpx.AsyncClient,
+    world: World,
+    gateway: FakeK8sGateway,
+    reload_from_db: Any,
+) -> None:
+    """The guard on the guard: a silent Deployment must not read as a failure.
+
+    ``failure`` is ``None`` both for a healthy workload and for one whose controller
+    has not reacted yet, so treating "no complaint" as an error would paint every
+    ordinary start red. Only a complaint is evidence of a failure.
+    """
+    instance_id, _ = await _instance_with_no_pod(client, world, gateway)
+
+    counters = await reconcile_service.sweep_all(gateway)
+
+    assert counters["instances"] == 0, "nothing changed, so nothing may be reported"
+    row = await reload_from_db(Instance, instance_id)
+    assert row.status is InstanceStatus.CREATING
+    assert row.status_message == "等待容器启动"
+
+
+async def test_the_error_clears_itself_once_the_pod_can_be_created(
+    client: httpx.AsyncClient,
+    world: World,
+    gateway: FakeK8sGateway,
+    reload_from_db: Any,
+) -> None:
+    """An error the sweep cannot clear would be a second bug.
+
+    ``error`` is in ``LIVE_INSTANCE_STATUSES`` precisely so the loop keeps observing an
+    instance it has already failed, and a pod appearing is the only proof the cause is
+    gone. Without this, fixing the cluster would leave a permanently red row.
+    """
+    instance_id, deployment = await _instance_with_no_pod(client, world, gateway)
+    _refuse(gateway, deployment, "maximum cpu usage per Container is 2, but limit is 4")
+    await reconcile_service.sweep_all(gateway)
+    assert (await reload_from_db(Instance, instance_id)).status is InstanceStatus.ERROR
+
+    # The operator raises the ceiling, and the controller creates the pod.
+    gateway.deployment_failures.clear()
+    spawn_pod(gateway, namespace=LAB_A_NAMESPACE, deployment=deployment)
+    counters = await reconcile_service.sweep_all(gateway)
+
+    row = await reload_from_db(Instance, instance_id)
+    assert row.status is InstanceStatus.RUNNING, "the fix has to be observable"
+    assert row.status_message is None, "a stale 'rejected' message would outlive the cause"
+    assert counters["instances"] == 1
+
+
+async def test_a_healthy_instance_is_never_asked_about_its_deployment(
+    client: httpx.AsyncClient, world: World, gateway: FakeK8sGateway
+) -> None:
+    """The extra read is this feature's entire cost, so it has to stay conditional.
+
+    A sweep of healthy instances must not pay for a diagnosis none of them needs.
+    """
+    await _instance_with_a_ready_pod(client, world, gateway)
+
+    await reconcile_service.sweep_all(gateway)
+
+    asked = [call for call in gateway.calls if call[0] == "read_deployment_status"]
+    assert asked == [], "a pod exists, so there is nothing to explain"
+
+
+async def test_the_reconcile_button_reports_the_same_failure_as_the_sweep(
+    client: httpx.AsyncClient,
+    world: World,
+    gateway: FakeK8sGateway,
+    reload_from_db: Any,
+) -> None:
+    """``reconcile_instance`` is a second call site and must not disagree.
+
+    A user staring at a stuck instance is far more likely to press 对账 than to wait
+    for the next tick, so the two paths have to reach the same verdict.
+    """
+    instance_id, deployment = await _instance_with_no_pod(client, world, gateway)
+    _refuse(gateway, deployment, "maximum cpu usage per Container is 2, but limit is 4")
+
+    response = await client.post(f"/api/v1/instances/{instance_id}/reconcile")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "error"
+    assert "maximum cpu usage" in body["statusMessage"]
+    row = await reload_from_db(Instance, instance_id)
+    assert row.status is InstanceStatus.ERROR

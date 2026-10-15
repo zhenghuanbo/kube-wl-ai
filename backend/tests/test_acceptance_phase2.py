@@ -331,8 +331,74 @@ async def test_creating_a_workspace_provisions_the_namespace(
     assert quota.hard["requests.cpu"] == "8"
     assert quota.hard["requests.memory"] == "16384Mi"
     assert quota.hard["count/deployments.apps"] == "2"
-    assert gateway.limit_ranges["wl-lab-a-alice"].default_cpu == "4"
+    limits = gateway.limit_ranges["wl-lab-a-alice"]
+    assert limits.default_cpu == "4"
+    # This pool offers exactly one spec, so the ceiling equals the default. The case
+    # where they must differ has its own test below.
+    assert limits.max_cpu == "4"
     assert gateway.network_policies["wl-lab-a-alice"].value == "internal"
+
+
+async def test_the_limit_range_ceiling_covers_the_biggest_spec_not_the_smallest(
+    admin_client: AsyncClient, world: World, gateway: FakeK8sGateway
+) -> None:
+    """A ``max`` taken from the smallest spec makes every bigger spec unschedulable.
+
+    ``wl-limits`` is admission control, so a spec above the ceiling is not a slow
+    start: the pod is refused before it exists. The instance then sits on "等待容器
+    启动" with no pod anywhere to show for it — which is exactly how a pool offering
+    both 4cpu and 8cpu could only ever run 4cpu.
+
+    The two dimensions are deliberately crossed: the largest CPU and the largest memory
+    belong to *different* specs, so code that picked one "smallest row" (or one
+    "largest row") and used it for both would fail the memory assertions here.
+    """
+    pool = await make_pool(admin_client, name="two-tier", group_id=world.lab_a.id)
+    listed = await admin_client.get(f"/api/v1/resource-groups/{pool['id']}")
+    assert listed.status_code == 200, listed.text
+    existing = listed.json()["specs"]
+    # `make_pool` attached one 4cpu/8192Mi spec.
+    assert [(spec["cpuMilli"], spec["memoryMb"]) for spec in existing] == [(4000, 8192)]
+
+    crossed = await admin_client.post(
+        "/api/v1/resource-specs",
+        json={
+            "name": "big-cpu-small-memory",
+            "displayName": "大 CPU 小内存",
+            "cpuMilli": 8000,
+            "memoryMb": 4096,
+            "gpuType": "none",
+            "gpuCount": 0,
+        },
+    )
+    assert crossed.status_code == 201, crossed.text
+    attached = await admin_client.put(
+        f"/api/v1/resource-groups/{pool['id']}/specs",
+        json=[*[spec["id"] for spec in existing], crossed.json()["id"]],
+    )
+    assert attached.status_code == 200, attached.text
+
+    response = await admin_client.post(
+        "/api/v1/workspaces",
+        json={
+            "name": "two-tier",
+            "groupId": world.lab_a.id,
+            "resourceGroupIds": [pool["id"]],
+        },
+    )
+    assert response.status_code == 201, response.text
+
+    limits = gateway.limit_ranges["wl-lab-a-two-tier"]
+    # Defaults stay the smallest shape in each dimension: a pod that declares nothing
+    # must not become a shape the user never asked for.
+    assert limits.default_cpu == "4"
+    assert limits.default_request_cpu == "4"
+    assert limits.default_memory == "4096Mi"
+    assert limits.default_request_memory == "4096Mi"
+    # Ceilings are the largest in each dimension, and they come from two different
+    # specs: 8 cpu from the spec added above, 8192Mi from the one `make_pool` created.
+    assert limits.max_cpu == "8"
+    assert limits.max_memory == "8192Mi"
 
 
 async def test_workspace_without_a_pool_gets_a_usable_but_empty_namespace(

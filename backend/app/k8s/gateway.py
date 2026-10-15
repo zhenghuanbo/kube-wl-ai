@@ -434,6 +434,26 @@ class PodInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class DeploymentStatus:
+    """The Deployment controller's own account of whether it could make pods.
+
+    Every other input the reconciler has is a pod, and a pod that admission control
+    refused leaves exactly the same trace as a pod that has not started yet: nothing
+    at all. That is how an instance whose container the cluster will never accept sits
+    on "等待容器启动" forever — the Deployment knows why, carries it in a
+    ``ReplicaFailure`` condition, and nobody asks.
+    """
+
+    name: str
+    namespace: str
+    #: The controller's verbatim explanation for why it could not create a pod, e.g.
+    #: ``maximum cpu usage per Container is 2, but limit is 4``. ``None`` means only
+    #: that it has not complained *yet* — the controller may simply not have reacted.
+    #: So ``None`` is not evidence of health; a failure is evidence of a failure.
+    failure: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class WorkloadRefs:
     """The object names that make up one instance, for deletion."""
 
@@ -588,6 +608,16 @@ class K8sGateway(Protocol):
     def scale_deployment(self, namespace: str, name: str, replicas: int) -> None:
         """Start (1) or stop (0) a workload by scaling it."""
 
+    def read_deployment_status(self, namespace: str, name: str) -> DeploymentStatus | None:
+        """Read whether the Deployment controller could produce any pods.
+
+        ``None`` when the Deployment does not exist. Exists because a pod refused at
+        admission is never created, so listing pods returns an empty result that is
+        indistinguishable from a container that is merely slow to start — the
+        difference lives only in this object's conditions, and without it a
+        permanently broken instance is reported as permanently starting.
+        """
+
     def read_pod(self, namespace: str, name: str) -> PodInfo | None:
         """Read one pod; ``None`` when it does not exist yet."""
 
@@ -663,6 +693,11 @@ class FakeK8sGateway:
         #: Keyed by ``"namespace/name"`` because names are only unique inside a
         #: namespace, exactly as they are in a cluster.
         self.deployments: dict[str, WorkloadSpec] = {}
+        #: Scripted ``ReplicaFailure`` messages, keyed like ``deployments``. A real
+        #: cluster reports one when admission refuses the pod — a ``LimitRange``, a
+        #: quota, a missing ServiceAccount — and none of that is visible in the
+        #: applied spec, so a test has to say which complaint it means.
+        self.deployment_failures: dict[str, str] = {}
         self.services: dict[str, ServiceSpec] = {}
         #: ClusterIPs "assigned" by :meth:`apply_service`, keyed like ``services``.
         self.service_ips: dict[str, str] = {}
@@ -777,6 +812,17 @@ class FakeK8sGateway:
         if key not in self.services:
             return None
         return ServiceInfo(name=name, namespace=namespace, cluster_ip=self.service_ips.get(key))
+
+    def read_deployment_status(self, namespace: str, name: str) -> DeploymentStatus | None:
+        self._record("read_deployment_status", namespace, name)
+        key = f"{namespace}/{name}"
+        if key not in self.deployments:
+            return None
+        return DeploymentStatus(
+            name=name,
+            namespace=namespace,
+            failure=self.deployment_failures.get(key),
+        )
 
     def apply_secret(self, spec: SecretSpec) -> None:
         self._record("apply_secret", spec.namespace, spec.name)

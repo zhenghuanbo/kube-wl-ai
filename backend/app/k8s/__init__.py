@@ -14,6 +14,7 @@ from app.core.config import Settings, get_settings
 from app.core.logging import get_logger
 from app.k8s.gateway import (
     ContainerPort,
+    DeploymentStatus,
     ExecSession,
     FakeExecSession,
     FakeK8sGateway,
@@ -59,6 +60,7 @@ __all__ = [
     "SERVICES_PER_INSTANCE",
     "TASK_SHELL",
     "ContainerPort",
+    "DeploymentStatus",
     "ExecSession",
     "FakeExecSession",
     "FakeK8sGateway",

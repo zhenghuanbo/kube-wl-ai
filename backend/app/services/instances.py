@@ -801,16 +801,42 @@ async def _mark_query_failed(session: AsyncSession, instance: Instance, exc: Exc
 
 
 async def _absorb_observation(
-    session: AsyncSession, instance: Instance, pods: list[PodInfo]
+    session: AsyncSession,
+    instance: Instance,
+    pods: list[PodInfo],
+    deployment_failure: str | None = None,
 ) -> Instance:
     """Fold the pods observed for one instance into its row.
 
     Takes the pods instead of fetching them, so that a caller which listed a whole
     namespace at once can serve many instances from that one listing. Performs no
-    cluster access of its own.
+    cluster access of its own, and ``deployment_failure`` is handed in for the same
+    reason.
     """
     if not pods:
-        if instance.status in (InstanceStatus.RUNNING, InstanceStatus.CREATING):
+        if deployment_failure is not None:
+            # The Deployment controller could not create a pod *at all*, and said
+            # why. It will not do anything different next tick: the pod was refused
+            # at admission, so retrying is the controller's job and failing is the
+            # outcome. Reporting "等待容器启动" here is a promise the cluster has
+            # already broken — which is how an instance whose container the cluster
+            # would never accept sat on 创建中 forever, with the real reason
+            # ("maximum cpu usage per Container is 2, but limit is 4") visible only
+            # to whoever thought to run `kubectl describe rs`.
+            #
+            # Sticky until a pod appears, which is the only thing that proves the
+            # cause was removed: `error` is in LIVE_INSTANCE_STATUSES, so the sweep
+            # keeps observing this instance and flips it to `running` on its own.
+            if instance.status is not InstanceStatus.ERROR:
+                logger.warning(
+                    "instance_pod_rejected",
+                    instance=instance.name,
+                    namespace=instance_workspace_ns(instance),
+                    reason=deployment_failure,
+                )
+            instance.status = InstanceStatus.ERROR
+            instance.status_message = f"集群拒绝创建容器：{deployment_failure}"
+        elif instance.status in (InstanceStatus.RUNNING, InstanceStatus.CREATING):
             instance.status = InstanceStatus.CREATING
             instance.status_message = "等待容器启动"
         await session.flush()
@@ -860,6 +886,40 @@ async def _absorb_observation(
     return instance
 
 
+async def _deployment_failure(
+    instance: Instance, gateway: K8sGateway, namespace: str
+) -> str | None:
+    """Why the Deployment has produced no pod, or ``None`` if it has not said.
+
+    Only ever called for an instance that has *no* pod, so a healthy workload never
+    pays for it — which is the whole reason this is one read per pod-less instance
+    rather than a listing folded into the sweep. That does mean a namespace in which
+    everything is pod-less (one broken ceiling breaks every instance in it) costs one
+    read per such instance per sweep instead of one per namespace. Accepted: a single
+    ``GET`` is a small fraction of the pod listing beside it, the state is
+    self-correcting as soon as the cause is gone, and the alternative — inventing a
+    ``wl-instance`` label on the Deployment and listing those too — buys a constant
+    factor in a case that only exists while something is already wrong.
+
+    A read that fails is *not* escalated: the instance keeps whatever its pods said.
+    "Could not ask" is not evidence that the workload is broken.
+    """
+    deployment = instance.k8s_deployment
+    if not deployment:
+        return None
+    try:
+        status = await run_gateway(gateway.read_deployment_status, namespace, deployment)
+    except K8sError as exc:
+        logger.warning(
+            "deployment_status_unreadable",
+            instance=instance.name,
+            deployment=deployment,
+            error=str(exc),
+        )
+        return None
+    return status.failure if status else None
+
+
 async def reconcile_instance(
     session: AsyncSession, instance: Instance, gateway: K8sGateway
 ) -> Instance:
@@ -881,7 +941,8 @@ async def reconcile_instance(
     except K8sError as exc:
         return await _mark_query_failed(session, instance, exc)
 
-    return await _absorb_observation(session, instance, pods)
+    failure = await _deployment_failure(instance, gateway, namespace) if not pods else None
+    return await _absorb_observation(session, instance, pods, failure)
 
 
 async def reconcile_all(session: AsyncSession, gateway: K8sGateway, *, limit: int = 200) -> int:
@@ -913,6 +974,10 @@ async def reconcile_all(session: AsyncSession, gateway: K8sGateway, *, limit: in
     slowly than the number of instances. Pods are handed back to their rows by the
     ``wl-instance`` label, which is an unambiguous key here: a workspace's
     ``k8s_namespace`` is unique, and so is an instance name within a workspace.
+
+    The one thing the sweep still asks about per *instance* is why a pod-less
+    instance has no pod — see :func:`_deployment_failure`. A healthy instance never
+    reaches that call.
     """
     rows = list(
         (
@@ -957,7 +1022,11 @@ async def reconcile_all(session: AsyncSession, gateway: K8sGateway, *, limit: in
             before = instance.status
             # Grouping preserved the newest-first order `list_pods` returns, so
             # `pods[0]` is still the pod a single-instance listing would have picked.
-            await _absorb_observation(session, instance, by_instance.get(instance.name, []))
+            pods = by_instance.get(instance.name, [])
+            # A pod-less instance is the one case an empty listing cannot explain on
+            # its own: "not started yet" and "never going to start" look identical.
+            failure = await _deployment_failure(instance, gateway, namespace) if not pods else None
+            await _absorb_observation(session, instance, pods, failure)
             if instance.status != before:
                 changed += 1
 

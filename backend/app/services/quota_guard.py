@@ -219,6 +219,42 @@ async def workspace_quotas(session: AsyncSession, workspace_id: int) -> dict[str
     return {quota.resource: quota for quota in quotas}
 
 
+async def workspace_usage(session: AsyncSession, workspace_id: int) -> dict[str, int]:
+    """Live usage inside one namespace, keyed the way the ``quotas`` table is.
+
+    This is what the quota API reports as "used", and it is measured rather than
+    remembered: the same function the gate uses to decide whether a submission fits is
+    the one that answers "how much is in use". The two cannot disagree, which is the
+    property the deleted ``used_value`` column only pretended to have.
+
+    All accelerator models are summed into one ``gpu`` figure because that is the
+    dimension the workspace profile — and therefore the namespace quota — uses;
+    per-model tracking survives only in the per-user and per-pool ceilings.
+    """
+    usage = await compute_usage(session, workspace_id=workspace_id)
+    return {
+        QuotaResource.CPU.value: usage.cpu_milli,
+        QuotaResource.MEMORY.value: usage.memory_mb,
+        QuotaResource.STORAGE.value: usage.storage_gb,
+        QuotaResource.GPU.value: sum(usage.gpu.values()),
+    }
+
+
+async def scope_usage(
+    session: AsyncSession, scope_type: QuotaScope, scope_id: int
+) -> dict[str, int]:
+    """Measured usage for whatever a ``quotas`` row is scoped to.
+
+    Only the workspace scope has any: a person's ceilings live on their quota profile
+    and a pool's on its limits row, and neither is a ``quotas`` row, so there are no
+    other scopes to measure for in practice. Anything else reports nothing rather than
+    zero-with-an-asterisk, and the caller renders the empty answer as zero.
+    """
+    if scope_type is QuotaScope.WORKSPACE:
+        return await workspace_usage(session, scope_id)
+    return {}
+
+
 # ---------------------------------------------------------------------------
 # Comparing
 # ---------------------------------------------------------------------------
@@ -461,20 +497,26 @@ async def enforce_compute_quota(
         )
     )
     if request.wants_gpu:
-        gpu_key = gpu_resource_key(request.gpu_type)
-        if space_quotas.get(gpu_key) is None:
+        # A single total here, unlike the two layers above. The workspace's `gpu` row
+        # is one number because the quota template has one GPU field, so the ceiling
+        # says "eight cards", not "eight of each model" — and the usage compared
+        # against it is therefore every model added up. A per-model key here would
+        # also be looking for a row that is never written, and the missing-row branch
+        # below would then refuse *every* GPU request.
+        gpu_total = sum(space_usage.gpu.values())
+        if space_quotas.get(QuotaResource.GPU.value) is None:
             raise QuotaExceededError(
                 f"工作空间未获得{request.gpu_type.upper()} 加速卡配额，无法创建",
-                detail={"resource": gpu_key},
+                detail={"resource": QuotaResource.GPU.value},
             )
         ceilings.append(
             _Ceiling(
                 space_layer,
                 "workspace",
                 f"{request.gpu_type.upper()} 加速卡",
-                gpu_key,
-                _ceiling_of(space_quotas, gpu_key),
-                space_usage.gpu.get(gpu_key, 0),
+                QuotaResource.GPU.value,
+                _ceiling_of(space_quotas, QuotaResource.GPU.value),
+                gpu_total,
                 request.gpu_count,
                 _cards,
             )

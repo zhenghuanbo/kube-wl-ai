@@ -10,7 +10,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '@/api/client'
 import { listGroups } from '@/api/groups'
-import { listResourceGroups } from '@/api/resources'
+import { listResourceGroups, listQuotas } from '@/api/resources'
 import {
   grantResourceGroup,
   listWorkspaceGrants,
@@ -37,6 +37,7 @@ import { usePermissions } from '@/composables/usePermissions'
 import { useNotificationStore } from '@/stores/notifications'
 import type { GroupSummary } from '@/api/groups'
 import type {
+  Quota,
   ResourceGroupSummary,
   WorkspaceDetail,
   WorkspaceMember,
@@ -44,6 +45,7 @@ import type {
   WorkspaceStatus,
   WorkspaceSummary,
 } from '@/types/resource'
+import { formatCpu, formatMemory, formatQuota, quotaResourceLabel } from '@/types/resource'
 
 const { can, isGlobalAdmin, adminGroupIds } = usePermissions()
 const notifications = useNotificationStore()
@@ -184,6 +186,8 @@ const detailOpen = ref(false)
 const detail = ref<WorkspaceDetail | null>(null)
 const members = ref<WorkspaceMember[]>([])
 const grants = ref<WorkspaceResourceGrant[]>([])
+/** The namespace's ceilings and measured usage, shown in the detail panel. */
+const quotas = ref<Quota[]>([])
 const detailLoading = ref(false)
 
 async function openDetail(workspaceId: number): Promise<void> {
@@ -191,9 +195,13 @@ async function openDetail(workspaceId: number): Promise<void> {
   detailLoading.value = true
   try {
     detail.value = await getWorkspace(workspaceId)
-    ;[members.value, grants.value] = await Promise.all([
+    ;[members.value, grants.value, quotas.value] = await Promise.all([
       listWorkspaceMembers(workspaceId),
       listWorkspaceGrants(workspaceId),
+      // The namespace's own numbers, with usage measured from the workloads. Read
+      // here rather than taken from the reconcile response so the panel is right on
+      // first open, not only after somebody re-applies by hand.
+      listQuotas('workspace', workspaceId),
     ])
   } catch (error) {
     if (!(error instanceof ApiError)) throw error
@@ -206,6 +214,25 @@ async function refreshDetail(): Promise<void> {
   if (!detail.value) return
   await openDetail(detail.value.id)
   await load()
+}
+
+/**
+ * One quota line as `已用 / 上限`, in the unit a person types into the template.
+ *
+ * The API speaks Kubernetes — CPU in milli-cores, memory in MB — so a raw render of
+ * the 24-core default would read "24000 核·毫" and look like the page disagreed with
+ * the form that produced it. `-1` is "not checked" and has to bypass the arithmetic
+ * entirely, or the ceiling would print as a negative quantity.
+ */
+function quotaLine(row: Quota): string {
+  const limit = row.limitValue < 0 ? '不限' : quotaValue(row, row.limitValue)
+  return `${quotaValue(row, row.usedValue)} / ${limit}`
+}
+
+function quotaValue(row: Quota, value: number): string {
+  if (row.resource === 'cpu') return formatCpu(value)
+  if (row.resource === 'memory') return formatMemory(value)
+  return formatQuota(value, row.unit)
 }
 
 const grantingPoolId = ref<number | null>(null)
@@ -709,6 +736,24 @@ onMounted(async () => {
             授权
           </v-btn>
         </div>
+
+        <!-- The namespace's quota, with the usage measured from the workloads. -->
+        <h3 class="text-subtitle-1 mb-2 mt-4">命名空间配额</h3>
+        <v-table v-if="quotas.length" density="compact" class="wl-detail__list">
+          <tbody>
+            <tr v-for="row in quotas" :key="row.id">
+              <td class="text-medium-emphasis">{{ quotaResourceLabel(row.resource) }}</td>
+              <td class="text-end wl-num">{{ quotaLine(row) }}</td>
+            </tr>
+          </tbody>
+        </v-table>
+        <p v-else class="text-body-2 text-medium-emphasis">
+          尚未授权资源池，该命名空间只允许 0 个 Pod
+        </p>
+        <p class="text-caption text-medium-emphasis mt-2 mb-0">
+          算力三项来自该工作空间的配额模板（管理 → 配额管理），存储上限来自已授权资源池的合计；
+          「不限」表示没有设这一项，而不是设成了 0。
+        </p>
       </div>
     </v-navigation-drawer>
 
@@ -801,5 +846,12 @@ onMounted(async () => {
   border: 1px solid rgba(0, 0, 0, 0.08);
   border-radius: 8px;
   padding: 0;
+}
+
+// Quota figures sit in a column and must line up; proportional digits make
+// "6 核 / 24 核" and "16 GB / 不限" look ragged against each other.
+.wl-num {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 </style>

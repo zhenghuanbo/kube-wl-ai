@@ -394,16 +394,19 @@ def main() -> int:
         if isinstance(quotas, list)
         else {}
     )
-    check("配额按资源组上限汇总", by_resource.get("cpu") == 6000, str(by_resource))
-    check("内存配额同步汇总", by_resource.get("memory") == 12288, str(by_resource))
+    check(
+        "算力配额来自工作空间模板，不再从资源池求和",
+        by_resource.get("cpu") == 24000 and by_resource.get("memory") == -1,
+        str(by_resource),
+    )
     check(
         "不再有实例数配额：能建几个实例归用户配额模板管，不从资源池求和",
         "instance" not in by_resource,
         str(by_resource),
     )
     check(
-        "GPU 按型号取最大规格而非求和",
-        by_resource.get("gpu:a100") == 2,
+        "加速卡配额是模板上的单一数字",
+        by_resource.get("gpu") == 8,
         str(by_resource),
     )
 

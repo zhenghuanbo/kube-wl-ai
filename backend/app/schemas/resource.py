@@ -228,10 +228,9 @@ class QuotaRead(ApiModel):
     resource: str
     limit_value: int
     used_value: int
+    #: ``limit - used``, or ``-1`` when the limit is ``-1`` ("not checked"). Reported
+    #: as ``-1`` rather than as a large number so the UI can say 不限 instead of
+    #: inventing a figure that looks like a real ceiling.
     available: int
     unit: str
     is_active: bool
-
-
-class QuotaUpdate(ApiModel):
-    limit_value: int = Field(ge=0)

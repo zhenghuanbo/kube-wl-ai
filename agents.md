@@ -183,9 +183,52 @@ nginx ──► api (FastAPI/uvicorn) ──┬─► PostgreSQL
 max_runtime_seconds)` · `resource_specs(cpu_milli, memory_mb, gpu_type, gpu_count)` ·
 `resource_group_specs` · `runtime_limits` · `resource_group_limits` ·
 `compute_nodes(resource_group_id, ...)` · `gpu_devices` ·
-`quotas(scope_type=user|group|workspace, ...)`
+`quota_profiles(kind=user|workspace, ...)` · `quotas(scope_type=workspace, ...)`
 
 > `gpu_type` 是**字符串枚举**（如 `v100` / `a100` / `h100`），**不是**整数。
+
+#### 算力配额是三层，各自独立生效，取最严
+
+一个「能不能建」的判定要同时满足三层上限，任一层不满足就 409，报文里的 `detail.layer`
+说明是哪一层拒的（`user` / `pool` / `workspace`），`detail.used`/`detail.limit` 是该层的
+**实测**用量与该层上限：
+
+| 层 | 数据来源 | 作用域 | 维度 |
+| --- | --- | --- | --- |
+| ① 用户 | `users.quota_profile_id` → `quota_profiles(kind=user)` | **跨全部工作空间**一个人一行 | cpu / 内存 / 加速卡 + 实例数 / 应用数 / 自定义业务数 |
+| ② 资源池 | `resource_group_limits` | 该用户**在该池内** | cpu 核 / 内存 GB / 加速卡张数（每用户） |
+| ③ 工作空间 | `workspaces.quota_profile_id` → `quota_profiles(kind=workspace)` | 该命名空间 | cpu / 内存 / 加速卡 + Pod / Deployment / Service / Job 计数 |
+
+三条要点：
+
+1. **数量只查第 ① 层**。「能建几个」是人的属性，放到池上等于给同一空间的每个人各发一份
+   相同额度，放到工作空间上又答不了「我还能建几个」。工作空间的对象计数是**兜底**（
+   与命名空间的 `ResourceQuota` 同源），个人通常先撞到自己的那一层。
+2. **模板上的 `gpu` 是单一数字**（所有型号合计），而第 ①、② 层按型号比较：命名空间配额
+   是整个租户的总量，而「2 张 A100 但没有 H100」是关于一个人能申领什么的规定。
+   工作空间那层因此按裸 `gpu` 行查表、按各型号求和比较（曾因按型号查表而 fail closed，
+   把**每一个** GPU 请求都拒掉——没有 GPU 的集群走不到这条分支，测试全绿）。
+3. **`-1` 表示不校验**，`0` 是真实上限（完全不允许），两者相反。`-1` 传到 Kubernetes 的
+   忠实翻译是**省略该 key**：`apply_resource_quota` 整体替换 `hard`，而 k8s 把缺失读作
+   「无限制」。
+
+数量口径是**现存未删除的对象数**：`is_active` 为真就算，运行中与已停止都占名额，删除后
+释放；自定义任务只算未结束的（终态 Job 不再消耗任何东西）。计算用量的口径不同：
+开发实例按存活状态（**含已停止**，否则重启会撞上自己占用的容量），任务只算非终态。
+
+#### 用量是算出来的，不是存下来的
+
+`quotas` 表只存**上限**（`limit_value`），没有 `used_value`：那一列从来没有代码写过，
+所有读者看到的「已用」恒为 0，比没有计数器更糟——它看起来是权威的。用量由
+`app/services/quota_guard.py` 从工作负载表实时算出，用的就是准入校验那一个函数，
+所以「用了多少」与「这次能不能过」不可能互相矛盾，也不会漂移。
+
+`quotas` 的行与下发给命名空间的对象**用的是同一组数字**（`_desired_quota`），因此接口报的
+和集群上的不可能不一致。`PATCH /quotas/{id}` 已删除：它改的是**派生**值，下一次 reconcile
+会悄悄改回去；写入口只有配额模板（`quota_profile:update`，全局管理员）。
+
+`resource_group_limits` 存 cpu 核/内存 GB/加速卡张/存储 GB（**不是** milli/MiB——那是 k8s
+的线上格式，转换只发生在拼 manifest 的地方）。
 
 #### 节点归属：数据库是事实，`wl-pool` 标签是物化视图
 
@@ -843,7 +886,7 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 | 数据模型 | `workspaces` / `workspace_members` / `workspace_resource_grants` / `resource_groups` / `resource_specs` / `resource_group_specs` / `runtime_limits` / `resource_group_limits` / `compute_nodes` / `gpu_devices` / `quotas`，迁移 `4392f95350e1` |
 | 租户边界 | 工作空间 ≡ K8s 命名空间 `wl-{group}-{name}`；命名冲突时截断至 63 字符并附 8 位哈希 |
 | K8s 下发 | `ensure_namespace` / `apply_resource_quota` / `apply_limit_range` / `apply_network_policy`，幂等，可由 `/reconcile` 重放 |
-| 配额 | 由已授权资源组的 `ResourceGroupLimit` 汇总；GPU 按型号取各池**最大**规格（规格是互斥选项，求和会虚增额度） |
+| 配额 | 由已授权资源组的 `ResourceGroupLimit` 汇总；GPU 按型号取各池**最大**规格（规格是互斥选项，求和会虚增额度）。*（**已被取代**：工作空间的命名空间配额改由 `quota_profiles` 驱动，资源池不再汇总进工作空间上限，见 §5.3）* |
 | 一人一空间 | `workspace_members.user_id` **单列唯一**，数据库层兜底；迁移需显式 `moveFromExisting` |
 | 资源可见性 | 目录（资源组/规格/时长/节点）对全体登录用户可读，**授权**才是边界 |
 | API | `/workspaces`（含 `/mine`、`/reconcile`、成员、资源授权）、`/resource-groups`（含 `/nodes`、`/specs`、`/limits`）、`/resource-specs`、`/runtime-limits`、`/nodes`（含 `/sync`）、`/quotas` |
@@ -891,7 +934,7 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 | SSH | 用户自助登记公钥，指纹按 OpenSSH 格式（`SHA256:` + SHA-256(blob)）本地计算，不依赖 `ssh-keygen`；未登记则**不建 Secret 也不挂卷**，容器内 sshd 不接受任何密钥 |
 | 终端 | `WS /ws/terminal/{id}`：二进制帧＝按键，文本帧＝控制（`resize`）。按类型而非内容分帧——嗅探 JSON 会在用户粘贴 JSON 时误判。容器侧阻塞套接字由工作线程驱动 |
 | IDE 票据 | `GET /instances/{id}/ide-access` 签发 `typ=ide` 的短时 JWT，锁定 `instance` 与 `namespace`；与访问令牌**类型互斥**，无法互相冒用。**但入口处从未校验过它**——`decode_ide_ticket` 至今没有生产调用点，所以这张票据当时也没有真正保护任何东西。后来 IDE 改走平台后端反代，该接口不再签发票据、只返回 `/x/{用户名}/{id}/lab`；`create_ide_ticket` / `decode_ide_ticket` 保留且有测试覆盖，但没有调用者 |
-| 配额 | 独立内核：实例数 / CPU / 内存 / 存储 / GPU(按型号) + 资源组公平上限（并发数、单实例卡数）。停止**不释放**配额——否则重启会因自己占用的容量而失败 |
+| 配额 | 独立内核：实例数 / CPU / 内存 / 存储 / GPU(按型号) + 资源组公平上限（并发数、单实例卡数）。停止**不释放**配额——否则重启会因自己占用的容量而失败。*（**已被取代**：实例/应用/任务数量改由用户配额模板承担，资源池的四列改为 cpu 核 / 内存 GB / 加速卡张 / 存储 GB，见 §5.3）* |
 | 生命周期 | create / start / stop / delete / reconcile / logs（含 `previous=true` 看崩溃前日志）；`expire_overdue` 在服务端强制超时，UI 关掉也拦得住 |
 | API | `/instances`（9 个端点）+ `/ssh-keys`（3 个），OpenAPI 由 49 增至 **58** 个路径 |
 | 前端 | 实例页（列表/筛选/创建，管理员多出工作空间与归属人列）、详情抽屉（概览/连接/终端）、xterm.js 终端组件、个人设置页（SSH 公钥自助管理）。终端按需加载，xterm 独立分包 |
@@ -959,7 +1002,7 @@ dev server 各模块编译通过、设计令牌已进入产物 CSS。
 
 | 维度 | 内容 |
 | --- | --- |
-| 数据模型 | `applications`（可发布的可复用实例形态 + 介绍信息）、`tasks`（K8s Job）、`workload_events`（工作负载时间线）；`resource_group_limits` 新增 `max_concurrent_tasks` |
+| 数据模型 | `applications`（可发布的可复用实例形态 + 介绍信息）、`tasks`（K8s Job）、`workload_events`（工作负载时间线）；`resource_group_limits` 新增 `max_concurrent_tasks`。*（该列后已删除，数量归用户配额模板，见 §5.3）* |
 | 迁移 | `f818f0e87ceb`，往返通过，27 张表 |
 | K8s | 网关新增 `apply_job` / `read_job` / `delete_job`（`batch/v1`）；`build_task_objects()` |
 | 服务 | `applications.py`（可见性、启动、编辑权）、`tasks.py`（提交/取消/删除/对齐/日志）、`workload_events.py`、`quota_guard.py`（实例与任务共用配额） |
@@ -2820,7 +2863,8 @@ for」——这个理由对 `default*` 完全成立，对 `max` 则正好相反�
 而且平台的配额模型里**根本没有「每实例 CPU 上限」这个概念**（`resource_group_limits` 只有
 `max_cpu_milli_per_user` / `max_memory_mb_per_user` / `max_gpu_per_instance` /
 `max_concurrent_instances`）。按策略 4 CPU 完全合法，唯一说不的就是这个 LimitRange —— 平台一边在
-目录里提供它，一边禁止它。
+目录里提供它，一边禁止它。*（列名是当时的：这四个里后三个已删除，单位也改为核/GB，见 §5.3；
+结论不变。）*
 
 **更糟的推论**：取的是「所有已授予资源组里最小的规格」。以后往池子里加一个更小的规格（例如
 500m/1Gi），下一次工作空间重下发就会把 `max.cpu` **降低**，于是**已经在跑的实例将无法再启动**

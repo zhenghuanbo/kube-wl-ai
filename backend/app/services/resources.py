@@ -13,7 +13,7 @@ from app.auth import policy
 from app.core.errors import BadRequestError, ConflictError, NotFoundError
 from app.core.logging import get_logger
 from app.k8s import K8sGateway, NodeInfo, run_gateway
-from app.models.enums import GpuDeviceStatus, NodeStatus, QuotaResource, QuotaScope
+from app.models.enums import GpuDeviceStatus, NodeStatus, QuotaScope
 from app.models.group import Group
 from app.models.resource import (
     POOL_LABEL,
@@ -25,7 +25,6 @@ from app.models.resource import (
     ResourceGroupSpec,
     ResourceSpec,
     RuntimeLimit,
-    gpu_resource_key,
 )
 from app.models.user import User
 from app.schemas.resource import (
@@ -138,15 +137,23 @@ def node_to_read(node: object) -> ComputeNodeRead:
     )
 
 
-def quota_to_dict(quota: Quota) -> dict[str, object]:
+def quota_to_dict(quota: Quota, *, used_value: int) -> dict[str, object]:
+    """One quota row plus the usage the caller measured for it.
+
+    Usage is passed in rather than read off the row because it is no longer stored:
+    the ceiling lives here, the consumption lives in the workload tables. ``-1`` for
+    the limit means "not checked", which is reported as ``-1`` available rather than
+    as a large number, so the UI can say 不限 instead of inventing a figure.
+    """
+    unlimited = quota.limit_value < 0
     return {
         "id": quota.id,
         "scope_type": quota.scope_type.value,
         "scope_id": quota.scope_id,
         "resource": quota.resource,
         "limit_value": quota.limit_value,
-        "used_value": quota.used_value,
-        "available": quota.available,
+        "used_value": used_value,
+        "available": -1 if unlimited else max(quota.limit_value - used_value, 0),
         "unit": quota.unit,
         "is_active": quota.is_active,
     }
@@ -897,108 +904,34 @@ async def list_quotas(
     )
 
 
-async def quota_limits_for_groups(
-    session: AsyncSession, group_ids: Sequence[int]
-) -> dict[str, int]:
-    """Total the pools' allowances, in the units the ``quotas`` table speaks.
+async def storage_gb_for_groups(session: AsyncSession, group_ids: Sequence[int]) -> int:
+    """How much storage the granted pools allow this workspace, in GB.
 
-    Milli-cores and mebibytes, because that is what a namespace ``ResourceQuota`` is
-    written in; the pool rows store cores and GB because that is what an
-    administrator types. This is the one place the two spellings meet.
+    Storage is the **one** dimension still summed from the pools. CPU, memory and
+    accelerators moved to the workspace's quota profile, which is bound 1:1 to the
+    namespace ``ResourceQuota``; storage has no counterpart there, and this number is
+    the only *aggregate* ceiling on it — ``max_storage_gb_per_user`` is checked when a
+    volume is registered and says nothing about the total.
 
-    **Counting workloads is no longer here.** It used to be
-    ``sum(max_concurrent_instances)``, which is only a per-workspace ceiling if a
-    workspace has exactly one user — the same premise this docstring used to state
-    outright ("the per-user ceiling *is* the per-workspace ceiling"). A workspace
-    holds several users, so summing per-user allowances would hand it one allowance
-    per member. Counts are enforced per user on their quota profile, and the
-    namespace's object counts come from the workspace's quota profile.
-
-    A pool that says "not checked" (``-1``) contributes **nothing at all**: when no
-    granted pool checks a dimension, that dimension is left out of the result
-    entirely, so the caller omits the corresponding Kubernetes key instead of
-    inventing a ceiling nobody asked for.
-
-    The GPU number is the exception: it comes from the specs the granted pools
-    *offer* (the largest per model), not from their ``max_gpu_per_user``, which is a
-    per-person fairness rule rather than a namespace total.
+    A pool that says "not checked" (``-1``) contributes nothing, and no granting pool
+    at all means zero rather than unlimited: an absent ``requests.storage`` key is
+    unlimited to Kubernetes, and this namespace is exactly where the aggregate has to
+    be bounded.
     """
     if not group_ids:
-        return {}
+        return 0
 
-    limits = list(
+    granted = list(
         (
             await session.scalars(
-                select(ResourceGroupLimit).where(
-                    ResourceGroupLimit.resource_group_id.in_(group_ids)
+                select(ResourceGroupLimit.max_storage_gb_per_user).where(
+                    ResourceGroupLimit.resource_group_id.in_(group_ids),
+                    ResourceGroupLimit.max_storage_gb_per_user >= 0,
                 )
             )
         ).all()
     )
-    if not limits:
-        return {}
-
-    cpu_cores = [row.max_cpu_cores_per_user for row in limits if row.max_cpu_cores_per_user >= 0]
-    memory_gb = [row.max_memory_gb_per_user for row in limits if row.max_memory_gb_per_user >= 0]
-    storage_gb = [row.max_storage_gb_per_user for row in limits if row.max_storage_gb_per_user >= 0]
-
-    totals: dict[str, int] = {}
-    if cpu_cores:
-        totals[QuotaResource.CPU.value] = sum(cpu_cores) * 1000
-    if memory_gb:
-        totals[QuotaResource.MEMORY.value] = sum(memory_gb) * 1024
-    if storage_gb:
-        totals[QuotaResource.STORAGE.value] = sum(storage_gb)
-
-    # GPUs are tracked per model, so they cannot be summed into one number.
-    specs = await gpu_counts_for_groups(session, group_ids)
-    for model, count in specs.items():
-        totals[gpu_resource_key(model)] = count
-
-    return totals
-
-
-async def gpu_counts_for_groups(session: AsyncSession, group_ids: Sequence[int]) -> dict[str, int]:
-    """Total GPU allowance per accelerator model across the given pools."""
-    if not group_ids:
-        return {}
-
-    rows = (
-        await session.execute(
-            select(ResourceSpec.gpu_type, func.sum(ResourceSpec.gpu_count))
-            .join(ResourceGroupSpec, ResourceGroupSpec.resource_spec_id == ResourceSpec.id)
-            .where(
-                ResourceGroupSpec.resource_group_id.in_(group_ids),
-                ResourceSpec.gpu_count > 0,
-            )
-            .group_by(ResourceSpec.gpu_type)
-        )
-    ).all()
-
-    # The allowance per model is the *largest* spec the pools offer, not the sum
-    # of every spec: specs are alternatives a user picks between, so summing
-    # them would multiply the allowance by the size of the catalogue.
-    per_model: dict[str, int] = {}
-    for model, _total in rows:
-        if model and model != "none":
-            per_model[model] = 0
-
-    if per_model:
-        specs = list(
-            (
-                await session.scalars(
-                    select(ResourceSpec)
-                    .join(ResourceGroupSpec, ResourceGroupSpec.resource_spec_id == ResourceSpec.id)
-                    .where(
-                        ResourceGroupSpec.resource_group_id.in_(group_ids),
-                        ResourceSpec.gpu_count > 0,
-                    )
-                )
-            ).all()
-        )
-        for spec in specs:
-            per_model[spec.gpu_type] = max(per_model.get(spec.gpu_type, 0), spec.gpu_count)
-    return per_model
+    return sum(granted)
 
 
 async def upsert_quotas(
@@ -1011,15 +944,13 @@ async def upsert_quotas(
 ) -> list[Quota]:
     """Replace the limits of a scope with exactly ``limits``.
 
-    Two rules, both about not letting a stale number stay in force:
+    One rule, about not letting a stale number stay in force: a row whose resource is
+    **not** in ``limits`` is deleted. That used to be left alone, so a ceiling that
+    had lost its source stayed enforced — which is how the workspace ``instance`` and
+    ``task`` rows outlived the columns they were derived from.
 
-    * ``used_value`` is preserved: recomputing a limit must never silently reset
-      the consumption counter, or a user could exceed their quota by asking an
-      administrator to edit it.
-    * A row whose resource is **not** in ``limits`` is deleted. That used to be
-      left alone, so a ceiling that had lost its source stayed enforced — which is
-      how the workspace ``instance`` and ``task`` rows outlived the columns they
-      were derived from.
+    This writes ceilings only. Consumption is never stored, so there is nothing here
+    to wrongly reset (see :class:`app.models.resource.Quota`).
     """
     existing = {
         quota.resource: quota
@@ -1035,7 +966,6 @@ async def upsert_quotas(
                 scope_id=scope_id,
                 resource=resource,
                 limit_value=limit_value,
-                used_value=0,
                 unit=resolved_units.get(resource, ""),
             )
             session.add(quota)
@@ -1051,19 +981,6 @@ async def upsert_quotas(
 
     await session.flush()
     return await list_quotas(session, scope_type=scope_type, scope_id=scope_id)
-
-
-async def get_quota(
-    session: AsyncSession, *, scope_type: QuotaScope, scope_id: int, resource: str
-) -> Quota | None:
-    result: Quota | None = await session.scalar(
-        select(Quota).where(
-            Quota.scope_type == scope_type,
-            Quota.scope_id == scope_id,
-            Quota.resource == resource,
-        )
-    )
-    return result
 
 
 async def _resolve_owning_group(session: AsyncSession, group_id: int | None) -> Group | None:

@@ -319,19 +319,27 @@ export interface WorkspaceMemberAssignPayload {
 export const QUOTA_RESOURCE_LABELS: Record<string, string> = {
   cpu: 'CPU',
   memory: '内存',
+  gpu: '加速卡',
   storage: '存储',
   instance: '实例数',
   task: '任务数',
 }
 
-/** `gpu:a100` → `A100`, so GPU lines read like the rest. */
+/** `gpu:a100` → `A100`, so a per-model line reads like the rest. */
 export function quotaResourceLabel(resource: string): string {
   if (resource.startsWith('gpu:')) return `GPU · ${resource.slice(4).toUpperCase()}`
   return QUOTA_RESOURCE_LABELS[resource] ?? resource
 }
 
-/** Render a quota value with its unit (`8000` + `m` → `8000 m`). */
+/**
+ * Render a quota value with its unit (`8000` + `m` → `8000 核·毫`).
+ *
+ * `-1` is the API's "not checked" — an absent ceiling, not a negative one. It has to
+ * be rendered as 不限 rather than through the arithmetic, or a card would show
+ * "剩余 -1 card" for a dimension nobody is limiting at all.
+ */
 export function formatQuota(value: number, unit: string): string {
+  if (value < 0) return '不限'
   if (!unit) return String(value)
   return unit === 'm' ? `${value} 核·毫` : `${value} ${unit}`
 }

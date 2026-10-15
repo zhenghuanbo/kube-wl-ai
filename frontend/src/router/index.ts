@@ -116,6 +116,15 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '资源与配额', roles: ADMIN_ROLES },
       },
       {
+        // Readable by a group administrator, who may have to explain a workspace's
+        // ceiling to whoever asks. Every write on the page is global-admin only and
+        // the page enforces that itself, so the route is not the gate for them.
+        path: 'admin/quota',
+        name: 'admin-quota',
+        component: () => import('@/views/admin/QuotaProfilesView.vue'),
+        meta: { title: '配额管理', roles: ADMIN_ROLES },
+      },
+      {
         path: 'admin/settings',
         name: 'admin-settings',
         component: () => import('@/views/admin/SystemView.vue'),

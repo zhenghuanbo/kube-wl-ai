@@ -39,6 +39,10 @@ export const NAV_ENTRIES: readonly NavEntry[] = [
   // to callers the API will answer for. See `views/ComputeView.vue`.
   { kind: 'item', title: '计算资源', icon: 'mdi-expansion-card', to: '/compute' },
   { kind: 'item', title: '资源与配额', icon: 'mdi-tune-variant', to: '/admin/resources', roles: ADMIN_ROLES },
+  // Its own entry rather than a tab of 资源与配额: pools and specs are *hardware
+  // offers*, while a quota template is a *policy* — and the page is where an
+  // administrator answers "why was I refused", which is a different errand.
+  { kind: 'item', title: '配额管理', icon: 'mdi-speedometer', to: '/admin/quota', roles: ADMIN_ROLES },
   { kind: 'item', title: '存储资源', icon: 'mdi-database-outline', to: '/storage' },
   { kind: 'item', title: '用量中心', icon: 'mdi-chart-timeline-variant', to: '/usage' },
   { kind: 'item', title: '监控中心', icon: 'mdi-monitor-dashboard', to: '/monitor' },

@@ -18,7 +18,7 @@ from app.core.deps import CurrentUser, DbSession, require
 from app.core.errors import NotFoundError
 from app.k8s import get_gateway
 from app.models.enums import QuotaScope
-from app.models.resource import ComputeNode, Quota, ResourceSpec, RuntimeLimit
+from app.models.resource import ComputeNode, ResourceSpec, RuntimeLimit
 from app.schemas.base import ApiMessage
 from app.schemas.common import Page, PageMeta
 from app.schemas.resource import (
@@ -26,7 +26,6 @@ from app.schemas.resource import (
     GpuDeviceRead,
     NodeSyncResult,
     QuotaRead,
-    QuotaUpdate,
     ResourceGroupCreate,
     ResourceGroupDetail,
     ResourceGroupLimitsRead,
@@ -40,6 +39,7 @@ from app.schemas.resource import (
     RuntimeLimitRead,
     RuntimeLimitUpdate,
 )
+from app.services import quota_guard
 from app.services import resources as resource_service
 from app.services.workspaces import get_workspace
 
@@ -59,7 +59,6 @@ CanCreateLimit = Depends(require("runtime_limit:create"))
 CanReadNode = Depends(require("node:read"))
 CanSyncNode = Depends(require("node:sync"))
 CanReadQuota = Depends(require("quota:read"))
-CanUpdateQuota = Depends(require("quota:update"))
 
 
 def _pages(total: int, page_size: int) -> int:
@@ -390,7 +389,7 @@ async def list_quotas(
     scope_type: Annotated[str, Query(alias="scopeType")],
     scope_id: Annotated[int, Query(alias="scopeId")],
 ) -> list[QuotaRead]:
-    """Quotas at one scope.
+    """Quotas at one scope, with the usage measured for each.
 
     A caller may always read their own; anything else requires the scope to be
     one they administer, which :func:`_ensure_scope_visible` enforces.
@@ -398,24 +397,13 @@ async def list_quotas(
     resolved = QuotaScope(scope_type)
     await _ensure_scope_visible(session, actor, resolved, scope_id)
     quotas = await resource_service.list_quotas(session, scope_type=resolved, scope_id=scope_id)
-    return [QuotaRead.model_validate(resource_service.quota_to_dict(quota)) for quota in quotas]
-
-
-@router.patch("/quotas/{quota_id}", response_model=QuotaRead)
-async def update_quota(
-    session: DbSession,
-    actor: CurrentUser,
-    _: Annotated[PermissionCheck, CanUpdateQuota],
-    quota_id: int,
-    payload: QuotaUpdate,
-) -> QuotaRead:
-    """Adjust a ceiling. The consumption counter is never touched."""
-    quota = await session.get(Quota, quota_id)
-    if quota is None:
-        raise NotFoundError("配额不存在", code="quota_not_found")
-    quota.limit_value = payload.limit_value
-    await session.flush()
-    return QuotaRead.model_validate(resource_service.quota_to_dict(quota))
+    used = await quota_guard.scope_usage(session, resolved, scope_id)
+    return [
+        QuotaRead.model_validate(
+            resource_service.quota_to_dict(quota, used_value=used.get(quota.resource, 0))
+        )
+        for quota in quotas
+    ]
 
 
 async def _ensure_scope_visible(

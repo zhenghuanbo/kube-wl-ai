@@ -189,13 +189,17 @@ onMounted(load)
                 </span>
               </div>
               <v-progress-linear
+                v-if="quota.limitValue >= 0"
                 :model-value="usagePercent(quota)"
                 :color="usageTone(usagePercent(quota))"
                 height="8"
                 rounded
               />
               <div class="text-caption text-medium-emphasis mt-2">
-                剩余 {{ formatQuota(quota.available, quota.unit) }}
+                <!-- `-1` is "not checked", so there is no remainder to show: saying
+                     "剩余 -1" would read as a debt rather than as an absence. -->
+                <template v-if="quota.limitValue < 0">管理员未限制这一项</template>
+                <template v-else>剩余 {{ formatQuota(quota.available, quota.unit) }}</template>
               </div>
             </v-card-text>
           </v-card>

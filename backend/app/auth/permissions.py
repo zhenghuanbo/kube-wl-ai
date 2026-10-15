@@ -74,7 +74,11 @@ PERMISSIONS: tuple[PermissionSpec, ...] = (
     PermissionSpec("node:read", "resource", "查看计算节点"),
     PermissionSpec("node:sync", "resource", "同步集群节点"),
     PermissionSpec("quota:read", "resource", "查看配额"),
-    PermissionSpec("quota:update", "resource", "调整配额"),
+    #: There was a `quota:update` for editing a single ceiling row in place. It is
+    #: gone with the endpoint: a workspace's numbers are *derived* from its quota
+    #: profile, so editing the derived copy was a change the next reconcile would
+    #: silently undo. The write path is the profile, and its permission is
+    #: `quota_profile:update`.
     #: Compute quota profiles. Readable by a group administrator so a workspace's
     #: ceiling can be explained to whoever asks; every write is global-admin only,
     #: because these rows decide what *every* tenant is allowed.

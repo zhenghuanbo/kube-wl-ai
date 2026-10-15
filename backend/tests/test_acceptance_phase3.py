@@ -477,6 +477,84 @@ async def test_cpu_quota_is_enforced_across_instances(client: AsyncClient, world
     assert third.json()["error"]["detail"]["resource"] == "cpu"
 
 
+async def test_a_gpu_request_reaches_the_workspace_ceiling_through_its_single_gpu_row(
+    client: AsyncClient, admin_client: AsyncClient, world: World
+) -> None:
+    """The workspace's GPU ceiling is one number, so its row is keyed ``gpu``.
+
+    The user and pool layers keep the per-model spelling (``gpu:a100``), because there
+    "two A100 but no H100" is a meaningful instruction. The workspace layer does not:
+    the quota template has a single GPU field, so it is one total. Looking a per-model
+    key up here found no row at all — and a missing row fails *closed* on purpose — so
+    every GPU request was refused with "工作空间未获得A100 加速卡配额" while the
+    workspace had cards to spend. Nothing caught it because a cluster without GPUs
+    never reaches this branch.
+    """
+    await act_as(admin_client, "root2")
+    # The pool in this fixture allows one card per user, which would refuse the second
+    # instance before the workspace layer is ever consulted. The workspace ceiling is
+    # what this test is about, so the pool is opened up.
+    opened = await admin_client.put(
+        f"/api/v1/resource-groups/{world.pool_id}/limits",
+        json={
+            "maxGpuPerUser": 4,
+            "maxCpuCoresPerUser": 4,
+            "maxMemoryGbPerUser": 8,
+            "maxStorageGbPerUser": 20,
+        },
+    )
+    assert opened.status_code == 200, opened.text
+
+    spec = await admin_client.post(
+        "/api/v1/resource-specs",
+        json={
+            "name": "one-a100",
+            "displayName": "1×A100",
+            "cpuMilli": 1000,
+            "memoryMb": 1024,
+            "gpuType": "a100",
+            "gpuCount": 1,
+        },
+    )
+    assert spec.status_code == 201, spec.text
+    spec_id = spec.json()["id"]
+    attached = await admin_client.put(
+        f"/api/v1/resource-groups/{world.pool_id}/specs", json=[world.spec_id, spec_id]
+    )
+    assert attached.status_code == 200, attached.text
+
+    # A one-card workspace ceiling, attached through a profile.
+    tight = await admin_client.post(
+        "/api/v1/quota-profiles",
+        json={"kind": "workspace", "name": "one-card", "gpu": 1},
+    )
+    assert tight.status_code == 201, tight.text
+    bound = await admin_client.put(
+        f"/api/v1/workspaces/{world.workspace_id}/quota-profile",
+        json={"profileId": tight.json()["id"]},
+    )
+    assert bound.status_code == 200, bound.text
+
+    await act_as(client, "dana")
+    first = await client.post(
+        "/api/v1/instances", json=create_payload(world, name="one-gpu", resourceSpecId=spec_id)
+    )
+
+    # The point of the fix: a GPU request is *not* refused for want of a row.
+    assert first.status_code == 201, first.text
+
+    second = await client.post(
+        "/api/v1/instances", json=create_payload(world, name="two-gpu", resourceSpecId=spec_id)
+    )
+
+    assert second.status_code == 409, second.text
+    assert second.json()["error"]["code"] == "quota_exceeded"
+    detail = second.json()["error"]["detail"]
+    # And the ceiling is compared as a total, keyed on the row that actually exists.
+    assert (detail["layer"], detail["resource"]) == ("workspace", "gpu")
+    assert (detail["used"], detail["limit"]) == (1, 1)
+
+
 async def test_the_user_instance_count_is_enforced_with_cpu_to_spare(
     client: AsyncClient, admin_client: AsyncClient, world: World
 ) -> None:

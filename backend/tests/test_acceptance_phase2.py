@@ -329,11 +329,21 @@ async def test_creating_a_workspace_provisions_the_namespace(
     assert spec.labels["wl-workspace"] == "alice"
 
     quota = gateway.quotas["wl-lab-a-alice"]
-    assert quota.hard["requests.cpu"] == "8"
-    assert quota.hard["requests.memory"] == "16384Mi"
-    # The object counts come from the workspace's quota profile, not from the pool:
-    # `sum(max_concurrent_instances)` was only a per-workspace ceiling while a
-    # workspace had exactly one user. These are the configured defaults.
+    # The namespace's compute ceilings come from the workspace's quota profile, not
+    # from the granted pool. A workspace's own ceiling is a property of the workspace,
+    # so granting a second pool can no longer raise it, and lowering a pool's ceiling
+    # can no longer leave an old number in force.
+    assert quota.hard["requests.cpu"] == "24"
+    assert quota.hard["limits.cpu"] == "24"
+    # The default profile leaves memory unchecked, and "not checked" has to reach
+    # Kubernetes as an *absent* key: an absent resource is unlimited, while a `0`
+    # would mean "none at all". The two are opposites.
+    assert "requests.memory" not in quota.hard
+    assert "limits.memory" not in quota.hard
+    assert quota.hard["requests.nvidia.com/gpu"] == "8"
+    # The object counts come from the same profile: `sum(max_concurrent_instances)`
+    # was only a per-workspace ceiling while a workspace had exactly one user. These
+    # are the configured defaults.
     assert quota.hard["count/deployments.apps"] == "200"
     assert quota.hard["count/jobs.batch"] == "200"
     assert quota.hard["count/services"] == "400"
@@ -633,7 +643,10 @@ async def test_a_public_pool_may_be_granted_across_groups(
     # Granting must immediately re-apply the quota, or the user could not use
     # what they were just given.
     assert "wl-lab-a-consumer" in gateway.quotas
-    assert gateway.quotas["wl-lab-a-consumer"].hard["requests.cpu"] == "8"
+    # The compute number is the workspace profile's, which did not change when the
+    # grant was added — what changed is that the namespace now exists at all.
+    assert gateway.quotas["wl-lab-a-consumer"].hard["requests.cpu"] == "24"
+    assert gateway.quotas["wl-lab-a-consumer"].hard["requests.storage"] == "100Gi"
 
 
 async def test_revoking_a_grant_shrinks_the_quota(
@@ -677,9 +690,15 @@ async def test_granting_the_same_pool_twice_conflicts(
     assert response.status_code == 409
 
 
-async def test_quota_is_the_sum_of_the_granted_pools(
+async def test_storage_is_the_only_dimension_summed_from_the_granted_pools(
     admin_client: AsyncClient, world: World
 ) -> None:
+    """Compute comes from the workspace's profile; storage is still totalled.
+
+    The distinction matters: summing per-user allowances into a per-workspace ceiling
+    only holds while a workspace has exactly one user, and adding a pool used to raise
+    the namespace's compute ceiling even if that pool was never touched.
+    """
     first = await make_pool(admin_client, name="pool-one", kind="public", cpu_cores=4, memory_gb=8)
     second = await make_pool(admin_client, name="pool-two", kind="public", cpu_cores=2, memory_gb=4)
 
@@ -699,12 +718,70 @@ async def test_quota_is_the_sum_of_the_granted_pools(
     ).json()
     by_resource = {row["resource"]: row["limitValue"] for row in quotas}
 
-    assert by_resource["cpu"] == 6000
-    assert by_resource["memory"] == 12288
+    # Both pools grant 100 GB, and storage has no counterpart on the profile.
     assert by_resource["storage"] == 200
+    # Compute is the default workspace profile, and the pools' 4+2 cores / 8+4 GB are
+    # deliberately *not* visible here.
+    assert by_resource["cpu"] == 24000
+    assert by_resource["memory"] == -1
+    assert by_resource["gpu"] == 8
     # No `instance` row: how many instances a person may hold is a ceiling on their
     # quota profile, not something summed from the pools they can reach.
     assert "instance" not in by_resource
+
+
+async def test_the_quota_api_reports_measured_usage_not_a_stored_counter(
+    admin_client: AsyncClient, world: World, session_factory
+) -> None:
+    """The old `used_value` column was never written, so this always said 0.
+
+    Usage is now measured from the workload tables — the same computation the
+    admission gate makes — so an instance really does move the number.
+    """
+    from app.models.enums import IdeType, InstanceStatus
+    from app.models.instance import Instance
+
+    pool = await make_pool(admin_client, name="live-usage", kind="public")
+    workspace = (
+        await admin_client.post(
+            "/api/v1/workspaces",
+            json={
+                "name": "live-usage",
+                "groupId": world.lab_a.id,
+                "resourceGroupIds": [pool["id"]],
+            },
+        )
+    ).json()
+
+    async with session_factory() as session:
+        session.add(
+            Instance(
+                name="live-usage-1",
+                display_name="live-usage-1",
+                owner_user_id=world.user_a.id,
+                workspace_id=workspace["id"],
+                resource_group_id=pool["id"],
+                status=InstanceStatus.RUNNING,
+                cpu_milli=2000,
+                memory_mb=8192,
+                gpu_type="none",
+                gpu_count=0,
+                image="registry.local/jupyter:latest",
+                ide_type=IdeType.NONE,
+            )
+        )
+        await session.commit()
+
+    quotas = (
+        await admin_client.get(f"/api/v1/quotas?scopeType=workspace&scopeId={workspace['id']}")
+    ).json()
+    by_resource = {row["resource"]: row for row in quotas}
+
+    assert by_resource["cpu"]["usedValue"] == 2000
+    assert by_resource["cpu"]["available"] == 22000
+    assert by_resource["memory"]["usedValue"] == 8192
+    # Unlimited is reported as -1 available, not as a large invented number.
+    assert by_resource["memory"]["available"] == -1
 
 
 # ---------------------------------------------------------------------------
@@ -805,13 +882,14 @@ async def test_the_service_allowance_covers_the_services_an_instance_creates(
     assert int(hard["count/services"]) >= 4
 
 
-async def test_attaching_a_workspace_quota_profile_moves_its_object_counts(
+async def test_attaching_a_workspace_quota_profile_moves_the_namespace_quota(
     admin_client: AsyncClient, world: World, gateway: FakeK8sGateway
 ) -> None:
-    """The namespace object counts are *derived*, so attaching a template must apply it.
+    """The namespace quota is *derived* from the template, so attaching one must apply it.
 
-    Clearing the attachment has to go back to the default rather than to nothing:
-    ``None`` means "follow the default", not "no ceiling".
+    Everything moves together — compute and object counts — because they all come from
+    the same profile. Clearing the attachment has to go back to the default rather than
+    to nothing: ``None`` means "follow the default", not "no ceiling".
     """
     pool = await make_pool(admin_client, name="profile-pool", kind="public")
     workspace = await _workspace_on(admin_client, world, name="profiled", pool_ids=[pool["id"]])
@@ -821,6 +899,9 @@ async def test_attaching_a_workspace_quota_profile_moves_its_object_counts(
         json={
             "kind": "workspace",
             "name": "small-space",
+            "cpuCores": 2,
+            "memoryGb": 4,
+            "gpu": 1,
             "maxPods": 40,
             "maxDeployments": 20,
             "maxServices": 40,
@@ -841,18 +922,25 @@ async def test_attaching_a_workspace_quota_profile_moves_its_object_counts(
     assert hard["count/deployments.apps"] == "20"
     assert hard["count/services"] == "40"
     assert hard["count/jobs.batch"] == "20"
-    # Compute still comes from the granted pools at this point: only the object
-    # counts are profile-driven yet, and this records that boundary rather than
-    # letting it drift silently.
-    assert hard["requests.cpu"] == "8"
-    assert hard["requests.memory"] == "16384Mi"
+    # The compute numbers follow the same template, and no longer the pool's 8 cores.
+    assert hard["requests.cpu"] == "2"
+    assert hard["limits.cpu"] == "2"
+    assert hard["requests.memory"] == "4Gi"
+    assert hard["limits.memory"] == "4Gi"
+    assert hard["requests.nvidia.com/gpu"] == "1"
 
     cleared = await admin_client.put(
         f"/api/v1/workspaces/{workspace['id']}/quota-profile", json={"profileId": None}
     )
     assert cleared.status_code == 200, cleared.text
     assert cleared.json()["quotaProfileId"] is None
-    assert gateway.quotas[workspace["k8sNamespace"]].hard["pods"] == "500"
+    restored = gateway.quotas[workspace["k8sNamespace"]].hard
+    assert restored["pods"] == "500"
+    assert restored["requests.cpu"] == "24"
+    assert restored["requests.nvidia.com/gpu"] == "8"
+    # Back to the default, where memory is deliberately unchecked, and therefore
+    # *absent* rather than zero.
+    assert "requests.memory" not in restored
 
 
 async def test_storage_is_bounded_even_when_no_pool_grants_any(
@@ -1155,14 +1243,22 @@ async def test_a_user_can_read_their_own_quota(
     assert response.status_code == 200, response.text
     # No `instance` row any more: holding N instances is a per-user ceiling on a
     # quota profile, not a workspace quota. What the workspace has is its compute
-    # and storage ceiling.
-    assert {row["resource"] for row in response.json()} >= {"cpu", "memory", "storage"}
+    # and storage ceiling, with the usage measured rather than remembered.
+    rows = response.json()
+    assert {row["resource"] for row in rows} == {"cpu", "memory", "gpu", "storage"}
+    assert all(row["usedValue"] == 0 for row in rows)
+    assert next(row for row in rows if row["resource"] == "memory")["limitValue"] == -1
 
 
-async def test_adjusting_a_quota_never_resets_consumption(
+async def test_a_quota_row_cannot_be_edited_in_place(
     admin_client: AsyncClient, world: World, gateway: FakeK8sGateway, session_factory
 ) -> None:
-    """Otherwise a user could escape their quota by asking for an edit."""
+    """There is no write path here any more, and that is the point.
+
+    A workspace's ceiling is *derived* from its quota profile, so editing the derived
+    row was a change the next reconcile would silently undo — the administrator would
+    have seen it succeed and later found it gone. The write path is the profile.
+    """
     from sqlalchemy import select
 
     from app.models.enums import QuotaScope
@@ -1180,7 +1276,6 @@ async def test_adjusting_a_quota_never_resets_consumption(
         )
     ).json()
 
-    # Pretend the user has already consumed most of their allowance.
     async with session_factory() as session:
         quota = await session.scalar(
             select(Quota).where(
@@ -1190,44 +1285,12 @@ async def test_adjusting_a_quota_never_resets_consumption(
             )
         )
         assert quota is not None
-        quota.used_value = 6000
-        await session.commit()
         quota_id = quota.id
 
     response = await admin_client.patch(f"/api/v1/quotas/{quota_id}", json={"limitValue": 16000})
 
-    assert response.status_code == 200, response.text
-    assert response.json()["limitValue"] == 16000
-    assert response.json()["usedValue"] == 6000
-
-    async with session_factory() as session:
-        stored = await session.scalar(select(Quota).where(Quota.id == quota_id))
-        assert stored is not None
-        assert stored.used_value == 6000
-
-
-async def test_group_admin_cannot_adjust_a_quota(
-    client: AsyncClient, admin_client: AsyncClient, world: World, session_factory
-) -> None:
-    from app.models.enums import QuotaScope
-    from app.models.resource import Quota
-
-    async with session_factory() as session:
-        quota = Quota(
-            scope_type=QuotaScope.GROUP,
-            scope_id=world.lab_a.id,
-            resource="gpu:a100",
-            limit_value=4,
-            unit="card",
-        )
-        session.add(quota)
-        await session.commit()
-        quota_id = quota.id
-
-    await act_as(client, "admin-a")
-    response = await client.patch(f"/api/v1/quotas/{quota_id}", json={"limitValue": 64})
-
-    assert response.status_code == 403
+    # 404 rather than 405: the route is gone, not merely disallowed for this verb.
+    assert response.status_code == 404, response.text
 
 
 @pytest.fixture(autouse=True)

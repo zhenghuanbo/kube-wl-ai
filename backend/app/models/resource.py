@@ -332,11 +332,19 @@ class GpuDevice(Base, TimestampMixin):
 
 
 class Quota(Base, TimestampMixin):
-    """A counter and its ceiling, at one scope.
+    """A ceiling, at one scope. There is no consumption counter.
 
-    ``used_value`` is stored rather than recomputed so that a quota check is a
-    single row read on the hot path; the reconcile loop is responsible for
-    correcting drift against reality.
+    ``used_value`` used to live here and was meant to make a quota check a single row
+    read on the hot path, with the reconcile loop correcting any drift. Nothing ever
+    incremented it, so every consumer of this table reported "used: 0" — and a
+    counter that is never written is worse than no counter at all, because it looks
+    authoritative. Usage is computed from the workload tables instead
+    (:mod:`app.services.quota_guard`), which cannot drift from reality because it is
+    derived from reality.
+
+    ``-1`` means "not checked"; ``0`` means "none at all". The two are opposites and
+    the distinction survives all the way to the Kubernetes object, where an absent key
+    is unlimited.
     """
 
     __tablename__ = "quotas"
@@ -353,25 +361,13 @@ class Quota(Base, TimestampMixin):
 
     resource: Mapped[str] = mapped_column(String(48), nullable=False)
     limit_value: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    used_value: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     #: Presentation only (``m`` / ``MB`` / ``GB`` / ``card``); never used in maths.
     unit: Mapped[str] = mapped_column(String(16), nullable=False, default="")
 
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
-    @property
-    def available(self) -> int:
-        return max(self.limit_value - self.used_value, 0)
-
-    @property
-    def is_exhausted(self) -> bool:
-        return self.used_value >= self.limit_value
-
     def __repr__(self) -> str:
-        return (
-            f"<Quota {self.scope_type}:{self.scope_id} {self.resource} "
-            f"{self.used_value}/{self.limit_value}>"
-        )
+        return f"<Quota {self.scope_type}:{self.scope_id} {self.resource} {self.limit_value}>"
 
 
 #: Convenience alias so callers can build resource keys without importing enums.
@@ -379,8 +375,6 @@ RESOURCE_KEY_CPU = QuotaResource.CPU.value
 RESOURCE_KEY_MEMORY = QuotaResource.MEMORY.value
 RESOURCE_KEY_GPU = QuotaResource.GPU.value
 RESOURCE_KEY_STORAGE = QuotaResource.STORAGE.value
-RESOURCE_KEY_INSTANCE = QuotaResource.INSTANCE.value
-RESOURCE_KEY_TASK = QuotaResource.TASK.value
 
 
 def gpu_resource_key(model: str) -> str:

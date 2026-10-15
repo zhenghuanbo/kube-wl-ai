@@ -146,10 +146,7 @@ export function listNodeGpus(nodeId: number): Promise<GpuDevice[]> {
 }
 
 // --- quotas ------------------------------------------------------------------
+/** Read-only: a workspace's ceilings are derived from its quota profile. */
 export function listQuotas(scopeType: QuotaScope, scopeId: number): Promise<Quota[]> {
   return api.get<Quota[]>('/quotas', { params: { scopeType, scopeId } })
-}
-
-export function updateQuota(quotaId: number, limitValue: number): Promise<Quota> {
-  return api.patch<Quota>(`/quotas/${quotaId}`, { limitValue })
 }

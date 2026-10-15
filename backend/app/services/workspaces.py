@@ -47,6 +47,7 @@ from app.schemas.workspace import (
     WorkspaceSummary,
     WorkspaceUpdate,
 )
+from app.services import quota_guard
 from app.services import quota_profiles as profile_service
 from app.services import resources as resource_service
 
@@ -57,12 +58,20 @@ QUOTA_NAME = "wl-quota"
 LIMIT_RANGE_NAME = "wl-limits"
 NETWORK_POLICY_NAME = "wl-default"
 
+#: The profile stores cores and GB because that is what an administrator types; a
+#: namespace ``ResourceQuota`` is written in millicores and mebibytes. This is the one
+#: place the two spellings meet.
+CORE_TO_MILLI = 1000
+GB_TO_MB = 1024
+
 #: Units used purely for display; the API never does arithmetic on them. No entries
-#: for workload counts: those are not workspace ceilings any more, they are per-user
-#: ceilings on a quota profile, and a namespace object count is not a "quota" here.
+#: for workload counts: "how many may I hold" is a per-user ceiling on a quota profile,
+#: and the namespace's object counts are named after the Kubernetes resources they
+#: bound rather than reported as quotas of their own.
 _QUOTA_UNITS: dict[str, str] = {
     QuotaResource.CPU.value: "m",
     QuotaResource.MEMORY.value: "MB",
+    QuotaResource.GPU.value: "card",
     QuotaResource.STORAGE.value: "GB",
 }
 
@@ -364,11 +373,12 @@ async def apply_cluster_state(
     workspace.quota_applied_at = datetime.now(UTC)
     await session.flush()
 
+    used = await quota_guard.workspace_usage(session, workspace.id)
     lines = [
         WorkspaceQuotaLine(
             resource=quota.resource,
             limit_value=quota.limit_value,
-            used_value=quota.used_value,
+            used_value=used.get(quota.resource, 0),
             unit=quota.unit,
         )
         for quota in await resource_service.list_quotas(
@@ -381,19 +391,45 @@ async def apply_cluster_state(
 async def _desired_quota(
     session: AsyncSession, workspace: Workspace
 ) -> tuple[QuotaSpec, object, LimitSpec]:
-    """Derive the Kubernetes quota from the workspace's granted pools."""
+    """Derive the namespace quota: the workspace's profile, plus the pools' storage.
+
+    CPU, memory and accelerators come from the workspace's **quota profile**, which is
+    the layer bound 1:1 to this namespace. They used to be the sum of the granted
+    pools' per-user allowances, which meant granting a second pool *raised* the
+    namespace ceiling even if the pool was never used, while lowering a pool's ceiling
+    afterwards left the old number in force. A workspace's own ceiling is now a
+    property of the workspace.
+
+    Storage is the exception and stays with the pools: there is no storage dimension on
+    the profile, and ``requests.storage`` is the only aggregate ceiling on it.
+    """
     grants = [grant for grant in await list_grants(session, workspace) if grant.is_active]
     group_ids = [grant.resource_group_id for grant in grants]
 
-    limits = await resource_service.quota_limits_for_groups(session, group_ids)
-    if not limits:
-        # A workspace with no pool granted still needs a namespace, but it must
-        # not be able to consume shared capacity. Zeroing cpu/memory is not
-        # enough — Kubernetes reads an absent resource as *unlimited* — so the
-        # pod count itself is pinned to zero, which blocks everything.
+    # The rows recorded for the workspace are the same numbers written to the namespace
+    # below, so what the API reports and what the cluster enforces cannot disagree.
+    profile: QuotaProfile | None = None
+    if group_ids:
+        profile = await profile_service.resolve_workspace_profile(session, workspace)
+        storage_gb = await resource_service.storage_gb_for_groups(session, group_ids)
+        limits = {
+            QuotaResource.CPU.value: _scaled(profile.cpu_cores, CORE_TO_MILLI),
+            QuotaResource.MEMORY.value: _scaled(profile.memory_gb, GB_TO_MB),
+            QuotaResource.GPU.value: profile.gpu,
+            QuotaResource.STORAGE.value: storage_gb,
+        }
+    else:
+        # A workspace with no pool granted still needs a namespace, but it must not be
+        # able to consume shared capacity. Zeroing cpu/memory is not enough on its own
+        # — Kubernetes reads an absent resource as *unlimited* — so the pod count
+        # itself is pinned to zero, which blocks everything. Recording zero rather than
+        # the profile's numbers keeps the rows from advertising capacity that the
+        # namespace will refuse to schedule.
+        storage_gb = 0
         limits = {
             QuotaResource.CPU.value: 0,
             QuotaResource.MEMORY.value: 0,
+            QuotaResource.GPU.value: 0,
             QuotaResource.STORAGE.value: 0,
         }
 
@@ -409,50 +445,63 @@ async def _desired_quota(
     limit_spec = await _effective_limit_spec(session, group_ids)
 
     hard: dict[str, str] = {}
-    if not group_ids:
+    if profile is not None:
+        hard.update(_compute_limits(profile))
+        # The object counts are the *coarse* backstop; the ceiling a person actually
+        # meets is the count on their own profile.
+        hard.update(_object_count_limits(profile))
+    else:
         # Fail closed: nothing may be scheduled until a pool is granted.
         hard["pods"] = "0"
-    cpu_milli = limits.get(QuotaResource.CPU.value, 0)
-    memory_mb = limits.get(QuotaResource.MEMORY.value, 0)
-    storage_gb = limits.get(QuotaResource.STORAGE.value, 0)
 
-    if cpu_milli:
-        # Requests and limits are kept equal so a workspace cannot be scheduled
-        # on a promise it is not allowed to keep; Kubernetes would otherwise
-        # admit pods whose limits exceed the quota and fail them later.
-        hard["requests.cpu"] = _cpu_quantity(cpu_milli)
-        hard["limits.cpu"] = _cpu_quantity(cpu_milli)
-    if memory_mb:
-        hard["requests.memory"] = f"{memory_mb}Mi"
-        hard["limits.memory"] = f"{memory_mb}Mi"
     # Set unconditionally, including as "0". An absent resource is *unlimited* to
-    # Kubernetes — the same trap the no-pool branch above exists to avoid — and
-    # leaving storage out when nothing was granted made the namespace an
-    # unbounded place to put volumes. Note this is the only aggregate ceiling on
-    # storage: the per-user cap (`max_storage_gb_per_user`) is checked when a
-    # volume is registered and says nothing about the group's total.
+    # Kubernetes — the same trap the no-pool branch above exists to avoid — and leaving
+    # storage out when nothing was granted made the namespace an unbounded place to put
+    # volumes. Note this is the only aggregate ceiling on storage: the per-user cap
+    # (`max_storage_gb_per_user`) is checked when a volume is registered and says
+    # nothing about the group's total.
     hard["requests.storage"] = f"{storage_gb}Gi"
 
-    # The namespace's object counts come from the workspace's own quota profile, not
-    # from the pools. They used to be `sum(max_concurrent_instances)`, which is only
-    # a workspace ceiling if the workspace has one user — with several it would hand
-    # the namespace one allowance per member. They are also the *coarse* backstop:
-    # the ceiling a person actually meets is the count on their own profile.
-    #
-    # Only when a pool is granted: with none, `pods` is already pinned to zero above
-    # and adding the profile's numbers would re-open the namespace.
-    if group_ids:
-        profile = await profile_service.resolve_workspace_profile(session, workspace)
-        hard.update(_object_count_limits(profile))
-
-    gpu_total = sum(
-        value for key, value in limits.items() if key.startswith(f"{QuotaResource.GPU.value}:")
-    )
-    if gpu_total:
-        hard["requests.nvidia.com/gpu"] = str(gpu_total)
-        hard["limits.nvidia.com/gpu"] = str(gpu_total)
-
     return QuotaSpec(name=QUOTA_NAME, hard=hard), network_type, limit_spec
+
+
+def _scaled(value: int, factor: int) -> int:
+    """Convert a profile's cores/GB into the units the ``quotas`` table speaks.
+
+    ``-1`` ("not checked") is passed through untouched rather than multiplied: ``-1 *
+    1000`` would be a very different number from "unlimited".
+    """
+    return -1 if value < 0 else value * factor
+
+
+def _compute_limits(profile: QuotaProfile) -> dict[str, str]:
+    """The namespace's compute ceilings, from the workspace's quota profile.
+
+    ``-1`` means "not checked", and the faithful translation is an **absent** key:
+    Kubernetes reads a missing resource as unlimited and a ``0`` as "none at all", so
+    writing ``-1`` — or a ``0`` standing in for it — would say the opposite of what was
+    asked.
+
+    Accelerators are one number for all models, unlike the per-user and per-pool
+    ceilings, which are per model. That asymmetry is deliberate: the namespace quota is
+    a total over a whole tenancy, while "2× A100 but no H100" is a rule about what one
+    person may claim.
+    """
+    limits: dict[str, str] = {}
+    if profile.cpu_cores >= 0:
+        # Requests and limits are kept equal so a workspace cannot be scheduled on a
+        # promise it is not allowed to keep; Kubernetes would otherwise admit pods
+        # whose limits exceed the quota and fail them later.
+        cpu = _cpu_quantity(profile.cpu_cores * CORE_TO_MILLI)
+        limits["requests.cpu"] = cpu
+        limits["limits.cpu"] = cpu
+    if profile.memory_gb >= 0:
+        limits["requests.memory"] = f"{profile.memory_gb}Gi"
+        limits["limits.memory"] = f"{profile.memory_gb}Gi"
+    if profile.gpu >= 0:
+        limits["requests.nvidia.com/gpu"] = str(profile.gpu)
+        limits["limits.nvidia.com/gpu"] = str(profile.gpu)
+    return limits
 
 
 def _object_count_limits(profile: QuotaProfile) -> dict[str, str]:

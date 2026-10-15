@@ -63,8 +63,14 @@ const WORKSPACE = {
   groupName: 'nlp-lab',
   status: 'ready',
   isActive: true,
-  quota: { cpuMilli: 64000, memoryMb: 262144, gpuCount: 8, storageGb: 4096 },
-  used: { cpuMilli: 16000, memoryMb: 65536, gpuCount: 2, storageGb: 512 },
+  // Which quota template the workspace follows; `null` means "follow the default".
+  // A missing field would render as `#undefined` in the assignment table.
+  quotaProfileId: null,
+  // Deliberately no `quota` / `used` objects: the API stopped sending them when the
+  // namespace quota moved to templates (a workspace's numbers are derived from its
+  // template plus the pools' storage). A fixture that still carried them would hide
+  // the very bug this harness exists to catch — a view rendering a field the API
+  // does not send.
   createdAt: '2025-01-01T00:00:00Z',
   updatedAt: '2025-01-02T00:00:00Z',
 }
@@ -180,6 +186,8 @@ const USER = {
   roles: ['user'],
   primaryGroupId: 1,
   primaryGroupName: 'NLP 实验室',
+  // See the note on `WORKSPACE.quotaProfileId`.
+  quotaProfileId: null,
 }
 
 const GROUP = {
@@ -426,8 +434,97 @@ const RETURNS = {
     sshHost: 'ssh.example.edu',
     storageClasses: { home: 'ceph-rbd', data: null, share: 'cephfs' },
   },
-  listQuotas: [],
+  // Two rows, deliberately unlike each other: a real ceiling, and one the
+  // administrator left unchecked (`limitValue: -1`). The second is the case that
+  // used to render as "剩余 -1 card" — an absence shown as a debt — so the view has
+  // to be mounted with it present for the assertion below to mean anything.
+  listQuotas: [
+    {
+      id: 1,
+      scopeType: 'workspace',
+      scopeId: 1,
+      resource: 'cpu',
+      limitValue: 24000,
+      usedValue: 6000,
+      available: 18000,
+      unit: 'm',
+      isActive: true,
+    },
+    {
+      id: 2,
+      scopeType: 'workspace',
+      scopeId: 1,
+      resource: 'memory',
+      limitValue: -1,
+      usedValue: 16384,
+      available: -1,
+      unit: 'MB',
+      isActive: true,
+    },
+  ],
   listRuntimeLimits: [],
+  // Both kinds, and one non-default user template: the assignment column renders a
+  // button per template, and `default` versus a named one is the distinction the page
+  // exists to make. `memoryGb: -1` is the "not checked" case that must read 不限.
+  listQuotaProfiles: [
+    {
+      id: 1,
+      kind: 'user',
+      name: 'default',
+      displayName: '默认用户配额',
+      description: null,
+      cpuCores: 24,
+      memoryGb: -1,
+      gpu: 8,
+      maxInstances: 10,
+      maxApplications: 10,
+      maxTasks: 10,
+      maxPods: null,
+      maxDeployments: null,
+      maxServices: null,
+      maxJobs: null,
+      isDefault: true,
+      isActive: true,
+    },
+    {
+      id: 2,
+      kind: 'user',
+      name: 'heavy',
+      displayName: '大配额用户',
+      description: '训练组专用',
+      cpuCores: 64,
+      memoryGb: 256,
+      gpu: 4,
+      maxInstances: 50,
+      maxApplications: 20,
+      maxTasks: 20,
+      maxPods: null,
+      maxDeployments: null,
+      maxServices: null,
+      maxJobs: null,
+      isDefault: false,
+      isActive: true,
+    },
+    {
+      id: 3,
+      kind: 'workspace',
+      name: 'default',
+      displayName: '默认空间配额',
+      description: null,
+      cpuCores: 24,
+      memoryGb: -1,
+      gpu: 8,
+      maxInstances: null,
+      maxApplications: null,
+      maxTasks: null,
+      maxPods: 500,
+      maxDeployments: 200,
+      maxServices: 400,
+      maxJobs: 200,
+      isDefault: true,
+      isActive: true,
+    },
+  ],
   listRoles: [{ id: 1, code: 'user', name: '普通用户', description: null, permissions: [] }],
   listPermissions: { permissions: [], roles: [] },
   listWorkspaceMembers: [],
@@ -806,6 +903,42 @@ const INTERACTIONS = {
     // The dialog is teleported to the body, not nested inside the view.
     return container.ownerDocument.body.innerHTML
   },
+  QuotaProfilesView: async (container, { flush, auth }) => {
+    // Mounted read-only by default, which is the state a group administrator is
+    // really in: they may read the templates so they can explain a ceiling, and
+    // every write belongs to a global administrator. The create form is the part
+    // worth reaching — it is where `-1` ("not checked") is distinguished from `0`
+    // ("none at all") — so the role and the code are granted here rather than by
+    // weakening that default.
+    auth.permissions = new Set([...auth.permissions, 'quota_profile:create'])
+    auth.globalAdmin = true
+    await flush()
+
+    const button = [...container.querySelectorAll('button')].find((node) =>
+      node.textContent?.includes('新建用户模板'),
+    )
+    if (!button) {
+      throw new Error('no 「新建用户模板」 button to click after granting quota_profile:create')
+    }
+    button.click()
+    await flush()
+
+    return container.ownerDocument.body.innerHTML
+  },
+  WorkspacesView: async (container, { flush }) => {
+    // The detail drawer is closed on first paint, so until now this whole panel —
+    // members, grants, and the namespace quota added with the templates — was
+    // unreachable from the harness. Opening it is the only way to see that the
+    // quota section renders measured usage rather than `undefined`.
+    const button = [...container.querySelectorAll('button')].find(
+      (node) => node.textContent?.trim() === '详情',
+    )
+    if (!button) throw new Error('no 「详情」 button to open the workspace drawer with')
+    button.click()
+    await flush()
+
+    return container.ownerDocument.body.innerHTML
+  },
 }
 
 /**
@@ -852,11 +985,39 @@ const EXPECTS = {
   // lose: the raw action code next to its label, and the mark on an
   // unattributed row.
   AuditView: ['审计日志', '创建实例', 'instance:create', 'zhangsan', '成功', '10.0.0.9'],
+  // The quota page is mounted read-only by default (the baseline caller is a plain
+  // user), and `INTERACTIONS` below grants the code plus the role to open the create
+  // dialog — where the `-1` / `0` distinction is spelled out and where a wrong
+  // default would hand every tenant an empty allowance. `不限` is the `memoryGb: -1`
+  // cell; the two template kinds are the page's tabs.
+  QuotaProfilesView: [
+    '配额管理',
+    '用户模板',
+    '工作空间模板',
+    '大配额用户',
+    '不限',
+    '24 核',
+    '跟随默认',
+    '新建用户模板',
+    '标识',
+    '按核数填写；-1 表示不校验',
+  ],
   // The remaining admin screens are smoke-tested for the first time; before the
   // discovery fix they were never mounted at all. Assertions are kept to text the
   // fixtures actually drive, so a failure here means the screen changed.
   ResourcesView: ['资源与配额'],
-  WorkspacesView: ['工作空间管理', 'nlp', '自然语言处理', 'nlp-lab'],
+  // The last three come from the detail drawer that `INTERACTIONS.WorkspacesView`
+  // opens: `6 核 / 24 核` is the CPU line rendered from the API's milli-cores, and
+  // `16 GB / 不限` is the memory line whose ceiling is `-1`.
+  WorkspacesView: [
+    '工作空间管理',
+    'nlp',
+    '自然语言处理',
+    'nlp-lab',
+    '命名空间配额',
+    '6 核 / 24 核',
+    '16 GB / 不限',
+  ],
   DashboardView: ['首页', '平台建设进度'],
   // The profile page is where tokens live. Asserted here rather than in a view
   // of its own because the card is a child component, and the interesting thing
@@ -864,7 +1025,16 @@ const EXPECTS = {
   ProfileView: ['个人设置', 'API 令牌', 'ci-deploy', 'wl_abcdefgh…', '跟随我的角色'],
   // Driven by grants, not by the workspace record: with none issued the view
   // correctly reports that no pools are available.
-  MyWorkspaceView: ['我的工作空间', '算力配额', '可用资源池'],
+  // The quota card must render both a real ceiling and an unchecked one: `-1` is
+  // "not checked", so it reads 不限 with no progress bar, not a negative remainder.
+  MyWorkspaceView: [
+    '我的工作空间',
+    '算力配额',
+    '可用资源池',
+    '24000 核·毫',
+    '不限',
+    '管理员未限制这一项',
+  ],
   // `covered` is true in the fixture, so the "not yet summarised" alert must be
   // absent — asserted below. These are the figures a reader would look for.
   // The fixture is Grafana-enabled, so the panel frame and the scope banner both

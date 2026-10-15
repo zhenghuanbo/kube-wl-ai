@@ -153,7 +153,7 @@ const poolForm = reactive({
   limits: {
     maxGpuPerUser: 2,
     maxCpuCoresPerUser: 8,
-    maxMemoryGbPerUser: 16,
+    maxMemoryGbPerUser: -1, // 内存默认不校验：由规格与 LimitRange 兜底
     maxStorageGbPerUser: 100,
   },
 })
@@ -177,7 +177,7 @@ async function openPool(pool?: ResourceGroupSummary): Promise<void> {
       limits: {
         maxGpuPerUser: detail.limits?.maxGpuPerUser ?? 2,
         maxCpuCoresPerUser: detail.limits?.maxCpuCoresPerUser ?? 8,
-        maxMemoryGbPerUser: detail.limits?.maxMemoryGbPerUser ?? 16,
+        maxMemoryGbPerUser: detail.limits?.maxMemoryGbPerUser ?? -1,
         maxStorageGbPerUser: detail.limits?.maxStorageGbPerUser ?? 100,
       },
     })
@@ -196,7 +196,7 @@ async function openPool(pool?: ResourceGroupSummary): Promise<void> {
       limits: {
         maxGpuPerUser: 2,
         maxCpuCoresPerUser: 8,
-        maxMemoryGbPerUser: 16,
+        maxMemoryGbPerUser: -1, // 内存默认不校验：由规格与 LimitRange 兜底
         maxStorageGbPerUser: 100,
       },
     })

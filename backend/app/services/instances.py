@@ -26,7 +26,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload, raiseload
+from sqlalchemy.orm import joinedload, raiseload, selectinload
 
 from app.auth import policy
 from app.core.config import Settings
@@ -70,9 +70,11 @@ from app.services.workload_common import (
 
 logger = get_logger(__name__)
 
-#: Statuses that still occupy quota. Owned by :mod:`app.services.quota_guard`,
-#: which also counts tasks; re-exported here because instance callers think in
-#: instance statuses.
+#: Statuses that are still live: the row exists and the object is still observed by
+#: the sweeper. Owned by :mod:`app.services.quota_guard`; re-exported here because
+#: instance callers think in instance statuses. Note the deliberate difference from
+#: the quota's :data:`~app.services.quota_guard.RESERVING_INSTANCE_STATUSES`:
+#: ``stopped`` is observed but no longer charged for compute.
 LIVE_STATUSES = LIVE_INSTANCE_STATUSES
 
 #: Statuses whose pod is running, for usage accounting.
@@ -647,12 +649,54 @@ async def _require_deployment(instance: Instance) -> str:
     return deployment
 
 
+async def _ensure_restart_fits(session: AsyncSession, instance: Instance) -> None:
+    """Refuse a restart that no longer fits where the instance is going back to.
+
+    Stopping releases an instance's compute allowance, because the Deployment goes to
+    zero replicas and Kubernetes' ``ResourceQuota`` stops counting it. That allowance
+    is therefore spendable by something else while the instance sits stopped, so a
+    restart has to pass the same gate a creation does — otherwise the platform would
+    approve a restart the namespace then refuses, and the user would get a pod that
+    stays Pending with nothing anywhere to explain it.
+
+    Counts are deliberately not part of the request: the instance already holds its
+    slot in the owner's "how many instances may I have", stopped or not.
+    """
+    pool = await session.scalar(
+        select(ResourceGroup)
+        .where(ResourceGroup.id == instance.resource_group_id)
+        .options(selectinload(ResourceGroup.limits))
+    )
+    if pool is None:
+        raise NotFoundError("资源组不存在", code="resource_group_not_found")
+
+    await enforce_compute_quota(
+        session,
+        owner=instance.owner,
+        workspace=instance.workspace,
+        pool=pool,
+        request=Request(
+            cpu_milli=instance.cpu_milli,
+            memory_mb=instance.memory_mb,
+            gpu_type=instance.gpu_type,
+            gpu_count=instance.gpu_count,
+        ),
+    )
+
+
 async def start_instance(
     session: AsyncSession, instance: Instance, gateway: K8sGateway
 ) -> Instance:
     deployment = await _require_deployment(instance)
     if instance.status == InstanceStatus.RUNNING:
         return instance
+
+    if instance.status == InstanceStatus.STOPPED:
+        # Only a stopped instance is absent from the measured usage, so only here does
+        # the gate have to add this instance's shape back. Every other status is
+        # already charged, and re-checking it would count the same resources twice —
+        # which would refuse a restart of something that is in fact already paid for.
+        await _ensure_restart_fits(session, instance)
 
     if instance.is_expired:
         # Restarting an expired instance would silently grant more time than the

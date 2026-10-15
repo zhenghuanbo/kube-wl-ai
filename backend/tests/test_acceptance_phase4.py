@@ -698,9 +698,16 @@ async def test_a_task_consumes_the_same_workspace_quota_as_an_instance(
     assert blocked.json()["error"]["detail"]["resource"] == "cpu"
 
 
-async def test_stopping_an_instance_does_not_free_room_for_a_task(
+async def test_stopping_an_instance_frees_room_for_a_task(
     client: AsyncClient, world: World, gateway: FakeK8sGateway
 ) -> None:
+    """Compute freed by a stop is available to *any* workload, because it is one allowance.
+
+    Kubernetes counts a Pod's requests regardless of what owns it, and a stopped
+    instance's Deployment holds no Pod at all — so the room it gives back is real room,
+    and a task may take it. The second task below then shows the ceiling is still
+    enforced on the new occupancy rather than having been opened permanently.
+    """
     await act_as(client, "dana")
     for name in ("one", "two"):
         created = await client.post(
@@ -716,10 +723,17 @@ async def test_stopping_an_instance_does_not_free_room_for_a_task(
         if name == "one":
             instance_id = created.json()["id"]
 
-    await client.post(f"/api/v1/instances/{instance_id}/stop")
+    assert (await client.post(f"/api/v1/instances/{instance_id}/stop")).status_code == 200
 
-    blocked = await client.post("/api/v1/tasks", json=task_payload(world, name="late"))
-    assert blocked.status_code == 409
+    now_fits = await client.post("/api/v1/tasks", json=task_payload(world, name="late"))
+
+    assert now_fits.status_code == 201, now_fits.text
+
+    # The freed 2 cores are gone again, so the next task is refused on CPU.
+    blocked = await client.post("/api/v1/tasks", json=task_payload(world, name="later"))
+
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["error"]["detail"]["resource"] == "cpu"
 
 
 async def test_a_task_cannot_run_in_a_suspended_workspace(

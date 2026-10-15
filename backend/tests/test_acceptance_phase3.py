@@ -588,15 +588,102 @@ async def test_the_user_instance_count_is_enforced_with_cpu_to_spare(
     assert (detail["used"], detail["limit"]) == (1, 1)
 
 
-async def test_a_stopped_instance_keeps_its_quota(client: AsyncClient, world: World) -> None:
-    """Releasing quota on stop would let a restart fail for lack of capacity."""
+async def test_stopping_an_instance_releases_its_compute_allowance(
+    client: AsyncClient, world: World
+) -> None:
+    """A stop frees compute, because Kubernetes frees it too.
+
+    The pool lends one person 4 cores and each instance takes 2, so two running
+    instances fill it and a third is refused. Once one is stopped the third fits: a
+    stopped instance's Deployment sits at zero replicas, holds no requests, and the
+    namespace's ``ResourceQuota`` stops counting it. Charging the stopped instance
+    anyway would refuse a submission the cluster itself would have accepted.
+    """
     await act_as(client, "dana")
     first = await make_instance(client, world, name="one")
+    await make_instance(client, world, name="two")
+
+    full = await client.post("/api/v1/instances", json=create_payload(world, name="three"))
+
+    assert full.status_code == 409, full.text
+    assert full.json()["error"]["detail"]["layer"] == "pool"
+
+    stopped = await client.post(f"/api/v1/instances/{first['id']}/stop")
+    assert stopped.status_code == 200, stopped.text
+    assert stopped.json()["status"] == "stopped"
+
+    fits = await client.post("/api/v1/instances", json=create_payload(world, name="three"))
+
+    assert fits.status_code == 201, fits.text
+
+
+async def test_a_stopped_instance_still_holds_its_slot_in_the_instance_count(
+    client: AsyncClient, admin_client: AsyncClient, world: World
+) -> None:
+    """The count ceiling is the opposite rule on purpose: freed by deleting, not by stopping.
+
+    "How many instances may I have" is answered by the rows the user can see on the
+    instance page — running and stopped alike — so the number the platform refuses on
+    is the number the page shows. Room for a third one therefore has to be made in
+    *compute* (by stopping something), never in the count.
+    """
+    await act_as(admin_client, "root2")
+    listed = await admin_client.get("/api/v1/quota-profiles", params={"kind": "user"})
+    assert listed.status_code == 200, listed.text
+    default = next(row for row in listed.json() if row["isDefault"])
+    tightened = await admin_client.patch(
+        f"/api/v1/quota-profiles/{default['id']}", json={"maxInstances": 3}
+    )
+    assert tightened.status_code == 200, tightened.text
+
+    await act_as(client, "dana")
+    first = await make_instance(client, world, name="one")
+    await make_instance(client, world, name="two")
+    assert (await client.post(f"/api/v1/instances/{first['id']}/stop")).status_code == 200
+    await make_instance(client, world, name="three")
+
+    fourth = await client.post("/api/v1/instances", json=create_payload(world, name="four"))
+
+    assert fourth.status_code == 409, fourth.text
+    detail = fourth.json()["error"]["detail"]
+    assert (detail["layer"], detail["resource"]) == ("user", "instance")
+    # Three rows, one of them stopped, and the stopped one still counts.
+    assert (detail["used"], detail["limit"]) == (3, 3)
+
+
+async def test_restarting_a_stopped_instance_rechecks_the_ceiling(
+    client: AsyncClient, world: World
+) -> None:
+    """A restart passes the same gate a creation does, because a stop hands the allowance back.
+
+    The allowance a stopped instance releases can be spent by something else while it
+    sits stopped. Without a check at restart the platform would approve the sequence
+    below and the namespace's ``ResourceQuota`` would then refuse it — a pod stuck
+    Pending with nothing anywhere to explain why.
+    """
+    await act_as(client, "dana")
+    first = await make_instance(client, world, name="one")
+    second = await make_instance(client, world, name="two")
+    assert (await client.post(f"/api/v1/instances/{second['id']}/stop")).status_code == 200
+    # The 2 cores the stop gave back are spent on a third instance, filling the pool.
+    await make_instance(client, world, name="three")
+
+    refused = await client.post(f"/api/v1/instances/{second['id']}/start")
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["error"]["code"] == "quota_exceeded"
+    detail = refused.json()["error"]["detail"]
+    assert (detail["layer"], detail["resource"]) == ("pool", "cpu")
+    # 4 cores in use (two running instances), a 4-core ceiling, and 2 more asked for.
+    assert (detail["used"], detail["limit"], detail["requested"]) == (4000, 4000, 2000)
+
+    # Freeing one running instance makes room, and then the same restart goes through.
     assert (await client.post(f"/api/v1/instances/{first['id']}/stop")).status_code == 200
 
-    response = await client.post("/api/v1/instances", json=create_payload(world, name="two"))
+    restarted = await client.post(f"/api/v1/instances/{second['id']}/start")
 
-    assert response.status_code == 201, response.text
+    assert restarted.status_code == 200, restarted.text
+    assert restarted.json()["status"] == "creating"
 
 
 async def test_runtime_longer_than_the_pool_allows_is_rejected(

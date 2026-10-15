@@ -14,15 +14,20 @@ each answers a different question — "is this person over their allowance?", "i
 pool over its share?", "is this namespace full?" — and a refusal has to be able to
 say which one ran out.
 
-The rule for what still occupies quota is deliberately *not* "is it running":
+The rule for what occupies *compute* quota is "would Kubernetes count it":
 
-* an instance reserves its shape from the moment the row exists and keeps reserving
-  it while stopped. Releasing on stop would let a workspace hold more than its
-  ceiling during a restart.
+* an instance reserves its shape only while it actually holds resources. A stopped
+  instance has been scaled to zero replicas, so its pod is gone and Kubernetes'
+  ``ResourceQuota`` stops counting it — and so does the platform, because the two
+  disagreeing is what produces a refusal nobody can explain. Restarting therefore
+  re-runs the gate (see ``app.services.instances.start_instance``): the allowance a
+  stopped instance gave back may have been spent by something else in the meantime.
 * a task stops counting towards *compute* the moment it reaches a terminal status,
-  because it will never consume anything again. It still counts towards the user's
-  "how many tasks may I have", which is a different question with a different answer:
-  that slot is freed by deleting the task.
+  because it will never consume anything again.
+* *counts* are the opposite of compute, and deliberately so. An instance keeps its
+  slot in the user's "how many instances may I have" until it is deleted, running or
+  not, because that ceiling answers "how much may I hold" — the user frees it by
+  deleting, not by waiting.
 * storage is counted from the workspace's **managed volumes**, never from the
   workloads that mount them — a volume is registered once, exists independently of
   any instance and outlives all of them. A compute submission therefore does not
@@ -51,14 +56,34 @@ from app.models.workspace import Workspace
 from app.services import quota_profiles as profile_service
 from app.services import resources as resource_service
 
-#: Instance statuses that still occupy quota — everything that has not been
-#: deleted, including stopped ones (see the module docstring).
+#: Instance statuses that are still *live* in the platform's sense: the row exists and
+#: the object is still observed and reconciled. ``stopped`` belongs here — a
+#: deliberately stopped instance has to stay under observation so that a resurgent pod
+#: is scaled back to zero. This is **not** the set that occupies compute quota; that is
+#: :data:`RESERVING_INSTANCE_STATUSES`.
 LIVE_INSTANCE_STATUSES: tuple[str, ...] = (
     "pending",
     "creating",
     "running",
     "stopping",
     "stopped",
+    "error",
+)
+
+#: Instance statuses whose pods hold resources, and therefore the only ones charged
+#: against a compute ceiling — everything except ``stopped``.
+#:
+#: A stopped instance's Deployment sits at zero replicas, so there is no pod, so
+#: Kubernetes' ``ResourceQuota`` does not count it. Charging it anyway would make the
+#: platform refuse submissions the cluster would have accepted, and (worse) make a
+#: restart look safe when the allowance had already been spent. ``error`` stays in the
+#: set on purpose: an instance that failed may still have a pod holding requests, and
+#: charging it keeps the platform from approving something the namespace will reject.
+RESERVING_INSTANCE_STATUSES: tuple[str, ...] = (
+    "pending",
+    "creating",
+    "running",
+    "stopping",
     "error",
 )
 
@@ -123,12 +148,16 @@ async def compute_usage(
     One function serves all three layers because the rule for *what counts* is
     identical; only the filter differs. Written once, the layers cannot disagree
     about whether a stopped instance still occupies quota.
+
+    Only :data:`RESERVING_INSTANCE_STATUSES` instances are summed: what is measured
+    here is what Kubernetes is counting right now, which is what makes the gate's
+    answer and the namespace ``ResourceQuota``'s answer the same answer.
     """
     usage = Usage()
 
     instance_filters: list[ColumnElement[bool]] = [
         Instance.is_active.is_(True),
-        Instance.status.in_(LIVE_INSTANCE_STATUSES),
+        Instance.status.in_(RESERVING_INSTANCE_STATUSES),
     ]
     if workspace_id is not None:
         instance_filters.append(Instance.workspace_id == workspace_id)
@@ -187,7 +216,9 @@ async def object_counts(session: AsyncSession, user_id: int) -> ObjectCounts:
     A count ceiling answers "how much may I have", not "how much is running", so a
     stopped instance and a finished task each still occupy a slot until they are
     deleted. That is what makes the number predictable: the user frees it by
-    deleting, rather than by waiting.
+    deleting, rather than by waiting. It is also literally the list the user is
+    looking at on the workload pages — running and stopped rows alike — so the number
+    the platform refuses on is the number the page shows.
     """
     instances = await session.scalar(
         select(func.count())

@@ -150,7 +150,13 @@ async def make_pool(
 # Resource pools
 # ---------------------------------------------------------------------------
 async def test_pool_creation_seeds_a_limits_row(admin_client: AsyncClient, world: World) -> None:
-    """An absent limits row would mean "unlimited" — the wrong default."""
+    """An absent limits row would mean "unlimited" — the wrong default, so every pool gets one.
+
+    Memory is the deliberate exception and is seeded as ``-1`` ("not checked"): how much
+    memory a pod may use is settled by the resource spec it was created from and by the
+    namespace's LimitRange, not by a per-user quota. A pool that wants a ceiling can
+    still set one — the field is checked, it just starts out open.
+    """
     created = await admin_client.post(
         "/api/v1/resource-groups",
         json={"name": "a100-pool", "displayName": "A100 池", "kind": "public"},
@@ -163,7 +169,8 @@ async def test_pool_creation_seeds_a_limits_row(admin_client: AsyncClient, world
     # Cores and GB, the units an administrator types, rather than the milli-cores
     # and mebibytes Kubernetes is written in.
     assert body["limits"]["maxCpuCoresPerUser"] == 8
-    assert body["limits"]["maxMemoryGbPerUser"] == 16
+    assert body["limits"]["maxMemoryGbPerUser"] == -1
+    assert body["limits"]["maxStorageGbPerUser"] == 100
 
 
 async def test_resource_group_catalogue_is_readable_by_a_plain_user(

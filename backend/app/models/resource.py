@@ -232,8 +232,11 @@ class ResourceGroupLimit(Base, TimestampMixin):
     max_gpu_per_user: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     #: Cores one user may reserve in this pool. ``-1`` = not checked.
     max_cpu_cores_per_user: Mapped[int] = mapped_column(Integer, nullable=False, default=8)
-    #: Memory in GB one user may reserve in this pool. ``-1`` = not checked.
-    max_memory_gb_per_user: Mapped[int] = mapped_column(Integer, nullable=False, default=16)
+    #: Memory in GB one user may reserve in this pool. ``-1`` = not checked, and that
+    #: is the default: memory is governed by the chosen resource spec (which carries
+    #: its own request/limit) plus the namespace's LimitRange, not by a quota. A pool
+    #: that genuinely needs a ceiling can still set one here.
+    max_memory_gb_per_user: Mapped[int] = mapped_column(Integer, nullable=False, default=-1)
     #: The one dimension still enforced outside the compute gate: storage is
     #: charged when a volume is registered, not when a workload runs.
     max_storage_gb_per_user: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
